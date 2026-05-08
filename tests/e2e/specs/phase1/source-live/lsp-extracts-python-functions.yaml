@@ -21,12 +21,15 @@ setup:
     assert: [{ type: exit_code, expected: 0 }]
 
 steps:
-  # Probes that `selectors test` ran source.live ingestion + resolver
-  # end-to-end and returned the JSON envelope shape. Match-strength
-  # caveat documented on the TS spec applies symmetrically.
-  - name: selectors_test_targets_python_validate
+  # Strong probe: outcome=bound + the parser-extracted qualified_name
+  # (dotted-path module rule: `checkout/validator.py` →
+  # `checkout.validator.<class>.<method>`) + via_anchor confirming the
+  # qualified_name anchor resolved (rather than a fallback). Mirrors the
+  # lsp-extracts-{go,ts}-functions strong-probe template.
+  - name: selectors_test_resolves_to_extracted_python_entity
     command: graph-harness selectors test CheckoutValidator --json
     assert:
       - { type: exit_code, expected: 0 }
-      - { type: contains, value: '"selector_id":"CheckoutValidator"' }
-      - { type: contains, value: '"outcome":' }
+      - { type: contains, value: '"outcome":"bound"' }
+      - { type: contains, value: '"qualified_name":"checkout.validator.CheckoutValidator.validate"' }
+      - { type: contains, value: '"via_anchor":"qualified_name"' }
