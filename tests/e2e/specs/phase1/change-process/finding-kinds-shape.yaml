@@ -10,10 +10,10 @@ description: >
   fires under the new pipeline wiring).
 tags: [phase1, change-process, p1t30, p1t31]
 order: 40
-features: [p1-multi-language]
 requires:
   - cgo
   - tree-sitter
+  - feature:p1-multi-language
 repo:
   helper: go-module-with-checkout-validator
 
