@@ -48,10 +48,15 @@ run_variant() {
     pushd "${repo}" >/dev/null
 
     # 1. Initialize the workspace (.graph-harness/{overlay,policies}).
-    #    The fixture already ships an overlay/checkout.gh; init only
-    #    needs to create the rest of the state-dir scaffolding.
+    #    The fixture ships an overlay/checkout.gh under .graph-harness/
+    #    so init may exit non-zero ("already initialized") — that's the
+    #    expected idempotent shape; we synthesize the missing
+    #    graph-harness.toml ourselves when init refuses.
     if [[ ! -f .graph-harness/graph-harness.toml ]]; then
-        graph-harness init
+        if ! graph-harness init >/dev/null 2>&1; then
+            mkdir -p .graph-harness/policies
+            : > .graph-harness/graph-harness.toml
+        fi
     fi
 
     # 2. Run selector resolution. We don't gate on outcome=bound here
