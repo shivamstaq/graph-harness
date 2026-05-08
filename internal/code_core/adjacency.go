@@ -407,6 +407,15 @@ func scanStrings(rows *sql.Rows) ([]string, error) {
 	return out, rows.Err()
 }
 
+// DeleteEntity removes an entity by ID. Used by the change.process tests
+// and by future P3 SymbolDeleted event handlers; production deletes flow
+// through the unifier so this method is intentionally narrow (no cascade
+// beyond the FK-driven cleanup of code_entity_provenance).
+func (s *Store) DeleteEntity(ctx context.Context, id string) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM code_entities WHERE id = ?`, id)
+	return err
+}
+
 // CountByKind returns how many entities of a given kind are stored.
 func (s *Store) CountByKind(ctx context.Context, kind EntityKind) (int, error) {
 	row := s.db.QueryRowContext(ctx,

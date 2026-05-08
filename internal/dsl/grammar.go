@@ -176,9 +176,17 @@ type FlowStep struct {
 	Targets *Target `"targets" @@`
 }
 
-// Target is the resolution target for a step. v0 supports inline-selector form.
+// Target is the resolution target for a step. Two forms are accepted:
+//
+//	targets selector { qualified_name "X.Y" }   // inline selector
+//	targets CheckoutValidator                    // named-selector reference
+//
+// The inline form is the SPEC §11.2 canonical example; the named form
+// references an upstream `selector NAME { … }` declaration in scope.
+// Exactly one of InlineSelector / SelectorName is non-nil after parse.
 type Target struct {
-	InlineSelector *InlineSelector `"selector" @@`
+	InlineSelector *InlineSelector `  "selector" @@`
+	SelectorName   string          `| @Ident`
 }
 
 // InlineSelector is a one-off selector with anchors literal-encoded.
