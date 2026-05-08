@@ -367,6 +367,52 @@ func (c *resolutionCache) put(key string, atSeq uint64, env *ResolutionEnvelope,
 	`, key, atSeq, envJSON, traceJSON)
 }
 
+// PriorAt returns the most recent cache entry for selectorName whose
+// resolved_at is strictly less than seq. Used by change.process to detect
+// unresolved_anchor findings: a selector that was bound at seq-1 but is
+// unresolved at seq fires the finding (SPEC §8.2 + plan §P1.T30).
+//
+// The lookup is keyed on the selector's *current* AST hash, so an
+// unrelated authoring edit between runs intentionally invalidates the
+// prior entry — the comparison only fires when the same selector
+// definition transitions outcomes due to code-side drift.
+func (r *Resolver) PriorAt(ctx context.Context, name string, seq uint64) (*ResolutionEnvelope, bool, error) {
+	sel, ok := r.overlay.Selectors[name]
+	if !ok {
+		return nil, false, fmt.Errorf("selector %q not found in overlay", name)
+	}
+	key := selectorCacheKey(sel)
+	return r.cache.priorAt(ctx, key, seq)
+}
+
+func (c *resolutionCache) priorAt(_ context.Context, key string, seq uint64) (*ResolutionEnvelope, bool, error) {
+	c.mu.RLock()
+	if e, ok := c.entries[key]; ok && e.resolvedAt < seq {
+		c.mu.RUnlock()
+		return e.envelope, true, nil
+	}
+	c.mu.RUnlock()
+	if c.db == nil {
+		return nil, false, nil
+	}
+	row := c.db.QueryRow(
+		`SELECT envelope FROM selector_resolution_cache
+		 WHERE selector_key = ? AND resolved_at < ?
+		 ORDER BY resolved_at DESC LIMIT 1`, key, seq)
+	var envJSON []byte
+	if err := row.Scan(&envJSON); err != nil {
+		if err == sql.ErrNoRows {
+			return nil, false, nil
+		}
+		return nil, false, err
+	}
+	var env ResolutionEnvelope
+	if err := json.Unmarshal(envJSON, &env); err != nil {
+		return nil, false, err
+	}
+	return &env, true, nil
+}
+
 // invalidate drops every cached envelope. Called on subscribed drift events.
 func (c *resolutionCache) invalidate() {
 	c.mu.Lock()
