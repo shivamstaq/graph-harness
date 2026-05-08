@@ -51,24 +51,31 @@ func openCodeStore(ws *daemon.Workspace) (*code_core.Store, *sql.DB, error) {
 	return store, db, nil
 }
 
-// indexWorkspaceCode walks the workspace, parses every .go file, and ingests
-// entities into code.core. Idempotent: re-running is cheap because identity
-// is content-addressable.
+// indexWorkspaceCode walks the workspace, parses every supported source
+// file (Go / TypeScript / TSX / JS / JSX / Python) via the multi-language
+// dispatcher, and ingests entities into code.core. Per SPEC §6.11 the P1
+// scope extends ingestion beyond Go; LSP and SCIP feeds layer on top via
+// their own packages when their drivers / indexes are available.
+//
+// Idempotent: re-running is cheap because identity is content-addressable.
+// Files that fail to parse are skipped (with a degraded-quality fact path
+// in source_live.Watcher for the live-edit case); a parse error here does
+// not abort the whole index.
 func indexWorkspaceCode(ctx context.Context, ws *daemon.Workspace, store *code_core.Store, log *facts.EventLog) error {
 	root := ws.Root
-	files, err := goFilesUnder(root)
+	files, err := sourceFilesUnder(root)
 	if err != nil {
 		return err
 	}
 	for _, abs := range files {
-		// #nosec G304 -- abs originates from goFilesUnder under workspace root
+		// #nosec G304 -- abs originates from sourceFilesUnder under workspace root
 		data, err := os.ReadFile(abs)
 		if err != nil {
 			continue
 		}
 		rel, _ := filepath.Rel(root, abs)
-		pf, err := source_live.ParseGoFile(rel, data)
-		if err != nil {
+		pf, err := source_live.ParseFile(rel, data)
+		if err != nil || pf == nil {
 			continue
 		}
 		seq := uint64(0)
@@ -82,23 +89,31 @@ func indexWorkspaceCode(ctx context.Context, ws *daemon.Workspace, store *code_c
 	return nil
 }
 
-func goFilesUnder(root string) ([]string, error) {
+// sourceFilesUnder walks root and returns absolute paths for every file
+// whose extension matches one of the languages source_live supports
+// (Go / TypeScript / TSX / JS / JSX / Python). Mirrors the directory
+// pruning used by source_live.Watcher so workspace indexing and live
+// watching see the same file set.
+func sourceFilesUnder(root string) ([]string, error) {
 	var out []string
 	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return nil // tolerate transient errors
 		}
 		if d.IsDir() {
-			// Skip hidden + vendored + build dirs.
 			name := d.Name()
-			if strings.HasPrefix(name, ".") || name == "vendor" || name == "node_modules" || name == "bin" || name == "dist" {
+			if strings.HasPrefix(name, ".") ||
+				name == "vendor" || name == "node_modules" ||
+				name == "bin" || name == "dist" || name == "build" ||
+				name == "venv" || name == ".venv" || name == "__pycache__" ||
+				name == "target" {
 				if path != root {
 					return filepath.SkipDir
 				}
 			}
 			return nil
 		}
-		if strings.HasSuffix(path, ".go") {
+		if source_live.LanguageOf(path) != "" {
 			out = append(out, path)
 		}
 		return nil

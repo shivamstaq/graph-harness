@@ -1,17 +1,12 @@
 --- a/checkout/validator.py
 +++ b/checkout/validator.py
-@@ -23,11 +23,13 @@ class CheckoutValidator:
+@@ -23,7 +23,9 @@ class CheckoutValidator:
      """Runs cart-level invariant checks before payment is authorized."""
 
-     def validate(self, cart: Cart) -> None:
--        """Validate a cart. Raises ValueError if any invariant fails."""
-+        """Validate a cart. Raises ValueError if any invariant fails. (unreviewed edit)"""
-+        # unreviewed edit: belt-and-suspenders sanity check
+-    def validate(self, cart: Cart) -> None:
++    # unreviewed edit: belt-and-suspenders sanity check
++    def validate(self, cart: Cart) -> None:
++        marker = "edit-marker"
+         """Validate a cart. Raises ValueError if any invariant fails."""
          if cart is None:
              raise ValueError("cart is required")
-         if not isinstance(cart.items, list):
-             raise ValueError("items must be a list")
-         for item in cart.items:
-             if item.quantity <= 0:
-                 raise ValueError("quantity must be positive")
-+        return None
