@@ -95,6 +95,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/selectors/test", s.handle(s.apiSelectorTest))
 	s.mux.HandleFunc("/api/overlay/save", s.handle(s.apiOverlaySave))
 	s.mux.HandleFunc("/api/conflicts", s.handle(s.apiConflicts))
+	s.mux.HandleFunc("/api/entity/provenance", s.handle(s.apiEntityProvenance))
 	s.mux.Handle("/", http.StripPrefix("/", s.guarded(http.FileServer(http.FS(spa)))))
 }
 
@@ -182,4 +183,12 @@ func (s *Server) apiOverlaySave(_ http.ResponseWriter, r *http.Request) (any, er
 
 func (s *Server) apiConflicts(_ http.ResponseWriter, r *http.Request) (any, error) {
 	return s.svc.ConflictsList(r.Context())
+}
+
+func (s *Server) apiEntityProvenance(_ http.ResponseWriter, r *http.Request) (any, error) {
+	var p jsonrpc.EntityProvenanceParams
+	if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
+		return nil, fmt.Errorf("decode: %w", err)
+	}
+	return s.svc.EntityProvenance(r.Context(), p)
 }

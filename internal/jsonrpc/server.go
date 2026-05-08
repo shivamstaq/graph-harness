@@ -170,6 +170,8 @@ func (s *Server) registerBuiltins() {
 
 	Register(s, "overlay.save", "overlay", svc.OverlaySave)
 
+	Register(s, "entity.provenance", "selectors", svc.EntityProvenance)
+
 	Register(s, "mcp.before_edit", "mcp", svc.MCPBeforeEdit)
 	Register(s, "mcp.after_edit", "mcp", svc.MCPAfterEdit)
 
