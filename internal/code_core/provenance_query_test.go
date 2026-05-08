@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"math/rand/v2"
+	"strings"
 	"testing"
 
 	"github.com/shivamstaq/graph-harness/internal/source_live"
@@ -133,5 +134,77 @@ func TestFoldProvenance_Empty(t *testing.T) {
 	got := foldProvenance(nil)
 	if got.SourceCount != 0 {
 		t.Errorf("empty fold should yield zero summary; got %+v", got)
+	}
+}
+
+// TestEntityView_JSONShape pins the wire format. Studio's drill-down
+// JS, the MCP gh://entity/... resource body, and the JSON-RPC
+// envelope all read these keys; renaming a struct field without
+// updating its `json:` tag would silently break every consumer.
+// Snake_case matches the rest of the JSON-RPC surface.
+func TestEntityView_JSONShape(t *testing.T) {
+	t.Parallel()
+	view := EntityView{
+		Entity: Entity{
+			ID:                  "abc",
+			Kind:                KindFunction,
+			LanguageID:          "go",
+			QualifiedName:       "pkg.Fn",
+			NormalizedSignature: "(int) error",
+		},
+		Provenance: ProvenanceView{
+			Summary: ProvenanceSummary{
+				SourceCount:   2,
+				Confidence:    0.9,
+				Freshness:     FreshnessLive,
+				LatestSeenSeq: 7,
+				SourceClasses: []SourceClass{SourceClassLSP, SourceClassTreesitter},
+			},
+			Sources: []SourceEntry{
+				{
+					SourceClass: SourceClassLSP,
+					Confidence:  0.9,
+					LastSeenSeq: 7,
+					Freshness:   FreshnessLive,
+					ProducedBy:  "extractor:lsp:gopls",
+				},
+			},
+		},
+	}
+	buf, err := json.Marshal(view)
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+	got := string(buf)
+	// Required snake_case keys — break this test if you rename
+	// without updating the json tag.
+	required := []string{
+		`"entity":`, `"provenance":`,
+		`"id":"abc"`, `"kind":"Function"`, `"language_id":"go"`,
+		`"qualified_name":"pkg.Fn"`, `"normalized_signature":"(int) error"`,
+		`"summary":`, `"sources":`,
+		`"source_count":2`, `"confidence":0.9`, `"freshness":"live"`,
+		`"latest_seen_seq":7`, `"source_classes":`,
+		`"source_class":"live_lsp"`, `"last_seen_seq":7`,
+		`"produced_by":"extractor:lsp:gopls"`,
+	}
+	for _, key := range required {
+		if !strings.Contains(got, key) {
+			t.Errorf("EntityView JSON missing %s; got: %s", key, got)
+		}
+	}
+	// Forbidden PascalCase keys — these would mean a field lost its
+	// json tag. Match on full key names so we don't catch substrings
+	// of legitimate values.
+	forbidden := []string{
+		`"Entity":`, `"Provenance":`, `"Summary":`, `"Sources":`,
+		`"SourceClass":`, `"Confidence":`, `"LastSeenSeq":`, `"Freshness":`,
+		`"SourceCount":`, `"LanguageID":`, `"QualifiedName":`,
+		`"NormalizedSignature":`,
+	}
+	for _, key := range forbidden {
+		if strings.Contains(got, key) {
+			t.Errorf("EntityView JSON leaked PascalCase key %s; missing struct tag?", key)
+		}
 	}
 }

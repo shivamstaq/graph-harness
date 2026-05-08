@@ -34,8 +34,8 @@ var ErrEntityNotFound = errors.New("code.core: entity not found")
 // need a streaming subscription should subscribe to `code.core` events
 // directly via the kernel.
 type EntityView struct {
-	Entity     Entity
-	Provenance ProvenanceView
+	Entity     Entity         `json:"entity"`
+	Provenance ProvenanceView `json:"provenance"`
 }
 
 // ProvenanceView wraps the per-source claim list with a folded
@@ -47,8 +47,8 @@ type EntityView struct {
 // Sources is the canonical-ordered (by SourceClass) list of
 // individual claims; Summary is the fold result.
 type ProvenanceView struct {
-	Summary ProvenanceSummary
-	Sources []SourceEntry
+	Summary ProvenanceSummary `json:"summary"`
+	Sources []SourceEntry     `json:"sources"`
 }
 
 // ProvenanceSummary is the §4.5 fold output specialized for
@@ -77,11 +77,11 @@ type ProvenanceView struct {
 //     Sources. Useful for "agreed by LSP+SCIP+ts"
 //     chip rendering.
 type ProvenanceSummary struct {
-	SourceCount   int
-	Confidence    float64
-	Freshness     Freshness
-	LatestSeenSeq uint64
-	SourceClasses []SourceClass
+	SourceCount   int           `json:"source_count"`
+	Confidence    float64       `json:"confidence"`
+	Freshness     Freshness     `json:"freshness"`
+	LatestSeenSeq uint64        `json:"latest_seen_seq"`
+	SourceClasses []SourceClass `json:"source_classes"`
 }
 
 // LookupEntity returns the EntityView for the given ID. Returns
