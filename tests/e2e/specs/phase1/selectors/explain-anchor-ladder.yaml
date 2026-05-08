@@ -32,19 +32,22 @@ setup:
     # CheckoutValidatorStale uses a wrong qualified_name → must fall through
     # to function_signature → reanchored.
     command: |
-      sh -c "mkdir -p .graph-harness/overlay && cat > .graph-harness/overlay/checkout.gh <<'EOF'
+      bash -c '
+      mkdir -p .graph-harness/overlay
+      cat > .graph-harness/overlay/checkout.gh << "GHEOF"
       selector CheckoutValidatorPrimary {
-        anchor qualified_name \"checkout.CheckoutValidator.Validate\"
+        anchor qualified_name "checkout.CheckoutValidator.Validate"
         anchor function_signature sig(any) -> error
-        anchor body_hash \"sha256:never-matches\"
+        anchor body_hash "sha256:never-matches"
       }
 
       selector CheckoutValidatorStale {
-        anchor qualified_name \"checkout.CheckoutValidator.NameThatDoesNotExist\"
+        anchor qualified_name "checkout.CheckoutValidator.NameThatDoesNotExist"
         anchor function_signature sig(any) -> error
-        anchor body_hash \"sha256:never-matches\"
+        anchor body_hash "sha256:never-matches"
       }
-      EOF"
+      GHEOF
+      '
     assert:
       - { type: exit_code, expected: 0 }
 
