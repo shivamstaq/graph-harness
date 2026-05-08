@@ -1,0 +1,29 @@
+# yaml-language-server: $schema=https://github.com/shivamstaq/gotit/raw/main/schema/spec.schema.json
+spec_version: 1
+name: scenario-1-three-languages
+description: 'Phase-1 bench scenario 1 (auth-sensitive edit) — `graph-harness bench --scenario 1 --regime mature` runs cleanly against a workspace seeded with the polyglot fixture overlay. Cross-language detection-axis scoring is exercised end-to-end by `tests/smoke/p1/demo.sh` (invoked by `just smoke`); this spec covers the gotit-runnable contract.'
+tags: [phase1, bench, polyglot, p1t41]
+order: 50
+requires:
+  - cgo
+  - tree-sitter
+  - feature:p1-multi-language
+
+repo:
+  helper: go-module-with-checkout-validator
+
+setup:
+  - name: init_workspace
+    command: graph-harness init
+    assert: [{ type: exit_code, expected: 0 }]
+  - name: install_overlay
+    command: sh -c "mkdir -p .graph-harness/overlay && cp demo.checkout.gh .graph-harness/overlay/checkout.gh"
+    assert: [{ type: exit_code, expected: 0 }]
+
+steps:
+  - name: bench_scenario_1_runs
+    command: graph-harness bench --scenario 1 --regime mature
+    assert:
+      - { type: exit_code, expected: 0 }
+      - { type: contains, value: "detection_axis" }
+      - { type: contains, value: "flow_unreviewed:CheckoutValidation" }

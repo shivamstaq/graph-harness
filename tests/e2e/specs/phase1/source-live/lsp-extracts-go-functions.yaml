@@ -16,6 +16,12 @@ setup:
   - name: init_workspace
     command: graph-harness init
     assert: [{ type: exit_code, expected: 0 }]
+  # The helper pre-stages demo.checkout.gh in the workspace root; install
+  # it under .graph-harness/overlay/ so `selectors test` finds the
+  # selector. Mirrors the lsp-extracts-{ts,python}-functions specs.
+  - name: install_overlay
+    command: sh -c "mkdir -p .graph-harness/overlay && cp demo.checkout.gh .graph-harness/overlay/checkout.gh"
+    assert: [{ type: exit_code, expected: 0 }]
 
 steps:
   - name: selectors_test_resolves_via_lsp_or_treesitter

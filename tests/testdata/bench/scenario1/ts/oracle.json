@@ -6,7 +6,7 @@
     {
       "kind": "flow_unreviewed",
       "severity": "medium",
-      "subject_qualified_name": "CheckoutValidator.validate",
+      "subject_qualified_name": "validator.CheckoutValidator.validate",
       "flow": "CheckoutValidation"
     }
   ]
