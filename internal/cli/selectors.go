@@ -42,7 +42,7 @@ func newSelectorsTestCmd() *cobra.Command {
 			}
 			defer func() { _ = db.Close() }()
 
-			if err := indexWorkspaceCode(ctx, ws, store, log); err != nil {
+			if err := indexWorkspaceCodeWithOptions(ctx, ws, store, log, extractOptionsFromFlags(cmd)); err != nil {
 				return err
 			}
 			overlay, err := loadOverlay(ws)
@@ -81,6 +81,7 @@ func newSelectorsTestCmd() *cobra.Command {
 	}
 	c.Flags().Bool("json", false, "emit envelope as JSON")
 	c.Flags().Bool("explain", false, "print the full multi-anchor ladder evaluation")
+	addExtractorToggleFlags(c)
 	return c
 }
 
@@ -201,7 +202,7 @@ func newValidateDiffCmdReal() *cobra.Command {
 				return err
 			}
 			defer func() { _ = db.Close() }()
-			if err := indexWorkspaceCode(ctx, ws, store, log); err != nil {
+			if err := indexWorkspaceCodeWithOptions(ctx, ws, store, log, extractOptionsFromFlags(cmd)); err != nil {
 				return err
 			}
 			overlay, err := loadOverlay(ws)
