@@ -53,6 +53,18 @@ type Entity struct {
 	KindTag       string // §6.12 catch-all + anonymous-entity discriminator
 	ParentID      string // anonymous entities only
 	Ordinal       uint32 // anonymous entities only
+
+	// Per-language normalized signature for Function / Method entities.
+	// Populated by the unifier from normalize.ForLanguage(language_id, raw).
+	// Stored alongside the entity so selector anchors (function_signature)
+	// can match without recomputing from source.
+	NormalizedSignature string
+
+	// Fingerprints used by selector anchors (SPEC §3.1 signature family).
+	// Optional: extractors that emit these populate them; evaluators that
+	// need them degrade gracefully when absent.
+	SymbolFingerprint string
+	ASTHash           string
 }
 
 // FileID = sha256(workspace_relative_path) per SPEC §6.12.
