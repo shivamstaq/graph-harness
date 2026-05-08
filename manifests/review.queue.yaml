@@ -7,10 +7,15 @@ metadata:
     - semantic.overlay@^0.1.0
   description: >
     Proposal lifecycle layer. Mediates writes from non-trusted sources
-    (agents, importers) into authoritative layers. Phase 0 ships a working
-    subset of the state machine: submitted | pending_review | accepted |
-    rejected | promoted. Full 9-state machine + per-layer promotion modes
-    land in P4.
+    (agents, importers) into authoritative layers. Phase 1 ships:
+    submitted | needs_evidence | pending_review | accepted | rejected |
+    promoted. The remaining `superseded` / `accepted_with_edits` /
+    `deferred` states + per-layer promotion modes land in P4.
+
+    Per-proposal-kind evidence requirements (SPEC §10.4) are loaded from
+    layer manifests at install time via review_queue.Queue.LoadRequirements
+    and enforced on Submit; missing evidence routes the proposal to
+    `needs_evidence` until AddEvidence supplies the missing items.
 
 schema:
   entity_kinds:

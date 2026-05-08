@@ -7,19 +7,20 @@
 //	pending → accepted / accepted_with_edits / rejected / deferred /
 //	          needs_evidence / resolved (+ edit_requested)
 //
-// Phase 0 ships a working subset:
+// Phase 1 ships:
 //
-//	submitted | pending_review | accepted | rejected | promoted
+//	submitted | needs_evidence | pending_review | accepted | rejected | promoted
 //
-// Auto-validation is JSON-AST schema check only. Promotion mode is
-// `human_only` for every layer in P0. Conflict-as-event scaffolded but
-// only selector-overlap detected; invariant-contradiction lands in P3.
+// `needs_evidence` is reached automatically on Submit when the per-kind
+// evidence requirements declared in layer manifests (SPEC §10.4) are not
+// satisfied; AddEvidence promotes back to `pending_review` once the gaps
+// are filled. Promotion mode is `human_only` for every layer in P1.
+// Conflict-as-event covers selector-overlap; invariant-contradiction lands
+// in P3.
 //
 // Trust-policy enforcement: writes from non-`direct_writes_from` sources
 // auto-convert to Proposals (SPEC §5.4 + §10.2).
 //
-// SPEC: §10 (review queue lifecycle), §5.4 (trust policy).
-//
-// Phase 0 tasks: P0.T37 (manifest), P0.T38 (state machine + trust enforcement),
-// P0.T39 (selector-overlap conflict detection), P0.T40 (CLI).
+// SPEC: §10 (review queue lifecycle), §5.4 (trust policy), §10.4 (evidence
+// requirements per proposal type).
 package review_queue
