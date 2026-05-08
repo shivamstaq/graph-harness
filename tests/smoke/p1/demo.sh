@@ -30,6 +30,14 @@ fi
 # put a stale graph-harness on $PATH.
 PATH="${ROOT}/bin:${PATH}"
 
+# The smoke exercises the tree-sitter → code.core → change.process →
+# bench path end-to-end. LSP cold-start (gopls / tsserver / pyright) on
+# a fresh fixture is multi-second and not what this smoke is gating —
+# disable it so the demo runs in a predictable few seconds. Specs that
+# actually want LSP (lsp-extracts-*-functions) gate on the toolchain
+# being on PATH and run separately under gotit.
+export GRAPH_HARNESS_DISABLE_LSP=1
+
 WORK=$(mktemp -d)
 trap 'rm -rf "${WORK}"' EXIT
 
