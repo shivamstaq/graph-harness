@@ -1,10 +1,16 @@
 // Package tui implements the terminal cockpit (charmbracelet/bubbletea).
 //
-// Phase 0 ships a read-only skeleton: two views — workspace status and
-// finding list — and a clean Ctrl-C exit. Full lifecycle (review queue
-// accept/reject/defer, finding suppress, plan adherence overlay) lands in P4.
+// Views (read-only, navigable with tab/shift-tab):
+//
+//  1. Workspace status   — root, last_seq, overlay decl count, daemon status
+//  2. Findings           — change.process findings (hydrated when validate
+//     is run from the TUI; otherwise an empty list)
+//  3. Conflicts (P1.I)   — live SymbolDisambiguation events streamed from
+//     the daemon's conflicts.list — one row per claim
+//     with the source(s) reporting it.
+//
+// Ctrl-C / q exit cleanly. Full lifecycle (review queue accept/reject/defer,
+// finding suppress, plan adherence overlay) lands in P4.
 //
 // SPEC: §9.5 (TUI), §11.3 (authoring UX — TUI is read-mostly).
-//
-// Phase 0 tasks: P0.T41 (skeleton + two views).
 package tui

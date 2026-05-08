@@ -11,19 +11,7 @@ import (
 // Stub commands. Each leaf prints the populating P0.T task and exits 1.
 // As tasks land, the commands graduate out of this file.
 
-func newDaemonCmd() *cobra.Command {
-	c := &cobra.Command{
-		Use:   "daemon",
-		Short: "Manage the workspace daemon (lazy-spawn lifecycle)",
-	}
-	c.AddCommand(
-		&cobra.Command{Use: "start", Short: "Start the daemon", RunE: stub("P0.T12")},
-		&cobra.Command{Use: "stop", Short: "Stop the daemon", RunE: stub("P0.T12")},
-		&cobra.Command{Use: "status", Short: "Daemon status", RunE: stub("P0.T12")},
-		&cobra.Command{Use: "logs", Short: "Tail daemon logs", RunE: stub("P0.T12")},
-	)
-	return c
-}
+func newDaemonCmd() *cobra.Command { return newDaemonCmdReal() }
 
 func newQueryCmd() *cobra.Command {
 	c := newQueryCmdReal()
