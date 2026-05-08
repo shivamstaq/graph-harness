@@ -92,15 +92,22 @@ func (r *Resolver) Resolve(ctx context.Context, name string, atSeq uint64) (*Res
 //
 // Algorithm:
 //
-//  1. For each anchor in declared order, evaluate. Record (best score,
-//     matches) on the trace.
-//  2. The first anchor (index 0) is the primary. If its best score ≥
-//     thresh.bound → outcome=bound. Else evaluate fallback anchors.
-//  3. The first non-primary anchor with score ≥ thresh.reanchored →
+//  1. Pull any `language_id` anchors out of the ladder — they are
+//     *filters*, not match producers. Their value scopes every
+//     subsequent anchor's match list to entities tagged with that
+//     language. Multiple `language_id` anchors are an OR over the
+//     filter set. The trace records the filter as a single rung so
+//     `--explain` shows which language(s) were enforced.
+//  2. For each remaining anchor in declared order, evaluate. Record
+//     (best score, matches) on the trace.
+//  3. The first non-filter anchor (index 0 after filtering) is the
+//     primary. If its best score ≥ thresh.bound → outcome=bound. Else
+//     evaluate fallback anchors.
+//  4. The first non-primary anchor with score ≥ thresh.reanchored →
 //     outcome=reanchored.
-//  4. If a primary anchor scored above reanchored but below bound and no
-//     fallback fired, treat it as reanchored.
-//  5. Otherwise outcome=unresolved.
+//  5. If a primary anchor scored above reanchored but below bound and
+//     no fallback fired, treat it as reanchored.
+//  6. Otherwise outcome=unresolved.
 //
 // Cardinality: a `unique` selector with > 1 match degrades to
 // outcome=unresolved with a "cardinality_violation" reason on the trace
@@ -114,14 +121,27 @@ func (r *Resolver) evaluate(ctx context.Context, sel *dsl.Selector, atSeq uint64
 	}
 	trace := make([]AnchorTrace, 0, len(sel.Anchors))
 
+	// Pull out language_id filters; the remaining anchors form the ladder.
+	langFilter, ladder, langTraceIndex := splitLanguageFilter(sel.Anchors)
+	if langFilter != nil {
+		trace = append(trace, AnchorTrace{
+			Index:  langTraceIndex,
+			Kind:   "language_id",
+			Marker: "anchor",
+			Reason: fmt.Sprintf("filter active: language_id ∈ %v (applied to every subsequent anchor's match set)", langFilter.allowed),
+		})
+	}
+
 	var (
 		primaryWeak    *AnchorTrace
 		primaryMatches []anchors.Match
 	)
-	for i, a := range sel.Anchors {
+	for i, lp := range ladder {
+		a := lp.anchor
 		matches, err := anchors.Evaluate(ctx, a, r.store)
+		matches = applyLanguageFilter(langFilter, matches)
 		t := AnchorTrace{
-			Index:   i,
+			Index:   lp.originalIndex,
 			Kind:    a.Kind,
 			Marker:  a.Marker,
 			Matches: matches,
@@ -136,33 +156,32 @@ func (r *Resolver) evaluate(ctx context.Context, sel *dsl.Selector, atSeq uint64
 			continue
 		case len(matches) == 0:
 			t.Reason = "no candidates matched"
+			if langFilter != nil {
+				t.Reason += fmt.Sprintf(" (after language_id filter ∈ %v)", langFilter.allowed)
+			}
 			t.Skipped = true
 			trace = append(trace, t)
 			continue
 		}
 
-		// Primary anchor (index 0): bound if score ≥ thresh.Bound.
+		// Primary anchor (ladder index 0): bound if score ≥ thresh.Bound.
 		if i == 0 {
 			t.Threshold = thresh.Bound
 			if bestScore >= thresh.Bound {
-				if outcome, ok := applyMatches(env, sel, matches, OutcomeBound, "qualified_name"); ok {
+				if outcome, ok := applyMatches(env, sel, matches, OutcomeBound, a.Kind); ok {
 					t.Outcome = string(outcome)
 					t.Reason = fmt.Sprintf("primary anchor scored %.2f ≥ bound %.2f", bestScore, thresh.Bound)
 					trace = append(trace, t)
-					trace = append(trace, skippedRemaining(sel, i+1)...)
+					trace = append(trace, skippedRemainingLadder(ladder, i+1)...)
 					return env, trace
 				}
-				// applyMatches returned !ok → cardinality violation surfaced
-				// below. Fall through to record the trace.
 				t.Outcome = string(OutcomeUnresolved)
 				t.Reason = fmt.Sprintf("primary above bound %.2f but unique-cardinality violated (%d matches)", thresh.Bound, len(matches))
 				trace = append(trace, t)
-				trace = append(trace, skippedRemaining(sel, i+1)...)
+				trace = append(trace, skippedRemainingLadder(ladder, i+1)...)
 				env.Outcome = OutcomeUnresolved
 				return env, trace
 			}
-			// Primary matched, but below bound. Keep as a candidate for
-			// reanchored if no fallback fires.
 			if bestScore >= thresh.Reanchored {
 				captured := t
 				captured.Outcome = string(OutcomeReanchored)
@@ -182,13 +201,13 @@ func (r *Resolver) evaluate(ctx context.Context, sel *dsl.Selector, atSeq uint64
 				t.Outcome = string(outcome)
 				t.Reason = fmt.Sprintf("fallback scored %.2f ≥ reanchored %.2f", bestScore, thresh.Reanchored)
 				trace = append(trace, t)
-				trace = append(trace, skippedRemaining(sel, i+1)...)
+				trace = append(trace, skippedRemainingLadder(ladder, i+1)...)
 				return env, trace
 			}
 			t.Outcome = string(OutcomeUnresolved)
 			t.Reason = fmt.Sprintf("fallback above reanchored %.2f but unique-cardinality violated (%d matches)", thresh.Reanchored, len(matches))
 			trace = append(trace, t)
-			trace = append(trace, skippedRemaining(sel, i+1)...)
+			trace = append(trace, skippedRemainingLadder(ladder, i+1)...)
 			env.Outcome = OutcomeUnresolved
 			return env, trace
 		}
@@ -199,12 +218,13 @@ func (r *Resolver) evaluate(ctx context.Context, sel *dsl.Selector, atSeq uint64
 	// No fallback fired. If the primary scored above reanchored, settle
 	// for reanchored on the primary's matches (the spec treats a weak
 	// primary as a reanchor signal).
-	if primaryWeak != nil {
-		if _, ok := applyMatches(env, sel, primaryMatches, OutcomeReanchored, sel.Anchors[0].Kind); ok {
+	if primaryWeak != nil && len(ladder) > 0 {
+		primaryAnchor := ladder[0].anchor
+		if _, ok := applyMatches(env, sel, primaryMatches, OutcomeReanchored, primaryAnchor.Kind); ok {
 			// Replace the primary's recorded trace with the captured
 			// reanchored disposition so --explain reflects the final pick.
 			for i := range trace {
-				if trace[i].Index == 0 {
+				if trace[i].Index == ladder[0].originalIndex {
 					trace[i] = *primaryWeak
 					break
 				}
@@ -214,15 +234,109 @@ func (r *Resolver) evaluate(ctx context.Context, sel *dsl.Selector, atSeq uint64
 	return env, trace
 }
 
-// skippedRemaining produces a trace entry for every anchor index after the
-// winning one. Used so --explain shows the full ladder annotated with
-// "not consulted: earlier anchor matched".
-func skippedRemaining(sel *dsl.Selector, fromIndex int) []AnchorTrace {
-	out := make([]AnchorTrace, 0, len(sel.Anchors)-fromIndex)
-	for i := fromIndex; i < len(sel.Anchors); i++ {
-		a := sel.Anchors[i]
+// ladderEntry pairs one ladder anchor with its original index in the
+// authored Selector.Anchors slice. The original index is preserved so
+// `--explain` output stays aligned with how the user wrote the selector
+// (language_id filters keep their authored slot in the trace, and the
+// remaining anchors keep their authored numbering even after the filter
+// is pulled out).
+type ladderEntry struct {
+	anchor        *dsl.Anchor
+	originalIndex int
+}
+
+// languageFilterSpec is the post-evaluation filter assembled from every
+// `language_id` anchor on the selector.
+type languageFilterSpec struct {
+	allowed    []string
+	allowedSet map[string]struct{}
+}
+
+// splitLanguageFilter walks the authored anchors, peeling out any
+// `language_id` rungs into a filter spec and returning the rest as the
+// resolution ladder. langTraceIndex is the originalIndex of the first
+// language_id anchor encountered, used to anchor the trace entry.
+func splitLanguageFilter(in []*Anchor) (*languageFilterSpec, []ladderEntry, int) {
+	var (
+		filter         *languageFilterSpec
+		ladder         []ladderEntry
+		firstFilterIdx = -1
+	)
+	for i, a := range in {
+		if a == nil {
+			continue
+		}
+		if a.Kind == "language_id" && a.Value != nil && a.Value.Str != nil {
+			if filter == nil {
+				filter = &languageFilterSpec{allowedSet: map[string]struct{}{}}
+				firstFilterIdx = i
+			}
+			lang := normalizeLanguageAlias(*a.Value.Str)
+			if lang == "" {
+				continue
+			}
+			if _, dup := filter.allowedSet[lang]; !dup {
+				filter.allowedSet[lang] = struct{}{}
+				filter.allowed = append(filter.allowed, lang)
+			}
+			continue
+		}
+		ladder = append(ladder, ladderEntry{anchor: a, originalIndex: i})
+	}
+	return filter, ladder, firstFilterIdx
+}
+
+// applyLanguageFilter intersects matches with the language filter's
+// allow-set. Nil filter passes through unchanged.
+func applyLanguageFilter(f *languageFilterSpec, in []anchors.Match) []anchors.Match {
+	if f == nil || len(f.allowed) == 0 {
+		return in
+	}
+	out := in[:0:len(in)]
+	for _, m := range in {
+		if _, ok := f.allowedSet[normalizeLanguageAlias(m.LanguageID)]; ok {
+			out = append(out, m)
+		}
+	}
+	return out
+}
+
+// normalizeLanguageAlias mirrors anchors.LanguageID's alias table so the
+// resolver's filter matches the evaluator's value semantics. Duplicated
+// here to avoid reaching into the anchors package's unexported helper —
+// any divergence would be a regression caught by language_id_test.go.
+func normalizeLanguageAlias(id string) string {
+	low := make([]byte, len(id))
+	for i := 0; i < len(id); i++ {
+		c := id[i]
+		if c >= 'A' && c <= 'Z' {
+			c += 'a' - 'A'
+		}
+		low[i] = c
+	}
+	switch string(low) {
+	case "go", "golang":
+		return "go"
+	case "ts", "typescript", "javascript", "js", "tsx", "jsx":
+		return "ts"
+	case "py", "python":
+		return "py"
+	}
+	return string(low)
+}
+
+// Anchor type alias to keep this file's signature compact.
+type Anchor = dsl.Anchor
+
+// skippedRemainingLadder produces a trace entry for every ladder anchor
+// after the winning one. Used so --explain shows the full ladder shape
+// annotated with "not consulted: earlier anchor matched".
+func skippedRemainingLadder(ladder []ladderEntry, fromIndex int) []AnchorTrace {
+	out := make([]AnchorTrace, 0, len(ladder)-fromIndex)
+	for i := fromIndex; i < len(ladder); i++ {
+		a := ladder[i].anchor
 		out = append(out, AnchorTrace{
-			Index:   i,
+			Index:   ladder[i].originalIndex,
 			Kind:    a.Kind,
 			Marker:  a.Marker,
 			Skipped: true,

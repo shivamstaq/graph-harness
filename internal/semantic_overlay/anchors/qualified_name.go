@@ -14,20 +14,24 @@ type QualifiedName struct{}
 // Kind returns "qualified_name".
 func (QualifiedName) Kind() string { return "qualified_name" }
 
-// Evaluate looks up a single entity by qualified name and reports it at
-// [ConfidenceQualifiedName]. Missing entity → no matches.
+// Evaluate looks up every entity whose qualified_name matches and reports
+// each at [ConfidenceQualifiedName]. Returning the full candidate set
+// (rather than just the first row) lets `unique` selectors raise
+// cardinality violations and lets a `language_id` filter narrow polyglot
+// matches to one language. Missing entities → no matches.
 func (QualifiedName) Evaluate(ctx context.Context, a *dsl.Anchor, store Lookup) ([]Match, error) {
 	qn := stringValue(a)
 	if qn == "" {
 		return nil, nil
 	}
-	ent, err := store.LookupByQualifiedName(ctx, qn)
+	ents, err := store.LookupAllByQualifiedName(ctx, qn)
 	if err != nil {
 		return nil, err
 	}
-	if ent == nil {
-		return nil, nil
+	out := make([]Match, 0, len(ents))
+	for _, e := range ents {
+		out = append(out, matchFromEntity(e, ConfidenceQualifiedName,
+			fmt.Sprintf("qualified_name == %q", qn)))
 	}
-	return []Match{matchFromEntity(*ent, ConfidenceQualifiedName,
-		fmt.Sprintf("qualified_name == %q", qn))}, nil
+	return out, nil
 }

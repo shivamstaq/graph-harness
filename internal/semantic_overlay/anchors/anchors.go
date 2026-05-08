@@ -40,6 +40,7 @@ type Match struct {
 // type wired in production is *code_core.Store; tests inject a fake.
 type Lookup interface {
 	LookupByQualifiedName(ctx context.Context, qn string) (*code_core.Entity, error)
+	LookupAllByQualifiedName(ctx context.Context, qn string) ([]code_core.Entity, error)
 	LookupByBodyHash(ctx context.Context, bh string) ([]code_core.Entity, error)
 	LookupBySymbolFingerprint(ctx context.Context, fp string) ([]code_core.Entity, error)
 	LookupByASTHash(ctx context.Context, h string) ([]code_core.Entity, error)
@@ -75,6 +76,11 @@ const (
 	ConfidenceCallNeighborBoth  = 0.80
 	ConfidenceCallNeighborOne   = 0.65
 	ConfidencePathGlob          = 0.55
+	// language_id alone is a weak discriminator (many entities share a
+	// language); it scores below the default reanchored threshold so it
+	// only contributes when paired with a higher-precision anchor on the
+	// same selector.
+	ConfidenceLanguageID = 0.50
 )
 
 // Registry returns the default evaluator set. The order is the canonical
@@ -90,6 +96,7 @@ func Registry() map[string]Evaluator {
 		"ast_hash":           ASTHash{},
 		"call_neighborhood":  CallNeighborhood{},
 		"path_glob":          PathGlob{},
+		"language_id":        LanguageID{},
 	}
 }
 

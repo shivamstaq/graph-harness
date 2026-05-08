@@ -1,0 +1,59 @@
+# yaml-language-server: $schema=https://github.com/shivamstaq/gotit/raw/main/schema/spec.schema.json
+spec_version: 1
+name: selector-language-id-anchor
+description: >
+  Plan §7: a selector with `anchor language_id "ts"` filters resolution to
+  TypeScript-tagged code.core entities only, even when the same
+  qualified_name (e.g. `CheckoutValidator.validate`) also exists in Go and
+  Python. The polyglot fixture stitches all three languages into one
+  workspace; with the filter active, resolution must surface only the TS
+  entity. Without the filter, resolution returns matches across all three.
+tags: [phase1, dsl, language-id]
+order: 25
+requires:
+  - cgo
+  - tree-sitter
+  - feature:p1-multi-language
+repo:
+  helper: polyglot-repo-go-ts-py
+
+setup:
+  - name: init_workspace
+    command: graph-harness init
+    assert: [{ type: exit_code, expected: 0 }]
+  - name: install_overlay
+    command: |
+      sh -c "mkdir -p .graph-harness/overlay && cat > .graph-harness/overlay/checkout.gh <<'EOF'
+      selector CheckoutValidatorTS {
+        anchor qualified_name \"CheckoutValidator.validate\"
+        anchor language_id \"ts\"
+      }
+
+      selector CheckoutValidatorAny {
+        anchor qualified_name \"CheckoutValidator.validate\"
+      }
+      EOF"
+    assert: [{ type: exit_code, expected: 0 }]
+
+steps:
+  - name: language_id_filter_narrows_to_ts
+    command: graph-harness selectors test CheckoutValidatorTS --json --explain
+    assert:
+      - { type: exit_code, expected: 0 }
+      - { type: contains, value: "\"outcome\":\"bound\"" }
+      - { type: contains, value: "\"language_id\":\"typescript\"" }
+      - { type: contains, value: "\"kind\":\"language_id\"" }
+      - { type: contains, value: "filter active" }
+      # Must NOT contain the Go or Python language tags in the matches.
+      - { type: not_contains, value: "\"language_id\":\"go\"" }
+      - { type: not_contains, value: "\"language_id\":\"python\"" }
+
+  - name: without_filter_resolution_does_not_constrain_language
+    # The unfiltered selector resolves to one of the polyglot matches; the
+    # exact pick depends on insertion order in code.core, so we just assert
+    # the resolution succeeds (any of the three languages is valid) and the
+    # explain trace does NOT show a language_id rung.
+    command: graph-harness selectors test CheckoutValidatorAny --explain
+    assert:
+      - { type: exit_code, expected: 0 }
+      - { type: not_contains, value: "language_id" }
