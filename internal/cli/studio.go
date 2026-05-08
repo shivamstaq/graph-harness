@@ -1,20 +1,20 @@
 package cli
 
 import (
-	"crypto/rand"
-	"encoding/hex"
+	"context"
 	"fmt"
-	"net"
-	"net/http"
-	"strings"
-	"time"
 
 	"github.com/spf13/cobra"
+
+	"github.com/shivamstaq/graph-harness/internal/daemon"
+	"github.com/shivamstaq/graph-harness/internal/jsonrpc"
+	"github.com/shivamstaq/graph-harness/internal/studio"
 )
 
-// newStudioCmdReal implements `graph-harness studio`. P0.T42: HTTP server
-// bound to loopback only with a per-session token + strict Origin check.
-// SPEC §9.6 — these protections are non-negotiable.
+// newStudioCmdReal implements `graph-harness studio`. Loopback-only HTTP
+// server with per-session token + strict Origin check (SPEC §9.6 — these
+// protections are non-negotiable). Backed by the in-process Service so it
+// shares the workspace's code.core / overlay handles.
 func newStudioCmdReal() *cobra.Command {
 	return &cobra.Command{
 		Use:   "studio",
@@ -27,64 +27,32 @@ func newStudioCmdReal() *cobra.Command {
 			port, _ := cmd.Flags().GetInt("port")
 			oneshot, _ := cmd.Flags().GetBool("oneshot")
 
-			tokenBytes := make([]byte, 16)
-			if _, err := rand.Read(tokenBytes); err != nil {
-				return err
-			}
-			token := hex.EncodeToString(tokenBytes)
+			ctx, cancel := context.WithCancel(cmd.Context())
+			defer cancel()
 
-			mux := http.NewServeMux()
-			mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
-				if !checkAuth(r, token) {
-					http.Error(w, "forbidden", http.StatusForbidden)
-					return
-				}
-				w.WriteHeader(http.StatusOK)
-				_, _ = w.Write([]byte("ok"))
-			})
-			mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-				if !checkAuth(r, token) {
-					http.Error(w, "forbidden", http.StatusForbidden)
-					return
-				}
-				_, _ = fmt.Fprintf(w, "graph-harness studio (P0 skeleton)\nworkspace: %s\n", ws.Root)
-			})
-
-			addr := fmt.Sprintf("127.0.0.1:%d", port)
-			ln, err := net.Listen("tcp", addr)
+			res, err := daemon.Open(ctx, ws)
 			if err != nil {
 				return err
 			}
-			srv := &http.Server{
-				Handler:           mux,
-				ReadHeaderTimeout: 5 * time.Second,
+			defer func() { _ = res.Close() }()
+
+			svc := jsonrpc.NewService(ws, res.Log, res.Code, res.Queue, res.Registry, res.Overlay)
+			srv, err := studio.NewServer(svc)
+			if err != nil {
+				return err
+			}
+			ln, err := srv.Listen(port)
+			if err != nil {
+				return err
 			}
 			out := cmd.OutOrStdout()
-			_, _ = fmt.Fprintf(out, "Studio: http://%s/?token=%s\n", ln.Addr().String(), token)
+			_, _ = fmt.Fprintf(out, "Studio: %s\n", srv.URL(ln.Addr().String()))
 			_, _ = fmt.Fprintln(out, "Bound to loopback; Origin must match http://127.0.0.1:* or http://localhost:*")
 			if oneshot {
 				_ = ln.Close()
 				return nil
 			}
-			return srv.Serve(ln)
+			return srv.Serve(ctx, ln)
 		},
 	}
-}
-
-func checkAuth(r *http.Request, token string) bool {
-	// Token in either query string or X-Studio-Token header.
-	q := r.URL.Query().Get("token")
-	h := r.Header.Get("X-Studio-Token")
-	if q != token && h != token {
-		return false
-	}
-	// Strict origin check (SPEC §9.6) — only allow loopback origins.
-	origin := r.Header.Get("Origin")
-	if origin == "" {
-		return true // no Origin header = same-origin tool/curl: allowed
-	}
-	if !strings.HasPrefix(origin, "http://127.0.0.1") && !strings.HasPrefix(origin, "http://localhost") {
-		return false
-	}
-	return true
 }

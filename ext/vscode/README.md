@@ -1,16 +1,31 @@
 # Graph Harness — VS Code extension
 
-**Status:** placeholder; populated by **P0.T44**.
+The official Graph Harness VS Code extension. Talks to the workspace daemon
+over the same socket / named pipe the CLI uses (SPEC §9.4) — no second
+protocol.
 
-This will be a TypeScript skeleton with:
+## Features
 
-- code lens on `.gh` declarations (live match count from `selectors test`
-  over JSON-RPC),
-- Problems pane integration for `change.process` findings,
-- syntax highlighting via TextMate grammar (LSP-for-DSL deferred to P2+).
+- **Code lens** on `.gh` declarations: hovering over a `selector NAME { ... }`
+  block shows the live match count returned by `selectors.test` over
+  JSON-RPC.
+- **Problems pane**: `change.process` findings hydrate into VS Code's
+  Problems pane via the `graph-harness` diagnostic source.
+- **Cross-language activation** (P1): the extension activates on `.go`,
+  `.ts`, `.tsx`, `.js`, `.jsx`, and `.py` so the multi-LSP host and
+  unifier surface findings regardless of which language was edited.
+- **Syntax highlighting** for `.gh` files via a TextMate grammar
+  (`syntaxes/gh.tmLanguage.json`). Full LSP-for-DSL is deferred (P2+).
 
-Build pipeline: `vsce package`. Sideloaded in P0; marketplace publishing
+## Build
+
+```bash
+npm install
+npm run compile
+npx vsce package      # produces graph-harness-X.Y.Z.vsix
+code --install-extension graph-harness-X.Y.Z.vsix
+```
+
+The extension shells out to the `graph-harness` CLI on the user's `$PATH` for
+RPC calls; the CLI itself proxies to the daemon. Marketplace publishing is
 deferred to P5/P6 (plan §5 risks table).
-
-The extension talks to the same daemon socket / named pipe as the CLI; there
-is no second protocol (SPEC §9.4).
