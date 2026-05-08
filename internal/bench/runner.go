@@ -85,3 +85,58 @@ func Score(scenario Scenario, observed *change_process.ValidateDiffResult, expec
 func (r *Result) AsJSON() ([]byte, error) {
 	return json.MarshalIndent(r, "", "  ")
 }
+
+// MultiResult is the envelope the polyglot bench runner emits when more
+// than one language variant of a scenario was scored. It carries the
+// per-language Result list plus an aggregate detection-axis fold so a
+// single `--language all` invocation produces a JSON document that
+// answers plan §3 gate criterion 10 ("oracle pass rates ≥ 0.8 per
+// language") in one shape.
+type MultiResult struct {
+	Scenario    Scenario           `json:"scenario"`
+	PerLanguage map[string]*Result `json:"per_language"`
+	Aggregate   AxisScore          `json:"aggregate"`
+}
+
+// Aggregate folds per-language detection-axis scores into a single axis
+// score: detection_axis = sum(detected) / sum(expected) over every
+// language. Repair / final-clean axes are propagated as `N/A` until P3.
+//
+// The aggregate is computed in canonical-language order so two equivalent
+// runs produce byte-identical JSON.
+func Aggregate(scenario Scenario, perLang map[string]*Result) MultiResult {
+	out := MultiResult{
+		Scenario:    scenario,
+		PerLanguage: perLang,
+	}
+	totalDetected := 0
+	totalExpected := 0
+	for _, r := range perLang {
+		totalDetected += r.DetectionAxis.Detected
+		totalExpected += r.DetectionAxis.Expected
+	}
+	axis := AxisScore{Detected: totalDetected, Expected: totalExpected}
+	if totalExpected > 0 {
+		axis.Score = float64(totalDetected) / float64(totalExpected)
+	} else if totalExpected == 0 {
+		// All language oracles declared zero expected findings; only
+		// counts as a pass if no findings fired across any language.
+		anyFiring := false
+		for _, r := range perLang {
+			if len(r.Findings) > 0 {
+				anyFiring = true
+				break
+			}
+		}
+		if !anyFiring {
+			axis.Score = 1.0
+		}
+	}
+	out.Aggregate = axis
+	return out
+}
+
+// AsJSON renders a MultiResult as pretty JSON for CLI output.
+func (m MultiResult) AsJSON() ([]byte, error) {
+	return json.MarshalIndent(m, "", "  ")
+}
