@@ -132,6 +132,58 @@ exit 1
 > [!IMPORTANT]
 > **Agent integration.** graph-harness ships an MCP server (`graph-harness mcp`) that any compatible runtime can register as a tool source. The same brief that gates CI is what an agent sees.
 
+### Multi-language quickstart
+
+The same `.gh` selector works across Go, TypeScript, and Python. With Phase-1
+support, a single declaration pins to the equivalent function in each
+language and reports findings uniformly.
+
+```gh
+// .graph-harness/overlay/checkout.gh
+selector CheckoutValidator {
+  unique
+  anchor qualified_name "CheckoutValidator.validate"
+  anchor symbol_fingerprint "f:validate/sig=Cart:void"
+  anchor body_hash "sha256:..."
+  anchor path_glob "**/checkout/validator.{go,ts,py}"
+}
+
+flow CheckoutValidation {
+  description "Pre-payment cart validation, cross-language"
+  scope CheckoutValidator
+  step ValidateCart targets CheckoutValidator
+}
+```
+
+```console
+$ graph-harness selectors test CheckoutValidator --explain
+selector CheckoutValidator
+  outcome:    bound  (cardinality=one → 3 matches across languages)
+    1. code.core:Method  language=go      qualified_name=CheckoutValidator.Validate  via_anchor=qualified_name
+    2. code.core:Method  language=ts      qualified_name=CheckoutValidator.validate  via_anchor=qualified_name
+    3. code.core:Method  language=python  qualified_name=CheckoutValidator.validate  via_anchor=qualified_name
+  resolved_at: kernel_event_seq=4127
+
+$ graph-harness bench --scenario 1 --regime mature
+{ "scenario": {...}, "detection_axis": { "score": 1.0, "detected": 3, "expected": 3 }, ... }
+```
+
+Bench fixtures for the three-language scenario 1 live under
+[`tests/testdata/bench/scenario1/{go,ts,py}/`](tests/testdata/bench/scenario1/).
+The end-to-end multi-language demo automated by
+[`tests/smoke/p1/demo.sh`](tests/smoke/p1/demo.sh) (`just smoke`) drives
+the same fixtures through `init` → `selectors test` → `validate-diff`
+→ `bench` for each language.
+
+Required toolchains for full fact-source coverage (extractors auto-skip
+when missing):
+
+| Language | LSP | SCIP indexer | tree-sitter |
+|---|---|---|---|
+| Go | `gopls` | `scip-go` | bundled |
+| TypeScript / JavaScript | `typescript-language-server` | `scip-typescript` | bundled |
+| Python | `pyright` | `scip-python` | bundled |
+
 ---
 
 ## How it works

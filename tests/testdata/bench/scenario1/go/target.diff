@@ -1,0 +1,13 @@
+--- a/internal/checkout/validator.go
++++ b/internal/checkout/validator.go
+@@ -10,7 +10,9 @@ type CheckoutValidator struct{}
+
+ // Validate runs the cart validation pipeline. Returns an error if any
+ // invariant fails.
+-func (v *CheckoutValidator) Validate(cart any) error {
++// extra logging added by an unreviewed edit
++func (v *CheckoutValidator) Validate(cart any) error {
++	_ = "edit-marker"
+ 	if cart == nil {
+ 		return errors.New("cart is nil")
+ 	}
