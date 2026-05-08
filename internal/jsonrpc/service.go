@@ -467,6 +467,61 @@ func (s *Service) OverlaySave(_ context.Context, p OverlaySaveParams) (OverlaySa
 	}, nil
 }
 
+// EntityProvenanceParams identifies the entity to drill into.
+type EntityProvenanceParams struct {
+	EntityID      string `json:"entity_id,omitempty"`
+	QualifiedName string `json:"qualified_name,omitempty"`
+}
+
+// EntityProvenanceResult is the per-entity drill-down envelope.
+type EntityProvenanceResult struct {
+	Entity   *code_core.Entity       `json:"entity"`
+	Sources  []code_core.SourceEntry `json:"sources"`
+	Resolved uint64                  `json:"resolved_at_kernel_seq"`
+}
+
+// EntityProvenance handles entity.provenance — surfaces the merged
+// provenance record (live LSP / SCIP / tree-sitter claims) for one
+// code.core entity. Used by Studio's entity drill-down (P1.I/T35).
+func (s *Service) EntityProvenance(ctx context.Context, p EntityProvenanceParams) (EntityProvenanceResult, error) {
+	res := EntityProvenanceResult{Resolved: s.Log.LastSeq(), Sources: []code_core.SourceEntry{}}
+	var ent *code_core.Entity
+	var err error
+	switch {
+	case p.EntityID != "":
+		// Direct id lookup.
+		ent, err = s.lookupByID(ctx, p.EntityID)
+	case p.QualifiedName != "":
+		ent, err = s.Code.LookupByQualifiedName(ctx, p.QualifiedName)
+	default:
+		return res, errors.New("entity_id or qualified_name required")
+	}
+	if err != nil {
+		return res, err
+	}
+	if ent == nil {
+		return res, fmt.Errorf("entity not found")
+	}
+	res.Entity = ent
+	src, err := s.Code.GetProvenance(ctx, ent.ID)
+	if err != nil {
+		return res, err
+	}
+	res.Sources = src
+	return res, nil
+}
+
+func (s *Service) lookupByID(ctx context.Context, id string) (*code_core.Entity, error) {
+	// The store doesn't expose a direct LookupByID surface today; fall
+	// through to qualified-name suffix when the id-shaped value happens
+	// to look like a qualified name. Future work in code.core will add
+	// a stable LookupByID. For now, return nil to surface a clear error.
+	if strings.Contains(id, ".") {
+		return s.Code.LookupByQualifiedNameSuffix(ctx, id)
+	}
+	return nil, fmt.Errorf("LookupByID not yet exposed by code.core; use qualified_name")
+}
+
 // MCPBeforeEditParams targets a selector for pre-edit snapshot capture.
 type MCPBeforeEditParams struct {
 	Selector string `json:"selector"`
