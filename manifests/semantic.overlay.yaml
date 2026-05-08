@@ -99,3 +99,22 @@ freshness_states:
   - stale
   - unresolved
   - superseded
+
+# SPEC §10.4: per-proposal-kind evidence requirements. Auto-validation
+# (review_queue.Submit) routes proposals missing required evidence to the
+# `needs_evidence` state until the submitter (CLI / agent / importer) tops
+# up the missing items.
+proposal_evidence_requirements:
+  invariant_proposal:
+    required:
+      - { kind: symbol,          min_count: 1 }
+      - { kind: test_or_pattern, min_count: 1 }
+    description_min_length: 50
+  flow_proposal:
+    required:
+      - { kind: entry_symbol }
+      - { kind: at_least_one_step }
+  anchor_update:
+    required:
+      - { kind: drift_signal }
+      - { kind: candidate_match, min_confidence: 0.7 }

@@ -5,10 +5,12 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/spf13/cobra"
 
 	"github.com/shivamstaq/graph-harness/internal/daemon"
+	"github.com/shivamstaq/graph-harness/internal/kernel"
 	"github.com/shivamstaq/graph-harness/internal/review_queue"
 )
 
@@ -26,6 +28,19 @@ func openReviewQueue(ws *daemon.Workspace) (*review_queue.Queue, *sql.DB, error)
 	}
 	q, err := review_queue.NewQueue(db)
 	if err != nil {
+		_ = db.Close()
+		return nil, nil, err
+	}
+	// Auto-load per-proposal-kind evidence requirements (SPEC §10.4) declared
+	// across embedded layer manifests. Call ordering is name-sorted; Queue
+	// merges definitions across manifests.
+	if err := kernel.WalkEmbeddedManifests(func(name string, data []byte) error {
+		if loadErr := q.LoadRequirements(data); loadErr != nil {
+			return fmt.Errorf("load evidence requirements from %s: %w",
+				strings.TrimSuffix(name, ".yaml"), loadErr)
+		}
+		return nil
+	}); err != nil {
 		_ = db.Close()
 		return nil, nil, err
 	}
@@ -156,13 +171,34 @@ func newReviewCmdReal() *cobra.Command {
 			kind, _ := cmd.Flags().GetString("kind")
 			author, _ := cmd.Flags().GetString("author")
 			payload, _ := cmd.Flags().GetString("payload")
+			description, _ := cmd.Flags().GetString("description")
+			evidenceJSON, _ := cmd.Flags().GetString("evidence")
+			var evidence []review_queue.EvidenceItem
+			if strings.TrimSpace(evidenceJSON) != "" {
+				if err := json.Unmarshal([]byte(evidenceJSON), &evidence); err != nil {
+					return fmt.Errorf("--evidence: %w", err)
+				}
+			}
 			id, err := q.Submit(context.Background(), review_queue.Proposal{
 				TargetLayer: layer, Kind: kind, Author: author, Payload: []byte(payload),
+				Description: description, Evidence: evidence,
 			})
 			if err != nil {
 				return err
 			}
-			_, _ = fmt.Fprintln(cmd.OutOrStdout(), id)
+			// Echo back the resulting state so submitters see needs_evidence
+			// when their evidence falls short of the manifest requirements.
+			p, _ := q.Get(context.Background(), id)
+			out := cmd.OutOrStdout()
+			_, _ = fmt.Fprintln(out, id)
+			if p != nil {
+				_, _ = fmt.Fprintf(out, "state: %s\n", p.State)
+				if p.State == review_queue.StateNeedsEvidence {
+					for _, m := range p.MissingItems {
+						_, _ = fmt.Fprintf(out, "  missing: %s\n", m)
+					}
+				}
+			}
 			return nil
 		},
 	}
@@ -170,7 +206,38 @@ func newReviewCmdReal() *cobra.Command {
 	submitCmd.Flags().String("kind", "selector", "proposal kind")
 	submitCmd.Flags().String("author", "agent:test", "author tag")
 	submitCmd.Flags().String("payload", "", "JSON payload")
+	submitCmd.Flags().String("description", "", "human-readable proposal description")
+	submitCmd.Flags().String("evidence", "", "evidence as JSON array, e.g. '[{\"kind\":\"symbol\",\"detail\":\"X.Y\"}]'")
 
-	c.AddCommand(listCmd, getCmd, acceptCmd, rejectCmd, submitCmd)
+	addEvidenceCmd := &cobra.Command{
+		Use:   "add-evidence <id>",
+		Short: "Attach evidence to a needs_evidence proposal; auto-promotes when complete",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ws, err := activeWorkspace()
+			if err != nil {
+				return err
+			}
+			q, db, err := openReviewQueue(ws)
+			if err != nil {
+				return err
+			}
+			defer func() { _ = db.Close() }()
+			evidenceJSON, _ := cmd.Flags().GetString("evidence")
+			var evidence []review_queue.EvidenceItem
+			if err := json.Unmarshal([]byte(evidenceJSON), &evidence); err != nil {
+				return fmt.Errorf("--evidence: %w", err)
+			}
+			st, err := q.AddEvidence(context.Background(), args[0], evidence)
+			if err != nil {
+				return err
+			}
+			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "state: %s\n", st)
+			return nil
+		},
+	}
+	addEvidenceCmd.Flags().String("evidence", "[]", "evidence items as JSON array")
+
+	c.AddCommand(listCmd, getCmd, acceptCmd, rejectCmd, submitCmd, addEvidenceCmd)
 	return c
 }
