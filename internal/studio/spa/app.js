@@ -106,21 +106,25 @@ document.getElementById("entity-btn").addEventListener("click", async () => {
   out.textContent = "looking up...";
   try {
     const r = await api("/api/entity/provenance", { qualified_name: qn });
-    if (!r.entity) {
+    const view = r.view;
+    if (!view || !view.Entity || !view.Entity.ID) {
       out.textContent = "(no entity matches that qualified_name in code.core)";
       return;
     }
+    const ent = view.Entity;
+    const prov = view.Provenance || {};
     out.textContent = JSON.stringify(
       {
         entity: {
-          id: r.entity.ID,
-          kind: r.entity.Kind,
-          language: r.entity.LanguageID,
-          qualified_name: r.entity.QualifiedName,
-          path: r.entity.Path,
-          body_hash: r.entity.BodyHash,
+          id: ent.ID,
+          kind: ent.Kind,
+          language: ent.LanguageID,
+          qualified_name: ent.QualifiedName,
+          path: ent.Path,
+          body_hash: ent.BodyHash,
         },
-        sources: r.sources.map((s) => ({
+        provenance_summary: prov.Summary || {},
+        sources: (prov.Sources || []).map((s) => ({
           source_class: s.SourceClass,
           confidence: s.Confidence,
           freshness: s.Freshness,
