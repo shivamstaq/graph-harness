@@ -12,13 +12,10 @@
 // a structured envelope (SPEC §3.2) with five outcomes: bound, reanchored,
 // ambiguous, unresolved, superseded.
 //
-// Phase 0 ships single-anchor resolution with outcomes {bound, unresolved}
-// only. Multi-anchor + full 5-outcome lands in P3 alongside drift events.
+// Phase 1 ships the multi-anchor ladder with outcomes {bound, reanchored,
+// unresolved}; the `ambiguous` and `superseded` outcomes remain deferred to
+// P3. Drift-event subscription invalidates the resolution cache lazily.
 //
 // SPEC: §2.3, §3 (selectors), §11 (.gh DSL), §4.8 (event log + overlay
 // canonicality).
-//
-// Phase 0 tasks: P0.T24 (.gh watcher + import events),
-// P0.T25 (Facts adapter + import/materialize cycle),
-// P0.T26 (single-anchor selector resolution + cache invalidation).
 package semantic_overlay

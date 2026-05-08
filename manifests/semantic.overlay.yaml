@@ -9,8 +9,10 @@ metadata:
     Authored durable semantics: Flow, Invariant, Control, Skill, Selector,
     Runbook, Risk label, Boundary, Ownership hint. Source-of-truth is
     .graph-harness/overlay/**/*.gh on disk (git-tracked); SQLite is the
-    index. Phase 0 ships flows + selectors with single-anchor resolution
-    (multi-anchor lands in P3).
+    index. Phase 1 ships flows + selectors with the multi-anchor ladder
+    (qualified_name, function_signature, body_hash, call_neighborhood,
+    symbol_fingerprint, ast_hash, path_glob) and outcomes
+    {bound, reanchored, unresolved}; ambiguous + superseded remain P3.
 
 schema:
   entity_kinds:
