@@ -1,0 +1,42 @@
+# yaml-language-server: $schema=https://github.com/shivamstaq/gotit/raw/main/schema/spec.schema.json
+spec_version: 1
+name: selectors-explain-anchor-ladder
+description: >
+  P1.F: `graph-harness selectors test --explain` prints the per-anchor
+  evaluation trace, showing which anchor matched + the score for each rung.
+tags: [phase1, selectors, p1t29]
+order: 20
+features: [p1-multi-language]
+repo:
+  helper: go-module-with-checkout-validator
+
+requires:
+  - cgo
+  - tree-sitter
+
+setup:
+  - name: init_workspace
+    command: graph-harness init
+    assert:
+      - { type: exit_code, expected: 0 }
+
+  - name: install_overlay
+    command: sh -c "mkdir -p .graph-harness/overlay && cp demo.checkout.gh .graph-harness/overlay/checkout.gh"
+    assert:
+      - { type: exit_code, expected: 0 }
+
+steps:
+  - name: explain_prints_anchor_ladder
+    command: graph-harness selectors test CheckoutValidator --explain
+    assert:
+      - { type: exit_code, expected: 0 }
+      - { type: contains, value: "anchor ladder" }
+      - { type: contains, value: "qualified_name" }
+      - { type: contains, value: "outcome:    bound" }
+
+  - name: explain_json_emits_trace
+    command: graph-harness selectors test CheckoutValidator --explain --json
+    assert:
+      - { type: exit_code, expected: 0 }
+      - { type: contains, value: "\"trace\"" }
+      - { type: contains, value: "\"kind\":\"qualified_name\"" }

@@ -13,9 +13,11 @@ import (
 
 	"github.com/shivamstaq/graph-harness/internal/change_process"
 	"github.com/shivamstaq/graph-harness/internal/facts"
+	"github.com/shivamstaq/graph-harness/internal/semantic_overlay"
 )
 
-// newSelectorsTestCmd implements `graph-harness selectors test <name>` (P0.T27).
+// newSelectorsTestCmd implements `graph-harness selectors test <name>`
+// (P0.T27 + P1.T29: --explain prints the full multi-anchor ladder).
 func newSelectorsTestCmd() *cobra.Command {
 	c := &cobra.Command{
 		Use:   "test <name>",
@@ -47,13 +49,18 @@ func newSelectorsTestCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			env, err := overlay.Resolve(ctx, args[0], store, log.LastSeq())
+			env, trace, err := overlay.ResolveWithTrace(ctx, args[0], store, log.LastSeq())
 			if err != nil {
 				return err
 			}
+			explain, _ := cmd.Flags().GetBool("explain")
 			asJSON, _ := cmd.Flags().GetBool("json")
 			if asJSON {
-				return json.NewEncoder(cmd.OutOrStdout()).Encode(env)
+				payload := map[string]any{"envelope": env}
+				if explain {
+					payload["trace"] = semantic_overlay.SortedTrace(trace)
+				}
+				return json.NewEncoder(cmd.OutOrStdout()).Encode(payload)
 			}
 			out := cmd.OutOrStdout()
 			_, _ = fmt.Fprintf(out, "selector %s\n", env.SelectorID)
@@ -66,11 +73,50 @@ func newSelectorsTestCmd() *cobra.Command {
 				_, _ = fmt.Fprintf(out, "      via_anchor:       %s\n", m.ViaAnchor)
 			}
 			_, _ = fmt.Fprintf(out, "  resolved_at: kernel_event_seq=%d\n", env.ResolvedAt)
+			if explain {
+				printAnchorLadder(out, semantic_overlay.SortedTrace(trace))
+			}
 			return nil
 		},
 	}
 	c.Flags().Bool("json", false, "emit envelope as JSON")
+	c.Flags().Bool("explain", false, "print the full multi-anchor ladder evaluation")
 	return c
+}
+
+// printAnchorLadder writes a human-readable rendering of the per-anchor
+// evaluation trace. Format mirrors the JSON shape so authors can pivot
+// between `--explain` and `--explain --json` without losing context.
+func printAnchorLadder(out io.Writer, trace []semantic_overlay.AnchorTrace) {
+	_, _ = fmt.Fprintln(out, "  anchor ladder:")
+	for _, t := range trace {
+		marker := t.Marker
+		if marker == "" {
+			marker = "anchor"
+		}
+		head := fmt.Sprintf("    [%d] %s %-22s", t.Index, marker, t.Kind)
+		switch {
+		case t.Skipped && t.Outcome == "":
+			_, _ = fmt.Fprintf(out, "%s — skipped (%s)\n", head, t.Reason)
+		case t.Outcome != "":
+			_, _ = fmt.Fprintf(out, "%s — score=%.2f → %s (%s)\n",
+				head, t.BestScore, t.Outcome, t.Reason)
+		default:
+			_, _ = fmt.Fprintf(out, "%s — score=%.2f (threshold=%.2f) %s\n",
+				head, t.BestScore, t.Threshold, t.Reason)
+		}
+		for _, m := range t.Matches {
+			_, _ = fmt.Fprintf(out, "         - %s (id=%s, conf=%.2f) %s\n",
+				m.QualifiedName, shortID(m.EntityID), m.Confidence, m.Detail)
+		}
+	}
+}
+
+func shortID(id string) string {
+	if len(id) <= 12 {
+		return id
+	}
+	return id[:12]
 }
 
 // newFlowsListCmd implements `graph-harness flows list` (P0.T27).

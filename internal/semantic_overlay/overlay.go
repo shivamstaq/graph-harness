@@ -6,7 +6,6 @@ package semantic_overlay
 
 import (
 	"context"
-	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -103,42 +102,29 @@ type ResolutionEnvelope struct {
 	ResolvedAt uint64            `json:"resolved_at_kernel_seq"`
 }
 
-// Resolve runs the qualified-name shortcut against the code.core store. This
-// preserves the P0 single-anchor entry point while task P1.F (the
-// multi-anchor ladder under internal/semantic_overlay/anchors/) is being
-// brought up; once that lands, this method delegates to the ladder
-// evaluator and only the qualified_name anchor still hits the inline path.
+// Resolve runs the multi-anchor selector ladder (SPEC §3.3) against the
+// code.core store. The returned envelope follows SPEC §3.2; per-anchor
+// trace data is available via [ResolveWithTrace] for `--explain`.
+//
+// This method constructs a fresh in-memory resolver per call. Long-running
+// callers (daemon, JSON-RPC service) should construct a [Resolver] with
+// [NewResolver] once, wire drift-event invalidation via
+// [Resolver.WireDriftInvalidation], and reuse across calls — that way the
+// SPEC §6.13 selector_resolution_cache stays warm and lazy-invalidates on
+// SymbolMoved / SymbolRenamed / SignatureChanged / SymbolDeleted events.
 func (o *Overlay) Resolve(ctx context.Context, name string, store *code_core.Store, atSeq uint64) (*ResolutionEnvelope, error) {
-	sel, ok := o.Selectors[name]
-	if !ok {
-		return nil, fmt.Errorf("selector %q not found in overlay", name)
+	env, _, err := o.ResolveWithTrace(ctx, name, store, atSeq)
+	return env, err
+}
+
+// ResolveWithTrace is like [Resolve] but also returns the per-anchor
+// evaluation trace used by `graph-harness selectors test --explain` to
+// describe which anchor matched and why each lower-priority anchor was
+// not consulted.
+func (o *Overlay) ResolveWithTrace(ctx context.Context, name string, store *code_core.Store, atSeq uint64) (*ResolutionEnvelope, []AnchorTrace, error) {
+	r, err := NewResolver(o, store, nil)
+	if err != nil {
+		return nil, nil, err
 	}
-	env := &ResolutionEnvelope{
-		SelectorID: sel.Name,
-		Outcome:    OutcomeUnresolved,
-		ResolvedAt: atSeq,
-	}
-	for _, anchor := range sel.Anchors {
-		if anchor.Kind != "qualified_name" || anchor.Value == nil || anchor.Value.Str == nil {
-			continue
-		}
-		// New P1 anchor value type is *AnchorValue; the qualified_name anchor
-		// keeps its string payload under the same Str field.
-		qn := *anchor.Value.Str
-		ent, err := store.LookupByQualifiedName(ctx, qn)
-		if err != nil {
-			return nil, err
-		}
-		if ent != nil {
-			env.Outcome = OutcomeBound
-			env.Matches = append(env.Matches, ResolutionMatch{
-				EntityID:      ent.ID,
-				QualifiedName: ent.QualifiedName,
-				Confidence:    0.97, // qualified_name exact match (anchor-ladder default for the nominal anchor)
-				ViaAnchor:     "qualified_name",
-			})
-			break
-		}
-	}
-	return env, nil
+	return r.Resolve(ctx, name, atSeq)
 }
