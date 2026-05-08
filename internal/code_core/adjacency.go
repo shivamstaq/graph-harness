@@ -26,17 +26,20 @@ func NewStore(db *sql.DB) (*Store, error) {
 func (s *Store) initSchema() error {
 	const schema = `
 CREATE TABLE IF NOT EXISTS code_entities (
-    id             TEXT PRIMARY KEY,
-    kind           TEXT NOT NULL,
-    language_id    TEXT NOT NULL DEFAULT '',
-    qualified_name TEXT,
-    receiver       TEXT,
-    path           TEXT,
-    body_hash      TEXT,
-    kind_tag       TEXT NOT NULL DEFAULT '',
-    parent_id      TEXT NOT NULL DEFAULT '',
-    ordinal        INTEGER NOT NULL DEFAULT 0,
-    created_seq    INTEGER NOT NULL DEFAULT 0
+    id                   TEXT PRIMARY KEY,
+    kind                 TEXT NOT NULL,
+    language_id          TEXT NOT NULL DEFAULT '',
+    qualified_name       TEXT,
+    receiver             TEXT,
+    path                 TEXT,
+    body_hash            TEXT,
+    kind_tag             TEXT NOT NULL DEFAULT '',
+    parent_id            TEXT NOT NULL DEFAULT '',
+    ordinal              INTEGER NOT NULL DEFAULT 0,
+    normalized_signature TEXT NOT NULL DEFAULT '',
+    symbol_fingerprint   TEXT NOT NULL DEFAULT '',
+    ast_hash             TEXT NOT NULL DEFAULT '',
+    created_seq          INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_code_entities_qn ON code_entities(qualified_name);
 CREATE INDEX IF NOT EXISTS idx_code_entities_kind ON code_entities(kind);
@@ -71,6 +74,12 @@ CREATE INDEX IF NOT EXISTS idx_provenance_source ON code_entity_provenance(sourc
 	if _, err := s.db.Exec(schema); err != nil {
 		return err
 	}
+	// Phase 1 anchor columns. Best-effort ALTER for stores opened before
+	// the columns landed; SQLite errors on duplicates and we intentionally
+	// swallow that — the column either exists already or was just added.
+	_, _ = s.db.Exec(`ALTER TABLE code_entities ADD COLUMN normalized_signature TEXT NOT NULL DEFAULT ''`)
+	_, _ = s.db.Exec(`ALTER TABLE code_entities ADD COLUMN symbol_fingerprint TEXT NOT NULL DEFAULT ''`)
+	_, _ = s.db.Exec(`ALTER TABLE code_entities ADD COLUMN ast_hash TEXT NOT NULL DEFAULT ''`)
 	return s.migrateP0Provenance()
 }
 
@@ -99,8 +108,9 @@ func (s *Store) PutEntity(ctx context.Context, e Entity, createdSeq uint64) erro
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO code_entities
 		    (id, kind, language_id, qualified_name, receiver, path, body_hash,
-		     kind_tag, parent_id, ordinal, created_seq)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		     kind_tag, parent_id, ordinal,
+		     normalized_signature, symbol_fingerprint, ast_hash, created_seq)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
 		    kind = excluded.kind,
 		    language_id = excluded.language_id,
@@ -110,9 +120,13 @@ func (s *Store) PutEntity(ctx context.Context, e Entity, createdSeq uint64) erro
 		    body_hash = excluded.body_hash,
 		    kind_tag = excluded.kind_tag,
 		    parent_id = excluded.parent_id,
-		    ordinal = excluded.ordinal
+		    ordinal = excluded.ordinal,
+		    normalized_signature = excluded.normalized_signature,
+		    symbol_fingerprint = excluded.symbol_fingerprint,
+		    ast_hash = excluded.ast_hash
 	`, e.ID, string(e.Kind), e.LanguageID, e.QualifiedName, e.Receiver,
-		e.Path, e.BodyHash, e.KindTag, e.ParentID, e.Ordinal, createdSeq)
+		e.Path, e.BodyHash, e.KindTag, e.ParentID, e.Ordinal,
+		e.NormalizedSignature, e.SymbolFingerprint, e.ASTHash, createdSeq)
 	return err
 }
 
@@ -185,14 +199,18 @@ func (s *Store) AddRelation(ctx context.Context, relation, fromID, toID string) 
 // resolving touched function names to fully-qualified code.core entities.
 func (s *Store) LookupByQualifiedNameSuffix(ctx context.Context, suffix string) (*Entity, error) {
 	row := s.db.QueryRowContext(ctx,
-		`SELECT id, kind, language_id, qualified_name, receiver, path, body_hash
+		`SELECT id, kind, language_id, qualified_name, receiver, path, body_hash,
+		        kind_tag, parent_id, ordinal,
+		        normalized_signature, symbol_fingerprint, ast_hash
 		 FROM code_entities
 		 WHERE qualified_name = ? OR qualified_name LIKE '%.' || ?
 		 LIMIT 1`, suffix, suffix)
 	var e Entity
 	var kind string
 	var receiver, path, bodyHash sql.NullString
-	if err := row.Scan(&e.ID, &kind, &e.LanguageID, &e.QualifiedName, &receiver, &path, &bodyHash); err != nil {
+	if err := row.Scan(&e.ID, &kind, &e.LanguageID, &e.QualifiedName, &receiver, &path, &bodyHash,
+		&e.KindTag, &e.ParentID, &e.Ordinal,
+		&e.NormalizedSignature, &e.SymbolFingerprint, &e.ASTHash); err != nil {
 		if err == sql.ErrNoRows {
 			return nil, nil
 		}
@@ -209,12 +227,16 @@ func (s *Store) LookupByQualifiedNameSuffix(ctx context.Context, suffix string) 
 // Used by selector resolution.
 func (s *Store) LookupByQualifiedName(ctx context.Context, qn string) (*Entity, error) {
 	row := s.db.QueryRowContext(ctx,
-		`SELECT id, kind, language_id, qualified_name, receiver, path, body_hash
+		`SELECT id, kind, language_id, qualified_name, receiver, path, body_hash,
+		        kind_tag, parent_id, ordinal,
+		        normalized_signature, symbol_fingerprint, ast_hash
 		 FROM code_entities WHERE qualified_name = ? LIMIT 1`, qn)
 	var e Entity
 	var kind string
 	var receiver, path, bodyHash sql.NullString
-	if err := row.Scan(&e.ID, &kind, &e.LanguageID, &e.QualifiedName, &receiver, &path, &bodyHash); err != nil {
+	if err := row.Scan(&e.ID, &kind, &e.LanguageID, &e.QualifiedName, &receiver, &path, &bodyHash,
+		&e.KindTag, &e.ParentID, &e.Ordinal,
+		&e.NormalizedSignature, &e.SymbolFingerprint, &e.ASTHash); err != nil {
 		if err == sql.ErrNoRows {
 			return nil, nil
 		}
@@ -225,6 +247,136 @@ func (s *Store) LookupByQualifiedName(ctx context.Context, qn string) (*Entity, 
 	e.Path = path.String
 	e.BodyHash = bodyHash.String
 	return &e, nil
+}
+
+// LookupByBodyHash returns every entity whose body_hash equals bh. Used by
+// the body_hash anchor evaluator (SPEC §3.1). Empty bh returns no rows
+// (the empty body hash is treated as "no signal", not a wildcard).
+func (s *Store) LookupByBodyHash(ctx context.Context, bh string) ([]Entity, error) {
+	if bh == "" {
+		return nil, nil
+	}
+	return s.queryEntities(ctx,
+		`SELECT id, kind, language_id, qualified_name, receiver, path, body_hash,
+		        kind_tag, parent_id, ordinal,
+		        normalized_signature, symbol_fingerprint, ast_hash
+		 FROM code_entities WHERE body_hash = ?`, bh)
+}
+
+// LookupBySymbolFingerprint returns every entity matching the supplied
+// fingerprint. Empty fp returns no rows.
+func (s *Store) LookupBySymbolFingerprint(ctx context.Context, fp string) ([]Entity, error) {
+	if fp == "" {
+		return nil, nil
+	}
+	return s.queryEntities(ctx,
+		`SELECT id, kind, language_id, qualified_name, receiver, path, body_hash,
+		        kind_tag, parent_id, ordinal,
+		        normalized_signature, symbol_fingerprint, ast_hash
+		 FROM code_entities WHERE symbol_fingerprint = ?`, fp)
+}
+
+// LookupByASTHash returns every entity matching the supplied AST hash.
+// Empty hash returns no rows.
+func (s *Store) LookupByASTHash(ctx context.Context, h string) ([]Entity, error) {
+	if h == "" {
+		return nil, nil
+	}
+	return s.queryEntities(ctx,
+		`SELECT id, kind, language_id, qualified_name, receiver, path, body_hash,
+		        kind_tag, parent_id, ordinal,
+		        normalized_signature, symbol_fingerprint, ast_hash
+		 FROM code_entities WHERE ast_hash = ?`, h)
+}
+
+// LookupFunctions returns every Function/Method entity. Used by the
+// function_signature anchor evaluator and the path_glob evaluator as the
+// candidate set. Avoid in hot paths on large stores; the signature
+// matcher iterates the full result here (P0 indexer scale; P3 will
+// introduce a normalized-signature index).
+func (s *Store) LookupFunctions(ctx context.Context) ([]Entity, error) {
+	return s.queryEntities(ctx,
+		`SELECT id, kind, language_id, qualified_name, receiver, path, body_hash,
+		        kind_tag, parent_id, ordinal,
+		        normalized_signature, symbol_fingerprint, ast_hash
+		 FROM code_entities WHERE kind IN ('Function','Method')`)
+}
+
+// LookupAllEntities returns every entity. Used as the candidate set for
+// path_glob (which is kind-agnostic). Same hot-path caveat applies.
+func (s *Store) LookupAllEntities(ctx context.Context) ([]Entity, error) {
+	return s.queryEntities(ctx,
+		`SELECT id, kind, language_id, qualified_name, receiver, path, body_hash,
+		        kind_tag, parent_id, ordinal,
+		        normalized_signature, symbol_fingerprint, ast_hash
+		 FROM code_entities`)
+}
+
+// CallerNames returns the qualified_name of every entity that calls toID.
+// Used by the call_neighborhood anchor evaluator.
+func (s *Store) CallerNames(ctx context.Context, toID string) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT e.qualified_name FROM code_entities e
+		 JOIN code_relations r ON r.from_id = e.id
+		 WHERE r.relation = 'calls' AND r.to_id = ? AND e.qualified_name IS NOT NULL`, toID)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	return scanStrings(rows)
+}
+
+// CalleeNames returns the qualified_name of every entity called by fromID.
+func (s *Store) CalleeNames(ctx context.Context, fromID string) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT e.qualified_name FROM code_entities e
+		 JOIN code_relations r ON r.to_id = e.id
+		 WHERE r.relation = 'calls' AND r.from_id = ? AND e.qualified_name IS NOT NULL`, fromID)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	return scanStrings(rows)
+}
+
+// queryEntities is the shared row-scanning helper for the multi-row
+// LookupBy* queries above. It assumes the SELECT projects the same column
+// list scanned into Entity.
+func (s *Store) queryEntities(ctx context.Context, query string, args ...any) ([]Entity, error) {
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var out []Entity
+	for rows.Next() {
+		var e Entity
+		var kind string
+		var receiver, path, bodyHash sql.NullString
+		if err := rows.Scan(&e.ID, &kind, &e.LanguageID, &e.QualifiedName,
+			&receiver, &path, &bodyHash, &e.KindTag, &e.ParentID, &e.Ordinal,
+			&e.NormalizedSignature, &e.SymbolFingerprint, &e.ASTHash); err != nil {
+			return nil, err
+		}
+		e.Kind = EntityKind(kind)
+		e.Receiver = receiver.String
+		e.Path = path.String
+		e.BodyHash = bodyHash.String
+		out = append(out, e)
+	}
+	return out, rows.Err()
+}
+
+func scanStrings(rows *sql.Rows) ([]string, error) {
+	var out []string
+	for rows.Next() {
+		var s string
+		if err := rows.Scan(&s); err != nil {
+			return nil, err
+		}
+		out = append(out, s)
+	}
+	return out, rows.Err()
 }
 
 // CountByKind returns how many entities of a given kind are stored.
