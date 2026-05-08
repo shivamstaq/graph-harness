@@ -29,11 +29,11 @@ import (
 // Match is one resolved entity reference together with the evaluator's
 // per-anchor confidence. Higher is more confident, in [0, 1].
 type Match struct {
-	EntityID      string
-	QualifiedName string
-	LanguageID    string
-	Confidence    float64
-	Detail        string
+	EntityID      string  `json:"entity_id"`
+	QualifiedName string  `json:"qualified_name"`
+	LanguageID    string  `json:"language_id"`
+	Confidence    float64 `json:"confidence"`
+	Detail        string  `json:"detail,omitempty"`
 }
 
 // Lookup is the minimal store API every evaluator depends on. The concrete
