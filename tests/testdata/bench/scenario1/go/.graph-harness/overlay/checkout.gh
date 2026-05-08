@@ -2,7 +2,7 @@ selector CheckoutValidator {
   unique
   anchor qualified_name "checkout.CheckoutValidator.Validate"
   anchor symbol_fingerprint "f:Validate/sig=any:error"
-  anchor body_hash "sha256:replace-on-rebake"
+  anchor body_hash "sha256:d2e5d354ec5e82f8dbc1e07c562f6bf5e0866f41afc9ee5ca22718a5296b62aa"
 }
 
 flow CheckoutValidation {
