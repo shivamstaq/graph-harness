@@ -1,0 +1,71 @@
+# yaml-language-server: $schema=https://github.com/shivamstaq/gotit/raw/main/schema/spec.schema.json
+spec_version: 1
+name: three-source-disagreement-emits-symbol-disambiguation
+description: >
+  When LSP and SCIP report a function with different signatures (because a
+  stale .scip-index/ file is committed alongside source where gopls sees the
+  fresh signature), the unifier records both canonical IDs as separate entities
+  AND emits a code.core.SymbolDisambiguation event whose payload carries every
+  source's claim. Gate criterion 5 (plan §3) and SPEC §6.12 conflict-as-event.
+tags: [phase1, code-core, unification, p1t18, p1t20]
+order: 31
+requires:
+  - cgo
+  - tree-sitter
+  - gopls
+  - scip-go
+  - feature:p1-multi-language
+  # Skipped until T-extractors wires LSP + SCIP into the production
+  # ingestion path. The unifier only emits SymbolDisambiguation when
+  # at least two real sources produce divergent canonical IDs at the
+  # same source-text location.
+  - feature:p1-extractor-wiring
+repo:
+  helper: go-module-with-checkout-validator
+
+setup:
+  - name: init_workspace
+    command: graph-harness init
+    assert: [{ type: exit_code, expected: 0 }]
+  - name: install_overlay
+    command: sh -c "mkdir -p .graph-harness/overlay && cp demo.checkout.gh .graph-harness/overlay/checkout.gh"
+    assert: [{ type: exit_code, expected: 0 }]
+  # Edit the source so its signature differs from the (stale) shipped
+  # .scip-index/ file — this is what creates the LSP/SCIP disagreement
+  # in the polyglot fixture.
+  - name: drift_signature_from_scip_index
+    command: sh -c "sed -i.bak 's/Validate(cart any)/Validate(cart any, ctx string)/' internal/checkout/validator.go"
+    assert: [{ type: exit_code, expected: 0 }]
+  - name: refresh_scip_against_stale_index
+    command: graph-harness scip refresh
+    assert: [{ type: exit_code, expected: 0 }]
+
+steps:
+  - name: selector_still_resolves
+    # Resolution still finds at least one match — the unifier records
+    # both candidate entities and the resolver picks via the multi-
+    # anchor ladder. The key assertion is on the events stream.
+    command: graph-harness selectors test CheckoutValidator --json
+    assert:
+      - { type: exit_code, expected: 0 }
+
+  - name: symbol_disambiguation_event_emitted
+    command: graph-harness code events --kind SymbolDisambiguation --json
+    assert:
+      - { type: exit_code, expected: 0 }
+      - { type: contains, value: "\"kind\":\"SymbolDisambiguation\"" }
+      - { type: contains, value: "\"layer\":\"code.core\"" }
+      # Payload must carry every source's claim — gate criterion 5.
+      - { type: contains, value: "\"claims\":[" }
+      - { type: contains, value: "\"source_class\":\"live_lsp\"" }
+      - { type: contains, value: "\"source_class\":\"index_scip\"" }
+
+  - name: both_canonical_ids_persisted
+    # Two distinct canonical IDs for the same logical function: one from
+    # the LSP/treesitter consensus, one from the stale SCIP. Querying
+    # by qualified_name returns one of them; the disambiguation event
+    # carries both IDs in its claims[].
+    command: graph-harness code provenance "checkout.CheckoutValidator.Validate" --json
+    assert:
+      - { type: exit_code, expected: 0 }
+      - { type: contains, value: "\"qualified_name\":\"checkout.CheckoutValidator.Validate\"" }
