@@ -6,15 +6,16 @@ package code_core
 import (
 	"crypto/sha256"
 	"encoding/hex"
-	"regexp"
-	"strings"
 )
 
-// EntityKind enumerates the kinds materialized into code.core in P0.
-// Single-source (tree-sitter) per plan §P0.T21.
+// EntityKind enumerates the kinds materialized into code.core. The set
+// covers structural entities recovered by all three fact sources (LSP,
+// SCIP, tree-sitter); per-language normalization of names/signatures
+// lives in the [normalize] package.
 type EntityKind string
 
-// Phase 0 entity kinds materialized by code.core.
+// Entity kinds materialized by code.core. The catch-all `Symbol` kind
+// (SPEC §6.12) joins this set when the three-source unifier lands.
 const (
 	KindFile     EntityKind = "File"
 	KindFunction EntityKind = "Function"
@@ -52,30 +53,6 @@ func MethodID(languageID, receiverQN, methodName, normalizedSig string) string {
 func TypeDeclID(languageID, qualifiedName string) string {
 	return sha256Hex(languageID + "\x00" + qualifiedName)
 }
-
-// NormalizeGoSignature collapses whitespace and trims so formatting-only
-// edits do not change a function's identity. Per SPEC §6.12 the normalizer
-// is per-language and pluggable; the P0 implementation is intentionally
-// conservative — full type-aware normalization (param-name elision, generic
-// param canonicalization) requires LSP/SCIP-grade analysis that lands in P1.
-//
-// The body_hash anchor in selectors handles formatting equivalence at the
-// semantic level until then.
-func NormalizeGoSignature(sig string) string {
-	s := whitespaceRE.ReplaceAllString(sig, " ")
-	s = strings.TrimSpace(s)
-	// Trim spaces directly inside parentheses and brackets so
-	// `( a int )` and `(a int)` produce the same canonical form.
-	s = openParenSpaceRE.ReplaceAllString(s, "$1")
-	s = closeParenSpaceRE.ReplaceAllString(s, "$1")
-	return s
-}
-
-var (
-	whitespaceRE      = regexp.MustCompile(`\s+`)
-	openParenSpaceRE  = regexp.MustCompile(`([\(\[])\s+`)
-	closeParenSpaceRE = regexp.MustCompile(`\s+([\)\]])`)
-)
 
 func sha256Hex(s string) string {
 	h := sha256.Sum256([]byte(s))
