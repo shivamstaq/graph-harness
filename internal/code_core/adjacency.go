@@ -223,6 +223,34 @@ func (s *Store) LookupByQualifiedNameSuffix(ctx context.Context, suffix string) 
 	return &e, nil
 }
 
+// LookupEntityByID fetches an entity by its content-addressable ID.
+// Returns (nil, nil) when no entity with id exists. The query API in
+// [provenance_query.go] uses this; surface adapters receiving an ID
+// via selector binding can use it directly.
+func (s *Store) LookupEntityByID(ctx context.Context, id string) (*Entity, error) {
+	row := s.db.QueryRowContext(ctx,
+		`SELECT id, kind, language_id, qualified_name, receiver, path, body_hash,
+		        kind_tag, parent_id, ordinal,
+		        normalized_signature, symbol_fingerprint, ast_hash
+		 FROM code_entities WHERE id = ? LIMIT 1`, id)
+	var e Entity
+	var kind string
+	var receiver, path, bodyHash sql.NullString
+	if err := row.Scan(&e.ID, &kind, &e.LanguageID, &e.QualifiedName, &receiver, &path, &bodyHash,
+		&e.KindTag, &e.ParentID, &e.Ordinal,
+		&e.NormalizedSignature, &e.SymbolFingerprint, &e.ASTHash); err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, err
+	}
+	e.Kind = EntityKind(kind)
+	e.Receiver = receiver.String
+	e.Path = path.String
+	e.BodyHash = bodyHash.String
+	return &e, nil
+}
+
 // LookupByQualifiedName returns the first entity matching qn (case-sensitive).
 // Used by selector resolution.
 func (s *Store) LookupByQualifiedName(ctx context.Context, qn string) (*Entity, error) {
