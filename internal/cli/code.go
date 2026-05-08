@@ -58,7 +58,7 @@ func newCodeListCmd() *cobra.Command {
 				return err
 			}
 			defer func() { _ = db.Close() }()
-			if err := indexWorkspaceCode(ctx, ws, store, log); err != nil {
+			if err := indexWorkspaceCodeWithOptions(ctx, ws, store, log, extractOptionsFromFlags(cmd)); err != nil {
 				return err
 			}
 
@@ -98,6 +98,7 @@ func newCodeListCmd() *cobra.Command {
 	c.Flags().String("qualified-name", "", "filter by exact qualified_name")
 	c.Flags().String("language", "", "filter by language_id (e.g. go, typescript, python)")
 	c.Flags().Bool("json", false, "emit one EntityView NDJSON line per row")
+	addExtractorToggleFlags(c)
 	return c
 }
 
@@ -139,7 +140,7 @@ func newCodeProvenanceCmd() *cobra.Command {
 				return err
 			}
 			defer func() { _ = db.Close() }()
-			if err := indexWorkspaceCode(ctx, ws, store, log); err != nil {
+			if err := indexWorkspaceCodeWithOptions(ctx, ws, store, log, extractOptionsFromFlags(cmd)); err != nil {
 				return err
 			}
 
@@ -190,15 +191,17 @@ func newCodeProvenanceCmd() *cobra.Command {
 
 			asJSON, _ := cmd.Flags().GetBool("json")
 			if asJSON {
-				enc := json.NewEncoder(cmd.OutOrStdout())
-				enc.SetIndent("", "  ")
-				return enc.Encode(view)
+				// Compact (no SetIndent) — e2e specs use `contains`
+				// assertions against the raw JSON string and expect
+				// no whitespace between key/value separators.
+				return json.NewEncoder(cmd.OutOrStdout()).Encode(view)
 			}
 			return renderEntityView(cmd, view)
 		},
 	}
 	c.Flags().Bool("json", false, "emit EntityView as JSON")
 	c.Flags().String("language", "", "narrow lookup to a specific language_id (e.g. go, python) — required when the positional arg is a qualified_name that collides across languages")
+	addExtractorToggleFlags(c)
 	return c
 }
 
@@ -281,7 +284,7 @@ func newCodeEventsCmd() *cobra.Command {
 				return err
 			}
 			defer func() { _ = db.Close() }()
-			if err := indexWorkspaceCode(ctx, ws, store, log); err != nil {
+			if err := indexWorkspaceCodeWithOptions(ctx, ws, store, log, extractOptionsFromFlags(cmd)); err != nil {
 				return err
 			}
 
@@ -331,5 +334,6 @@ func newCodeEventsCmd() *cobra.Command {
 	}
 	c.Flags().String("kind", "", "filter by event kind (e.g. SymbolDisambiguation)")
 	c.Flags().Bool("json", false, "emit NDJSON, one event per line")
+	addExtractorToggleFlags(c)
 	return c
 }

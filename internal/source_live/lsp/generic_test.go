@@ -37,7 +37,7 @@ func TestFlattenDocumentSymbols(t *testing.T) {
 			SelectionRange: rangeT{Start: position{Line: 7}, End: position{Line: 7, Character: 6}},
 		},
 	}
-	out := d.flattenDocumentSymbols(syms, "validator.go", nil)
+	out := d.flattenDocumentSymbols(syms, "validator.go", nil, nil)
 	if len(out) != 3 {
 		t.Fatalf("flatten produced %d symbols, want 3: %+v", len(out), out)
 	}
@@ -90,7 +90,7 @@ func TestFlattenSymbolInformation_Legacy(t *testing.T) {
 			},
 		},
 	}
-	out := d.flattenSymbolInformation(flat, "validator.ts")
+	out := d.flattenSymbolInformation(flat, "validator.ts", nil)
 	if len(out) != 1 {
 		t.Fatalf("got %d symbols, want 1", len(out))
 	}
