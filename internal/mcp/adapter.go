@@ -1,0 +1,486 @@
+package mcp
+
+import (
+	"bufio"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"strings"
+	"sync"
+
+	"github.com/shivamstaq/graph-harness/internal/jsonrpc"
+)
+
+// Adapter is the MCP server (server-role; the agent is the client). It speaks
+// MCP over stdio in line-delimited JSON-RPC 2.0 (newline-delimited JSON
+// messages, one request/response per line). The agent invokes:
+//
+//	initialize, tools/list, tools/call, resources/list, resources/read,
+//	prompts/list, prompts/get, notifications/initialized
+//
+// Each tool call is delegated into the in-process jsonrpc.Service so the
+// adapter stays a thin curated façade — there is no second protocol or
+// second copy of business logic.
+type Adapter struct {
+	svc     *jsonrpc.Service
+	openSvc func() (*jsonrpc.Service, error)
+
+	mu    sync.Mutex
+	tools map[string]toolHandler
+	res   map[string]resourceHandler
+}
+
+// service returns the live jsonrpc.Service. With a lazy adapter, the first
+// caller pays the workspace-open cost; subsequent callers reuse the cached
+// handle.
+func (a *Adapter) service() (*jsonrpc.Service, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.svc != nil {
+		return a.svc, nil
+	}
+	if a.openSvc == nil {
+		return nil, errors.New("mcp adapter has no service bound")
+	}
+	svc, err := a.openSvc()
+	if err != nil {
+		return nil, err
+	}
+	a.svc = svc
+	return svc, nil
+}
+
+type toolHandler struct {
+	desc   ToolDescriptor
+	handle func(ctx context.Context, args json.RawMessage) (any, error)
+}
+
+type resourceHandler struct {
+	desc   ResourceDescriptor
+	handle func(ctx context.Context) (any, error)
+}
+
+// ToolDescriptor is the wire shape returned by tools/list.
+type ToolDescriptor struct {
+	Name        string         `json:"name"`
+	Description string         `json:"description"`
+	InputSchema map[string]any `json:"inputSchema"`
+}
+
+// ResourceDescriptor is the wire shape returned by resources/list.
+type ResourceDescriptor struct {
+	URI         string `json:"uri"`
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	MimeType    string `json:"mimeType,omitempty"`
+}
+
+// NewAdapter builds an adapter wired to the given service.
+func NewAdapter(svc *jsonrpc.Service) *Adapter {
+	a := &Adapter{
+		svc:   svc,
+		tools: map[string]toolHandler{},
+		res:   map[string]resourceHandler{},
+	}
+	a.registerTools()
+	a.registerResources()
+	return a
+}
+
+// NewLazyAdapter builds an adapter that fetches the underlying service on
+// the first tool/resource call. Static surface methods (tools/list,
+// resources/list, initialize, prompts/list, prompts/get) succeed regardless
+// of workspace state; tools/call + resources/read invoke openSvc and
+// surface its error as a structured tool result.
+//
+// This shape lets `graph-harness mcp` advertise its surface in any cwd (so
+// agents can introspect what's available) while still requiring an
+// initialized workspace for actual graph operations.
+func NewLazyAdapter(openSvc func() (*jsonrpc.Service, error)) *Adapter {
+	// Register descriptors against a sentinel service that errors on every
+	// call; the dispatcher swaps in the real service via openSvc on first
+	// tools/call.
+	a := &Adapter{
+		tools:   map[string]toolHandler{},
+		res:     map[string]resourceHandler{},
+		openSvc: openSvc,
+	}
+	// Build a placeholder Adapter to enumerate tool descriptors; the
+	// handlers are then re-bound to a getSvc-wrapped form so they always
+	// see the live service.
+	// Handlers in registerTools/registerResources call a.service() so they
+	// pick up the lazily-opened service on first invocation; the
+	// descriptors (Name/Description/InputSchema) bind immediately.
+	a.registerTools()
+	a.registerResources()
+	return a
+}
+
+// registerTools wires the curated v0 + P1 tool surface.
+func (a *Adapter) registerTools() {
+	stringSchema := func(prop string, desc string) map[string]any {
+		return map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				prop: map[string]any{"type": "string", "description": desc},
+			},
+			"required": []string{prop},
+		}
+	}
+
+	a.tools["explore"] = toolHandler{
+		desc: ToolDescriptor{
+			Name:        "explore",
+			Description: "Resolve a named selector and report its bound entities + neighborhood.",
+			InputSchema: stringSchema("selector", "name of a selector defined in the workspace overlay"),
+		},
+		handle: func(ctx context.Context, args json.RawMessage) (any, error) {
+			var p struct {
+				Selector string `json:"selector"`
+			}
+			if err := json.Unmarshal(args, &p); err != nil {
+				return nil, err
+			}
+			svc, err := a.service()
+			if err != nil {
+				return nil, err
+			}
+			return svc.SelectorsTest(ctx, jsonrpc.SelectorsTestParams{Name: p.Selector})
+		},
+	}
+	a.tools["validate_diff"] = toolHandler{
+		desc: ToolDescriptor{
+			Name:        "validate_diff",
+			Description: "Run change.process against a unified diff and report findings.",
+			InputSchema: stringSchema("diff", "unified diff (text)"),
+		},
+		handle: func(ctx context.Context, args json.RawMessage) (any, error) {
+			var p struct {
+				Diff string `json:"diff"`
+			}
+			if err := json.Unmarshal(args, &p); err != nil {
+				return nil, err
+			}
+			svc, err := a.service()
+			if err != nil {
+				return nil, err
+			}
+			return svc.ValidateDiff(ctx, jsonrpc.ValidateDiffParams{Diff: p.Diff})
+		},
+	}
+	a.tools["get_context"] = toolHandler{
+		desc: ToolDescriptor{
+			Name:        "get_context",
+			Description: "Fetch flow / invariant / control evidence for a selector.",
+			InputSchema: stringSchema("selector", "name of a selector or qualified_name to surface evidence for"),
+		},
+		handle: func(ctx context.Context, args json.RawMessage) (any, error) {
+			var p struct {
+				Selector string `json:"selector"`
+			}
+			if err := json.Unmarshal(args, &p); err != nil {
+				return nil, err
+			}
+			svc, err := a.service()
+			if err != nil {
+				return nil, err
+			}
+			env, err := svc.SelectorsTest(ctx, jsonrpc.SelectorsTestParams{Name: p.Selector})
+			if err != nil {
+				return nil, err
+			}
+			flows, err := svc.FlowsList(ctx)
+			if err != nil {
+				return nil, err
+			}
+			// Surface flows whose declared scope matches the selector.
+			scoped := make([]any, 0)
+			for _, f := range flows.Flows {
+				if f.Scope == p.Selector {
+					scoped = append(scoped, f)
+				}
+			}
+			return map[string]any{
+				"selector":     p.Selector,
+				"resolution":   env,
+				"scoped_flows": scoped,
+				"invariants":   []any{}, // populated in P3
+				"controls":     []any{}, // populated in P3
+				"resolved_at":  env.ResolvedAt,
+			}, nil
+		},
+	}
+	a.tools["query"] = toolHandler{
+		desc: ToolDescriptor{
+			Name:        "query",
+			Description: "Parse a DSL source string and return its canonical AST envelope.",
+			InputSchema: stringSchema("source", ".gh / DSL source"),
+		},
+		handle: func(ctx context.Context, args json.RawMessage) (any, error) {
+			var p struct {
+				Source string `json:"source"`
+			}
+			if err := json.Unmarshal(args, &p); err != nil {
+				return nil, err
+			}
+			svc, err := a.service()
+			if err != nil {
+				return nil, err
+			}
+			return svc.QueryParse(ctx, jsonrpc.QueryParseParams{Source: p.Source})
+		},
+	}
+	// P1.T38 — before_edit / after_edit
+	a.tools["before_edit"] = toolHandler{
+		desc: ToolDescriptor{
+			Name:        "before_edit",
+			Description: "Snapshot selector resolution + body-hash anchors before an edit.",
+			InputSchema: stringSchema("selector", "selector the agent is about to edit"),
+		},
+		handle: func(ctx context.Context, args json.RawMessage) (any, error) {
+			var p struct {
+				Selector string `json:"selector"`
+			}
+			if err := json.Unmarshal(args, &p); err != nil {
+				return nil, err
+			}
+			svc, err := a.service()
+			if err != nil {
+				return nil, err
+			}
+			return svc.MCPBeforeEdit(ctx, jsonrpc.MCPBeforeEditParams{Selector: p.Selector})
+		},
+	}
+	a.tools["after_edit"] = toolHandler{
+		desc: ToolDescriptor{
+			Name:        "after_edit",
+			Description: "Validate a unified diff produced by an edit and report findings.",
+			InputSchema: stringSchema("diff", "unified diff produced after the edit"),
+		},
+		handle: func(ctx context.Context, args json.RawMessage) (any, error) {
+			var p struct {
+				Diff string `json:"diff"`
+			}
+			if err := json.Unmarshal(args, &p); err != nil {
+				return nil, err
+			}
+			svc, err := a.service()
+			if err != nil {
+				return nil, err
+			}
+			return svc.MCPAfterEdit(ctx, jsonrpc.MCPAfterEditParams{Diff: p.Diff})
+		},
+	}
+}
+
+// registerResources wires the resource surface (one example per phase).
+func (a *Adapter) registerResources() {
+	a.res["gh://workspace/status"] = resourceHandler{
+		desc: ResourceDescriptor{
+			URI:         "gh://workspace/status",
+			Name:        "Workspace status",
+			Description: "Current workspace + last_seq summary",
+			MimeType:    "application/json",
+		},
+		handle: func(ctx context.Context) (any, error) {
+			svc, err := a.service()
+			if err != nil {
+				return nil, err
+			}
+			return svc.Status(ctx)
+		},
+	}
+}
+
+// --- protocol --------------------------------------------------------------
+
+type rpcReq struct {
+	JSONRPC string          `json:"jsonrpc"`
+	ID      any             `json:"id,omitempty"`
+	Method  string          `json:"method"`
+	Params  json.RawMessage `json:"params,omitempty"`
+}
+
+type rpcResp struct {
+	JSONRPC string    `json:"jsonrpc"`
+	ID      any       `json:"id,omitempty"`
+	Result  any       `json:"result,omitempty"`
+	Error   *rpcError `json:"error,omitempty"`
+}
+
+type rpcError struct {
+	Code    int    `json:"code"`
+	Message string `json:"message"`
+	Data    any    `json:"data,omitempty"`
+}
+
+// Serve runs the MCP server over the given streams (stdio in production).
+func (a *Adapter) Serve(ctx context.Context, in io.Reader, out io.Writer) error {
+	scanner := bufio.NewScanner(in)
+	scanner.Buffer(make([]byte, 1024*1024), 8*1024*1024)
+	enc := json.NewEncoder(out)
+	for scanner.Scan() {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		line := scanner.Bytes()
+		if len(strings.TrimSpace(string(line))) == 0 {
+			continue
+		}
+		var req rpcReq
+		if err := json.Unmarshal(line, &req); err != nil {
+			_ = enc.Encode(rpcResp{JSONRPC: "2.0", Error: &rpcError{Code: -32700, Message: err.Error()}})
+			continue
+		}
+		resp := a.dispatch(ctx, req)
+		// Notifications (no id) get no reply.
+		if req.ID == nil && req.Method != "" && strings.HasPrefix(req.Method, "notifications/") {
+			continue
+		}
+		if err := enc.Encode(resp); err != nil {
+			return err
+		}
+	}
+	return scanner.Err()
+}
+
+func (a *Adapter) dispatch(ctx context.Context, req rpcReq) rpcResp {
+	resp := rpcResp{JSONRPC: "2.0", ID: req.ID}
+	switch req.Method {
+	case "initialize":
+		resp.Result = map[string]any{
+			"protocolVersion": "2024-11-05",
+			"serverInfo": map[string]string{
+				"name":    "graph-harness",
+				"version": "0.1.0-dev",
+			},
+			"capabilities": map[string]any{
+				"tools":     map[string]any{"listChanged": false},
+				"resources": map[string]any{"listChanged": false},
+				"prompts":   map[string]any{"listChanged": false},
+			},
+		}
+	case "tools/list":
+		a.mu.Lock()
+		out := make([]ToolDescriptor, 0, len(a.tools))
+		for _, t := range a.tools {
+			out = append(out, t.desc)
+		}
+		a.mu.Unlock()
+		// stable order
+		sortTools(out)
+		resp.Result = map[string]any{"tools": out}
+	case "tools/call":
+		var p struct {
+			Name      string          `json:"name"`
+			Arguments json.RawMessage `json:"arguments"`
+		}
+		if err := json.Unmarshal(req.Params, &p); err != nil {
+			resp.Error = &rpcError{Code: -32602, Message: err.Error()}
+			return resp
+		}
+		a.mu.Lock()
+		t, ok := a.tools[p.Name]
+		a.mu.Unlock()
+		if !ok {
+			resp.Error = &rpcError{Code: -32601, Message: fmt.Sprintf("tool %q not found", p.Name)}
+			return resp
+		}
+		out, err := t.handle(ctx, p.Arguments)
+		if err != nil {
+			// MCP convention: tool errors land in result.isError + content,
+			// not in protocol-level error.
+			resp.Result = map[string]any{
+				"isError": true,
+				"content": []map[string]any{{"type": "text", "text": err.Error()}},
+			}
+			return resp
+		}
+		bs, _ := json.Marshal(out)
+		resp.Result = map[string]any{
+			"isError": false,
+			"content": []map[string]any{{"type": "text", "text": string(bs)}},
+		}
+	case "resources/list":
+		a.mu.Lock()
+		out := make([]ResourceDescriptor, 0, len(a.res))
+		for _, r := range a.res {
+			out = append(out, r.desc)
+		}
+		a.mu.Unlock()
+		resp.Result = map[string]any{"resources": out}
+	case "resources/read":
+		var p struct {
+			URI string `json:"uri"`
+		}
+		if err := json.Unmarshal(req.Params, &p); err != nil {
+			resp.Error = &rpcError{Code: -32602, Message: err.Error()}
+			return resp
+		}
+		a.mu.Lock()
+		r, ok := a.res[p.URI]
+		a.mu.Unlock()
+		if !ok {
+			resp.Error = &rpcError{Code: -32602, Message: fmt.Sprintf("resource %q not found", p.URI)}
+			return resp
+		}
+		out, err := r.handle(ctx)
+		if err != nil {
+			resp.Error = &rpcError{Code: -32603, Message: err.Error()}
+			return resp
+		}
+		bs, _ := json.Marshal(out)
+		resp.Result = map[string]any{
+			"contents": []map[string]any{{
+				"uri":      p.URI,
+				"mimeType": r.desc.MimeType,
+				"text":     string(bs),
+			}},
+		}
+	case "prompts/list":
+		// One example prompt — demonstrates the surface.
+		resp.Result = map[string]any{
+			"prompts": []map[string]any{{
+				"name":        "diff_review",
+				"description": "Walk an agent through reviewing a unified diff against the workspace flows.",
+				"arguments": []map[string]any{
+					{"name": "diff", "description": "unified diff", "required": true},
+				},
+			}},
+		}
+	case "prompts/get":
+		resp.Result = map[string]any{
+			"messages": []map[string]any{{
+				"role": "user",
+				"content": map[string]any{
+					"type": "text",
+					"text": "Review this diff against the workspace's flow declarations and report unreviewed flow touches.",
+				},
+			}},
+		}
+	case "notifications/initialized":
+		// no reply for notifications; the Serve loop handles that.
+		return resp
+	default:
+		if !strings.HasPrefix(req.Method, "notifications/") {
+			resp.Error = &rpcError{Code: -32601, Message: fmt.Sprintf("method %q not supported", req.Method)}
+		}
+	}
+	return resp
+}
+
+// Errors used by callers in tests.
+var (
+	// ErrToolNotFound is returned when tools/call references an unknown tool.
+	ErrToolNotFound = errors.New("tool not found")
+)
+
+func sortTools(s []ToolDescriptor) {
+	for i := 1; i < len(s); i++ {
+		for j := i; j > 0 && s[j-1].Name > s[j].Name; j-- {
+			s[j-1], s[j] = s[j], s[j-1]
+		}
+	}
+}

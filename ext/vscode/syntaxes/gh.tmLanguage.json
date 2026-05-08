@@ -1,0 +1,42 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Graph Harness",
+  "scopeName": "source.gh",
+  "patterns": [
+    { "include": "#comments" },
+    { "include": "#keywords" },
+    { "include": "#strings" }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        { "name": "comment.line.double-slash.gh", "match": "//.*$" },
+        { "name": "comment.block.gh", "begin": "/\\*", "end": "\\*/" }
+      ]
+    },
+    "keywords": {
+      "patterns": [
+        {
+          "name": "keyword.declaration.gh",
+          "match": "\\b(selector|flow|invariant|control|skill|query|step|targets|scope|description|anchor|threshold|unique|cardinality|all_of|any_of|none_of|require_evidence)\\b"
+        },
+        {
+          "name": "support.type.anchor.gh",
+          "match": "\\b(qualified_name|symbol_fingerprint|ast_hash|body_hash|call_neighborhood|path_glob|file|package|module)\\b"
+        },
+        {
+          "name": "constant.numeric.gh",
+          "match": "\\b[0-9]+(\\.[0-9]+)?\\b"
+        }
+      ]
+    },
+    "strings": {
+      "name": "string.quoted.double.gh",
+      "begin": "\"",
+      "end": "\"",
+      "patterns": [
+        { "name": "constant.character.escape.gh", "match": "\\\\." }
+      ]
+    }
+  }
+}
