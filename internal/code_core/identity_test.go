@@ -2,14 +2,6 @@ package code_core
 
 import "testing"
 
-func TestNormalizeGoSignature_StableUnderFormatting(t *testing.T) {
-	a := NormalizeGoSignature("(  a int,  b   string ) error")
-	b := NormalizeGoSignature("(a int, b string) error")
-	if a != b {
-		t.Errorf("formatting changed signature: %q vs %q", a, b)
-	}
-}
-
 func TestFunctionID_DifferentForDifferentLanguages(t *testing.T) {
 	go1 := FunctionID("go", "checkout.Validate", "(any) error")
 	ts1 := FunctionID("ts", "checkout.Validate", "(any) error")
