@@ -31,6 +31,7 @@ steps:
   # the resolver matched the selector against it.
   - name: selectors_test_resolves_to_extracted_go_entity
     command: graph-harness selectors test CheckoutValidator --json
+    env: { GRAPH_HARNESS_ENABLE_LSP: "1" }
     assert:
       - { type: exit_code, expected: 0 }
       - { type: contains, value: '"outcome":"bound"' }
@@ -45,6 +46,7 @@ steps:
   # internal/extract/orchestrator.go::filterOutFunctions for context.
   - name: code_provenance_carries_live_lsp_source
     command: graph-harness code provenance "checkout.CheckoutValidator" --json
+    env: { GRAPH_HARNESS_ENABLE_LSP: "1" }
     assert:
       - { type: exit_code, expected: 0 }
       - { type: contains, value: '"source_class":"live_lsp"' }

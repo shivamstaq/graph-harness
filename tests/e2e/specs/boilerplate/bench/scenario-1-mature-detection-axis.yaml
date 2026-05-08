@@ -21,8 +21,13 @@ setup:
       - { type: exit_code, expected: 0 }
 
 steps:
+  # P0 boilerplate authored before P1's polyglot bench landed; pin
+  # --language go to keep the bare per-scenario shape that asserts
+  # against $.detection_axis.score directly. The cross-language
+  # aggregate envelope is exercised by phase1/bench/scenario-1-three-
+  # languages.yaml.
   - name: bench_runs
-    command: graph-harness bench --scenario 1 --regime mature
+    command: graph-harness bench --scenario 1 --regime mature --language go
     assert:
       - { type: exit_code, expected: 0 }
       - { type: json_path, path: "$.scenario.id", op: "==", expected: 1 }
