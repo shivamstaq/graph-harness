@@ -22,9 +22,37 @@
 // operators + Mangle for recursion (SPEC §6.14). No property-graph database.
 //
 // SPEC: §6.11 (three-input model), §6.12 (identity), §6.13 (kernel tables),
-// §6.14 (traversal), §6.15 (pipeline summary).
+// §6.14 (traversal), §6.15 (pipeline summary), §4.5 (provenance fold).
 //
-// Phase 0 tasks: P0.T21 (identity scheme + Go signature normalizer),
-// P0.T22 (Facts adapter + tree-sitter event consumer),
-// P0.T23 (adjacency table + planner BFS).
+// # Public surface
+//
+// Identity:
+//
+//	FileID, FunctionID, MethodID, TypeDeclID,
+//	SymbolID(language, qn, kind_tag),
+//	AnonymousID(parent_id, kind_tag, ordinal)
+//
+// Storage (SQLite, [Store]):
+//
+//	NewStore, PutEntity, AddRelation,
+//	LookupEntityByID, LookupByQualifiedName, LookupByQualifiedNameSuffix,
+//	UpsertProvenance, GetProvenance,
+//	BFS, CountByKind
+//
+// Three-source unification ([Unifier]):
+//
+//	Unify(ctx, []source_live.Symbol, seq) → []entity_id
+//	emits code.core.SymbolDisambiguation when ≥ disagreement_threshold
+//	canonical IDs converge on one source-text location.
+//
+// Provenance query API (consumer-facing, surface-agnostic):
+//
+//	LookupEntity(ctx, id)     → EntityView (entity + folded provenance)
+//	LookupProvenance(ctx, id) → ProvenanceView (folded summary + sources)
+//	ErrEntityNotFound — sentinel for missing entities so callers can
+//	                    distinguish "missing" from transport errors.
+//
+// Per-language signature normalization lives in
+// [github.com/shivamstaq/graph-harness/internal/code_core/normalize];
+// the unifier and ingest path dispatch through normalize.ForLanguage.
 package code_core
