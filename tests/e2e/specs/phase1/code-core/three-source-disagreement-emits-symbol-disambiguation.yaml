@@ -30,9 +30,15 @@ setup:
   - name: install_overlay
     command: sh -c "mkdir -p .graph-harness/overlay && cp demo.checkout.gh .graph-harness/overlay/checkout.gh"
     assert: [{ type: exit_code, expected: 0 }]
-  # Edit the source so its signature differs from the (stale) shipped
-  # .scip-index/ file — this is what creates the LSP/SCIP disagreement
-  # in the polyglot fixture.
+  # First, capture the original signature in a SCIP index. This is the
+  # claim SCIP will replay on subsequent imports.
+  - name: generate_scip_index_against_original_source
+    command: sh -c "mkdir -p .scip-index && scip-go --output .scip-index/index.scip"
+    assert: [{ type: exit_code, expected: 0 }]
+  # Then drift the live source so it disagrees with the SCIP-indexed
+  # signature. LSP (gopls) sees the new signature; SCIP still carries
+  # the old one — that's the divergence the unifier turns into a
+  # SymbolDisambiguation event.
   - name: drift_signature_from_scip_index
     command: sh -c "sed -i.bak 's/Validate(cart any)/Validate(cart any, ctx string)/' internal/checkout/validator.go"
     assert: [{ type: exit_code, expected: 0 }]
@@ -46,11 +52,13 @@ steps:
     # both candidate entities and the resolver picks via the multi-
     # anchor ladder. The key assertion is on the events stream.
     command: graph-harness selectors test CheckoutValidator --json
+    env: { GRAPH_HARNESS_ENABLE_LSP: "1" }
     assert:
       - { type: exit_code, expected: 0 }
 
   - name: symbol_disambiguation_event_emitted
     command: graph-harness code events --kind SymbolDisambiguation --json
+    env: { GRAPH_HARNESS_ENABLE_LSP: "1" }
     assert:
       - { type: exit_code, expected: 0 }
       - { type: contains, value: "\"kind\":\"SymbolDisambiguation\"" }
@@ -66,6 +74,7 @@ steps:
     # by qualified_name returns one of them; the disambiguation event
     # carries both IDs in its claims[].
     command: graph-harness code provenance "checkout.CheckoutValidator.Validate" --json
+    env: { GRAPH_HARNESS_ENABLE_LSP: "1" }
     assert:
       - { type: exit_code, expected: 0 }
       - { type: contains, value: "\"qualified_name\":\"checkout.CheckoutValidator.Validate\"" }

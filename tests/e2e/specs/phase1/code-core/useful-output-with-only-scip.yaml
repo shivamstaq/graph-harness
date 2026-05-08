@@ -23,6 +23,13 @@ setup:
   - name: install_overlay
     command: sh -c "mkdir -p .graph-harness/overlay && cp demo.checkout.gh .graph-harness/overlay/checkout.gh"
     assert: [{ type: exit_code, expected: 0 }]
+  # Generate the .scip-index/ that the orchestrator imports. The
+  # orchestrator deliberately does NOT auto-generate indexes (per
+  # phase plan §1.B v1 expectation); this spec invokes scip-go
+  # explicitly so the SCIP-only path has something to import.
+  - name: generate_scip_index
+    command: sh -c "mkdir -p .scip-index && scip-go --output .scip-index/index.scip"
+    assert: [{ type: exit_code, expected: 0 }]
   - name: refresh_scip_index
     command: graph-harness scip refresh
     assert: [{ type: exit_code, expected: 0 }]
