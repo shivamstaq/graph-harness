@@ -160,17 +160,39 @@ func (o *Orchestrator) PreloadSCIP() error {
 
 // IndexAll walks the workspace and routes every supported source file
 // through IndexFile. SCIP indexes are loaded once before the walk so
-// per-file lookups are O(1).
+// per-file lookups are O(1). Files referenced by SCIP indexes but not
+// present on disk (e.g. cross-repo references, vendored sources) are
+// also routed through IndexFile so their SCIP-derived symbols still
+// land in code.core — IndexFile handles the missing-source-file case
+// gracefully.
 func (o *Orchestrator) IndexAll(ctx context.Context, seq uint64) error {
 	if err := o.PreloadSCIP(); err != nil {
 		return err
 	}
+	seen := make(map[string]struct{})
 	files, err := SourceFilesUnder(o.root)
 	if err != nil {
 		return err
 	}
 	for _, abs := range files {
 		rel, _ := filepath.Rel(o.root, abs)
+		seen[rel] = struct{}{}
+		if err := o.IndexFile(ctx, rel, seq); err != nil {
+			return err
+		}
+	}
+	// Union with SCIP-only paths so indexes describing files not on the
+	// local disk still produce entities.
+	o.scipMu.RLock()
+	scipPaths := make([]string, 0, len(o.scipMap))
+	for rel := range o.scipMap {
+		scipPaths = append(scipPaths, rel)
+	}
+	o.scipMu.RUnlock()
+	for _, rel := range scipPaths {
+		if _, ok := seen[rel]; ok {
+			continue
+		}
 		if err := o.IndexFile(ctx, rel, seq); err != nil {
 			return err
 		}
@@ -195,17 +217,14 @@ func (o *Orchestrator) IndexAll(ctx context.Context, seq uint64) error {
 // place File entities enter code.core.
 func (o *Orchestrator) IndexFile(ctx context.Context, rel string, seq uint64) error {
 	abs := filepath.Join(o.root, rel)
-	data, err := os.ReadFile(abs) //nolint:gosec // rel is workspace-relative under controlled root
-	if err != nil {
-		return nil //nolint:nilerr // unreadable file is a no-op for indexing
-	}
+	data, _ := os.ReadFile(abs) //nolint:gosec // rel is workspace-relative under controlled root; missing file is OK for SCIP-only ingestion
 
 	var (
 		syms     []source_live.Symbol
 		language string
 	)
 
-	if o.enableTreesitter {
+	if o.enableTreesitter && len(data) > 0 {
 		pf, err := source_live.ParseFile(rel, data)
 		if err == nil && pf != nil {
 			language = pf.Language

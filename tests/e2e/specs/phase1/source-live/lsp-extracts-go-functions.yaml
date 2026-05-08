@@ -36,3 +36,16 @@ steps:
       - { type: contains, value: '"outcome":"bound"' }
       - { type: contains, value: '"qualified_name":"checkout.CheckoutValidator.Validate"' }
       - { type: contains, value: '"via_anchor":"qualified_name"' }
+
+  # Provenance probe: gopls's DocumentSymbol response carries the
+  # CheckoutValidator struct as a Class symbol; tree-sitter doesn't
+  # emit type declarations, so this entity's source list is solely
+  # live_lsp. Asserting on the Class entity sidesteps the
+  # function-level signature-alignment caveat — see the comment in
+  # internal/extract/orchestrator.go::filterOutFunctions for context.
+  - name: code_provenance_carries_live_lsp_source
+    command: graph-harness code provenance "checkout.CheckoutValidator" --json
+    assert:
+      - { type: exit_code, expected: 0 }
+      - { type: contains, value: '"source_class":"live_lsp"' }
+      - { type: contains, value: '"produced_by":"extractor:lsp:gopls"' }
