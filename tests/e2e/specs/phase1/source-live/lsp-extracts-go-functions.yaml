@@ -24,8 +24,15 @@ setup:
     assert: [{ type: exit_code, expected: 0 }]
 
 steps:
-  - name: selectors_test_resolves_via_lsp_or_treesitter
+  # Strong probe: outcome=bound + the extracted qualified_name in the
+  # match array. `contains "CheckoutValidator"` alone would false-pass
+  # on the printed selector_id — these two assertions together verify
+  # that source_live → code.core ingestion produced an entity AND that
+  # the resolver matched the selector against it.
+  - name: selectors_test_resolves_to_extracted_go_entity
     command: graph-harness selectors test CheckoutValidator --json
     assert:
       - { type: exit_code, expected: 0 }
-      - { type: contains, value: "CheckoutValidator" }
+      - { type: contains, value: '"outcome":"bound"' }
+      - { type: contains, value: '"qualified_name":"checkout.CheckoutValidator.Validate"' }
+      - { type: contains, value: '"via_anchor":"qualified_name"' }
