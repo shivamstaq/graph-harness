@@ -107,30 +107,18 @@ document.getElementById("entity-btn").addEventListener("click", async () => {
   try {
     const r = await api("/api/entity/provenance", { qualified_name: qn });
     const view = r.view;
-    if (!view || !view.Entity || !view.Entity.ID) {
+    if (!view || !view.entity || !view.entity.id) {
       out.textContent = "(no entity matches that qualified_name in code.core)";
       return;
     }
-    const ent = view.Entity;
-    const prov = view.Provenance || {};
+    // SPEC §4.5: surface the folded summary at the top of the
+    // drill-down (one-line confidence + freshness + agreeing sources)
+    // followed by the per-source claim list verbatim.
     out.textContent = JSON.stringify(
       {
-        entity: {
-          id: ent.ID,
-          kind: ent.Kind,
-          language: ent.LanguageID,
-          qualified_name: ent.QualifiedName,
-          path: ent.Path,
-          body_hash: ent.BodyHash,
-        },
-        provenance_summary: prov.Summary || {},
-        sources: (prov.Sources || []).map((s) => ({
-          source_class: s.SourceClass,
-          confidence: s.Confidence,
-          freshness: s.Freshness,
-          last_seen_seq: s.LastSeenSeq,
-          produced_by: s.ProducedBy,
-        })),
+        entity: view.entity,
+        provenance_summary: view.provenance?.summary || {},
+        sources: view.provenance?.sources || [],
         resolved_at_kernel_seq: r.resolved_at_kernel_seq,
       },
       null,

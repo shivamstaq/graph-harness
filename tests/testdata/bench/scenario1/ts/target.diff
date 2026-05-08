@@ -1,10 +1,12 @@
 --- a/src/checkout/validator.ts
 +++ b/src/checkout/validator.ts
-@@ -10,9 +10,11 @@ export type Cart = {
+@@ -10,9 +10,12 @@ export type Cart = {
  export class CheckoutValidator {
    /** Runs the cart validation pipeline. Throws if any invariant fails. */
-   validate(cart: Cart): void {
-+    // unreviewed edit: extra logging for cart sanity
+-  validate(cart: Cart): void {
++  // extra logging added by an unreviewed edit
++  validate(cart: Cart): void {
++    const _marker = "edit-marker";
      if (!cart) throw new Error("cart is required");
      if (!Array.isArray(cart.items)) throw new Error("items must be an array");
      for (const item of cart.items) {

@@ -8,7 +8,7 @@ enabled:
   p0-vscode-extension:     false   # vsce required; gate when authoring runs in CI
 
   # ---- Cross-phase gating (flip in the PR that ships the feature) ----
-  p1-multi-language:       false
+  p1-multi-language:       true
   p2-framework-extractors: false
   p3-rule-engine:          false
   p3-repair-instructions:  false
