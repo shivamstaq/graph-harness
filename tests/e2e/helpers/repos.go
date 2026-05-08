@@ -319,22 +319,35 @@ flow CheckoutValidation {
 // canonical content-addressable IDs must be distinct because the
 // FunctionID hash mixes the language_id prefix, so two materialized
 // entities — one per language — coexist with different IDs.
+//
+// Both files are placed so the tree-sitter parsers emit the same
+// dotted qualified name "User.save":
+//   - Go: package `User`, top-level `func save` → "User.save"
+//   - Python: module `User.py` at workspace root, top-level
+//     `def save` → "User.save" (pyModuleName = file basename
+//     without `.py`, joined with the function name)
+//
+// A class wrapper or nested directory layout in the Python file
+// would prefix the qualified name (e.g. "users.User.User.save")
+// and break the collision premise — this fixture deliberately keeps
+// the structure flat to match the Go shape byte-for-byte.
 func PolyglotCollidingUserSave(_, workDir string, _ map[string]any) error {
 	files := map[string]string{
 		"go.mod": "module example.com/users\n\ngo 1.23\n",
 		// Go: package `User`, function `save` at file scope. The qualified
-		// name surfaced by tree-sitter is "User.save" — matching the
-		// Python class-method qualified name byte-for-byte.
+		// name surfaced by tree-sitter is "User.save".
 		"User/save.go": `package User
 
 // save persists the user record. Same qualified name ("User.save") as the
 // Python sibling — language_id is the only thing that disambiguates them.
 func save(id int) error { return nil }
 `,
-		"users/__init__.py": "from .User import User\n",
-		"users/User.py": `class User:
-    def save(self) -> None:
-        pass
+		// Python: top-level `save` function in `User.py` at the
+		// workspace root. pyModuleName("User.py") → "User", combined
+		// with the top-level function name produces "User.save".
+		"User.py": `def save(user_id: int) -> None:
+    """Persist the user record. Same qualified name as the Go sibling."""
+    return None
 `,
 	}
 	for relPath, content := range files {
