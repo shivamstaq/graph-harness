@@ -60,11 +60,11 @@ const (
 //   - ProducedBy — human-readable producer identifier
 //     ("extractor:lsp:gopls", "extractor:scip", "extractor:treesitter:go").
 type SourceEntry struct {
-	SourceClass SourceClass
-	Confidence  float64
-	LastSeenSeq uint64
-	Freshness   Freshness
-	ProducedBy  string
+	SourceClass SourceClass `json:"source_class"`
+	Confidence  float64     `json:"confidence"`
+	LastSeenSeq uint64      `json:"last_seen_seq"`
+	Freshness   Freshness   `json:"freshness"`
+	ProducedBy  string      `json:"produced_by,omitempty"`
 }
 
 // Provenance is the merged provenance record for a single entity — the
@@ -74,7 +74,7 @@ type SourceEntry struct {
 // per-source drill-down, change.process diff resolution) can show
 // individual claims.
 type Provenance struct {
-	Sources []SourceEntry
+	Sources []SourceEntry `json:"sources"`
 }
 
 // Merge inserts e into p, replacing any existing entry with the same
