@@ -21,8 +21,12 @@ setup:
     assert: [{ type: exit_code, expected: 0 }]
 
 steps:
+  # Probes that `selectors test` ran source.live ingestion + resolver
+  # end-to-end and returned the JSON envelope shape. Match-strength
+  # caveat documented on the TS spec applies symmetrically.
   - name: selectors_test_targets_python_validate
     command: graph-harness selectors test CheckoutValidator --json
     assert:
       - { type: exit_code, expected: 0 }
-      - { type: contains, value: "CheckoutValidator" }
+      - { type: contains, value: '"selector_id":"CheckoutValidator"' }
+      - { type: contains, value: '"outcome":' }
