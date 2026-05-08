@@ -10,6 +10,35 @@ import (
 //go:embed embedded_manifests/*.yaml
 var embeddedManifests embed.FS
 
+// WalkEmbeddedManifests iterates the embedded YAML manifest bytes in
+// dependency-order-agnostic name-sorted form. Callers that only need raw
+// YAML (e.g. review_queue.Queue.LoadRequirements) use this; callers that
+// need parsed Manifest structs go through (*Registry).LoadEmbeddedManifests.
+func WalkEmbeddedManifests(fn func(name string, data []byte) error) error {
+	entries, err := embeddedManifests.ReadDir("embedded_manifests")
+	if err != nil {
+		return fmt.Errorf("read embedded: %w", err)
+	}
+	names := make([]string, 0, len(entries))
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".yaml") {
+			continue
+		}
+		names = append(names, e.Name())
+	}
+	sort.Strings(names)
+	for _, n := range names {
+		data, err := embeddedManifests.ReadFile("embedded_manifests/" + n)
+		if err != nil {
+			return err
+		}
+		if err := fn(n, data); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // LoadEmbeddedManifests installs every manifest baked into the binary at build
 // time (mirrored from the project-root manifests/ directory). Used when the
 // CLI runs outside the project tree, e.g. from `go install`.

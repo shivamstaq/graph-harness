@@ -1,0 +1,55 @@
+# yaml-language-server: $schema=https://github.com/shivamstaq/gotit/raw/main/schema/spec.schema.json
+spec_version: 1
+name: review-queue-needs-evidence-state
+description: >
+  P1.H: review.queue auto-routes proposals missing required evidence to the
+  `needs_evidence` state per SPEC §10.4. Adding the missing items via
+  `graph-harness review add-evidence` promotes back to `pending_review`.
+tags: [phase1, review-queue, p1t32, p1t33]
+order: 30
+features: [p1-multi-language]
+repo:
+  helper: go-module-empty
+
+setup:
+  - name: init_workspace
+    command: graph-harness init
+    assert:
+      - { type: exit_code, expected: 0 }
+
+steps:
+  - name: submit_invariant_without_evidence_lands_needs_evidence
+    command: |
+      graph-harness review submit \
+        --layer semantic.overlay \
+        --kind invariant_proposal \
+        --description "Mutation handlers in checkout must pass through permission checks before mutating state." \
+        --payload '{"name":"AuthBeforeMutation"}'
+    assert:
+      - { type: exit_code, expected: 0 }
+      - { type: contains, value: "state: needs_evidence" }
+      - { type: contains, value: "missing:" }
+
+  - name: submit_invariant_with_full_evidence_lands_pending_review
+    command: |
+      graph-harness review submit \
+        --layer semantic.overlay \
+        --kind invariant_proposal \
+        --description "Mutation handlers in checkout must pass through permission checks before mutating state." \
+        --evidence '[{"kind":"symbol","detail":"PaymentService.authorize"},{"kind":"test","detail":"tests/payment_test.go::TestAuth"}]' \
+        --payload '{"name":"AuthBeforeMutation2"}'
+    assert:
+      - { type: exit_code, expected: 0 }
+      - { type: contains, value: "state: pending_review" }
+
+  - name: submit_anchor_update_without_drift_signal_blocked
+    command: |
+      graph-harness review submit \
+        --layer semantic.overlay \
+        --kind anchor_update \
+        --evidence '[{"kind":"candidate_match","confidence":0.9}]' \
+        --payload '{"selector":"PaymentAuthorize"}'
+    assert:
+      - { type: exit_code, expected: 0 }
+      - { type: contains, value: "state: needs_evidence" }
+      - { type: contains, value: "drift_signal" }
