@@ -45,22 +45,24 @@ func (s *Store) IngestParsedFile(ctx context.Context, pf *source_live.ParsedFile
 		var ent Entity
 		if fn.Receiver == "" {
 			ent = Entity{
-				ID:            FunctionID(pf.Language, fn.QualifiedName, ns),
-				Kind:          KindFunction,
-				LanguageID:    pf.Language,
-				QualifiedName: fn.QualifiedName,
-				Path:          pf.Path,
-				BodyHash:      fn.BodyHash,
+				ID:                  FunctionID(pf.Language, fn.QualifiedName, ns),
+				Kind:                KindFunction,
+				LanguageID:          pf.Language,
+				QualifiedName:       fn.QualifiedName,
+				Path:                pf.Path,
+				BodyHash:            fn.BodyHash,
+				NormalizedSignature: ns,
 			}
 		} else {
 			ent = Entity{
-				ID:            MethodID(pf.Language, fn.Receiver, fn.Name, ns),
-				Kind:          KindMethod,
-				LanguageID:    pf.Language,
-				QualifiedName: fn.QualifiedName,
-				Receiver:      fn.Receiver,
-				Path:          pf.Path,
-				BodyHash:      fn.BodyHash,
+				ID:                  MethodID(pf.Language, fn.Receiver, fn.Name, ns),
+				Kind:                KindMethod,
+				LanguageID:          pf.Language,
+				QualifiedName:       fn.QualifiedName,
+				Receiver:            fn.Receiver,
+				Path:                pf.Path,
+				BodyHash:            fn.BodyHash,
+				NormalizedSignature: ns,
 			}
 		}
 		if err := s.PutEntity(ctx, ent, createdSeq); err != nil {

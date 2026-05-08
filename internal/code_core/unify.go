@@ -308,24 +308,26 @@ func entityFromSymbol(s source_live.Symbol) (Entity, bool) {
 		ns := normalize.ForLanguage(s.LanguageID, s.Signature)
 		id := FunctionID(s.LanguageID, s.QualifiedName, ns)
 		return Entity{
-			ID:            id,
-			Kind:          KindFunction,
-			LanguageID:    s.LanguageID,
-			QualifiedName: s.QualifiedName,
-			Path:          s.Path,
-			BodyHash:      s.BodyHash,
+			ID:                  id,
+			Kind:                KindFunction,
+			LanguageID:          s.LanguageID,
+			QualifiedName:       s.QualifiedName,
+			Path:                s.Path,
+			BodyHash:            s.BodyHash,
+			NormalizedSignature: ns,
 		}, true
 	case source_live.SymbolKindMethod:
 		ns := normalize.ForLanguage(s.LanguageID, s.Signature)
 		id := MethodID(s.LanguageID, s.Receiver, s.Name, ns)
 		return Entity{
-			ID:            id,
-			Kind:          KindMethod,
-			LanguageID:    s.LanguageID,
-			QualifiedName: s.QualifiedName,
-			Receiver:      s.Receiver,
-			Path:          s.Path,
-			BodyHash:      s.BodyHash,
+			ID:                  id,
+			Kind:                KindMethod,
+			LanguageID:          s.LanguageID,
+			QualifiedName:       s.QualifiedName,
+			Receiver:            s.Receiver,
+			Path:                s.Path,
+			BodyHash:            s.BodyHash,
+			NormalizedSignature: ns,
 		}, true
 	case source_live.SymbolKindTypeDecl:
 		id := TypeDeclID(s.LanguageID, s.QualifiedName)

@@ -370,3 +370,31 @@ func dedupCount(ids []string) int {
 	}
 	return len(seen)
 }
+
+// TestUnifier_PersistsNormalizedSignature is the round-trip guard for
+// the anchor-evaluator columns added in support of T-dsl-pipeline's
+// function_signature evaluator. Storing the canonical signature
+// alongside the entity lets the resolver match without re-parsing the
+// source file; if PutEntity / Lookup* were to drop the column on
+// either side of the round trip the function_signature anchor would
+// silently match nothing, so this test is the contract guard.
+func TestUnifier_PersistsNormalizedSignature(t *testing.T) {
+	t.Parallel()
+	store := newTestStore(t)
+	u := &Unifier{Store: store}
+	ctx := context.Background()
+	f := genFn(rand.New(rand.NewPCG(7, 7)), 0) //nolint:gosec
+	if _, err := u.Unify(ctx, f.emitAll(), 1); err != nil {
+		t.Fatalf("Unify: %v", err)
+	}
+	got, err := store.LookupByQualifiedName(ctx, f.qn)
+	if err != nil {
+		t.Fatalf("LookupByQualifiedName: %v", err)
+	}
+	if got == nil {
+		t.Fatalf("entity %s not found after Unify", f.qn)
+	}
+	if got.NormalizedSignature == "" {
+		t.Errorf("NormalizedSignature should be persisted; got empty for %s", f.qn)
+	}
+}
