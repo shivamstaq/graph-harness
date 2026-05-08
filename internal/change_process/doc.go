@@ -22,7 +22,8 @@
 //  10. emit ValidationFinding events     FULL — kinds:
 //     flow_unreviewed,
 //     unresolved_anchor (P1.G),
-//     symbol_disambiguation (P1.G)
+//     symbol_disambiguation (P1.G),
+//     selector_reanchored (gate crit. 6)
 //  11. RepairInstruction synthesis       PASS-THROUGH (P3)
 //  12. emit ValidateDiffResult summary   FULL
 //

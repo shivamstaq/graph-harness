@@ -8,6 +8,12 @@
 //     validation_seq − 1 is unresolved at validation_seq, indicating
 //     a code edit broke an authored binding without a fall-through anchor
 //     catching it (SPEC §8.2 + plan §P1.T30).
+//   - `selector_reanchored` (stage 10) — a selector whose primary anchor
+//     missed but whose fingerprint fallback (function_signature, body_hash,
+//     ast_hash, symbol_fingerprint, or call_neighborhood) re-bound the
+//     selector at confidence ≥ thresh.reanchored. Surfaces "this rename
+//     was caught by the anchor ladder" so reviewers see which fingerprint
+//     paid for the rebind (plan §3 gate criterion 6).
 //   - `symbol_disambiguation` (stage 6) — surfaces
 //     `code.core.SymbolDisambiguation` events as a finding kind so the
 //     reviewer sees the conflicting source claims inline (plan §P1.T31).
@@ -36,7 +42,7 @@ import (
 // `unresolved_anchor`, `symbol_disambiguation`.
 type ValidationFinding struct {
 	ID       string         `json:"id"`
-	Kind     string         `json:"kind"`     // flow_unreviewed | unresolved_anchor | symbol_disambiguation
+	Kind     string         `json:"kind"`     // flow_unreviewed | unresolved_anchor | selector_reanchored | symbol_disambiguation
 	Severity string         `json:"severity"` // info | low | medium | high | critical
 	Subject  Subject        `json:"subject"`
 	Evidence []EvidenceItem `json:"evidence"`
@@ -246,22 +252,29 @@ func symbolDisambiguationFinding(diffSHA string, ev kernel.Event) ValidationFind
 	}
 }
 
-// collectUnresolvedAnchorFindings walks every overlay selector and emits
-// an `unresolved_anchor` finding when the *current* resolution at
-// validation_seq is unresolved AND the cache holds a prior bound /
-// reanchored result for the same selector AST. The pipeline thereby
-// surfaces "this diff broke a binding" without needing to re-run the
-// resolver against an as-of-seq snapshot of code.core.
+// collectUnresolvedAnchorFindings walks every overlay selector and emits:
+//
+//   - `unresolved_anchor`   — current resolution is unresolved AND the cache
+//     holds a prior bound / reanchored result for the
+//     same selector AST. Surfaces "this diff broke a
+//     binding" (plan §P1.T30).
+//   - `selector_reanchored` — current resolution is reanchored at confidence
+//     ≥ thresh.reanchored. Surfaces "this selector
+//     survived a rename via fingerprint fallback"
+//     (plan §3 gate criterion 6). Fires every time
+//     reanchor wins, regardless of prior cache state,
+//     so a fresh CI run on a renamed function
+//     produces the signal.
+//
+// Both share the same prior-aware resolver path; capturing the prior outcome
+// BEFORE re-running Resolve is essential because the cache retains only the
+// latest resolution per selector_key.
 func (p *Pipeline) collectUnresolvedAnchorFindings(ctx context.Context, diffSHA string, validationSeq uint64) ([]ValidationFinding, error) {
 	if p.Resolver == nil {
 		return nil, nil
 	}
 	var out []ValidationFinding
 	for name := range p.Overlay.Selectors {
-		// Capture prior outcome BEFORE the new Resolve call overwrites the
-		// cache entry for this selector. The cache retains only the latest
-		// resolution per selector_key, so reading priorAt second would lose
-		// the seq-1 record we want to compare against.
 		envPrior, hasPrior, err := p.Resolver.PriorAt(ctx, name, validationSeq)
 		if err != nil {
 			return nil, err
@@ -270,15 +283,17 @@ func (p *Pipeline) collectUnresolvedAnchorFindings(ctx context.Context, diffSHA 
 		if err != nil {
 			continue
 		}
-		if envCur.Outcome != semantic_overlay.OutcomeUnresolved {
-			continue
-		}
-		if !hasPrior {
-			continue
-		}
-		switch envPrior.Outcome {
-		case semantic_overlay.OutcomeBound, semantic_overlay.OutcomeReanchored:
-			out = append(out, unresolvedAnchorFinding(diffSHA, name, envPrior))
+		switch envCur.Outcome {
+		case semantic_overlay.OutcomeUnresolved:
+			if !hasPrior {
+				continue
+			}
+			if envPrior.Outcome == semantic_overlay.OutcomeBound ||
+				envPrior.Outcome == semantic_overlay.OutcomeReanchored {
+				out = append(out, unresolvedAnchorFinding(diffSHA, name, envPrior))
+			}
+		case semantic_overlay.OutcomeReanchored:
+			out = append(out, selectorReanchoredFinding(diffSHA, name, envCur, envPrior))
 		}
 	}
 	return out, nil
@@ -308,6 +323,51 @@ func unresolvedAnchorFinding(diffSHA, selector string, prior *semantic_overlay.R
 		}},
 		Repair: map[string]any{},
 	}
+}
+
+// selectorReanchoredFinding emits when a selector resolves to outcome
+// `reanchored` at the current validation_seq (gate criterion 6). The
+// finding's evidence carries the via_anchor and confidence so reviewers
+// see which fingerprint anchor caught the rename. When a prior envelope
+// is available, the evidence also describes the bound→reanchored
+// transition.
+func selectorReanchoredFinding(diffSHA, selector string, cur *semantic_overlay.ResolutionEnvelope, prior *semantic_overlay.ResolutionEnvelope) ValidationFinding {
+	subj := Subject{
+		EntityKind: "semantic.overlay:Selector",
+		EntityID:   selector,
+	}
+	via := ""
+	conf := 0.0
+	if len(cur.Matches) > 0 {
+		subj.Qualified = cur.Matches[0].QualifiedName
+		via = cur.Matches[0].ViaAnchor
+		conf = cur.Matches[0].Confidence
+	}
+	transition := "(no prior cache entry)"
+	if prior != nil {
+		transition = fmt.Sprintf("transition: %s → reanchored", prior.Outcome)
+	}
+	return ValidationFinding{
+		ID:       newSelectorReanchoredID(diffSHA, selector),
+		Kind:     "selector_reanchored",
+		Severity: "medium",
+		Subject:  subj,
+		Evidence: []EvidenceItem{{
+			Kind: "fingerprint_fallback",
+			Detail: fmt.Sprintf("outcome=reanchored via anchor=%s at confidence=%.2f; %s",
+				via, conf, transition),
+		}},
+		Repair: map[string]any{},
+	}
+}
+
+func newSelectorReanchoredID(diffSHA, selector string) string {
+	h := sha256.New()
+	_, _ = h.Write([]byte(diffSHA))
+	_, _ = h.Write([]byte{0})
+	_, _ = h.Write([]byte("sr:"))
+	_, _ = h.Write([]byte(selector))
+	return "finding_" + hex.EncodeToString(h.Sum(nil))[:8]
 }
 
 func newSymbolDisambiguationID(diffSHA string, seq uint64) string {
