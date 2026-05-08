@@ -6,11 +6,13 @@ metadata:
   depends_on: []          # leaf layer; emits raw extractor facts
   description: >
     Live extractor facts from LSP, filesystem, parser snapshots, diagnostics,
-    and watcher events. Phase 0 ships tree-sitter (Go) only; LSP + SCIP
-    join in P1.
+    and watcher events. Three independent fact sources unify in code.core via
+    content-addressable keys (SPEC §6.11): LSP (live), SCIP (indexed), and
+    tree-sitter (structural). Tree-sitter covers Go, TypeScript / TSX / JSX,
+    and Python.
 
-# Empty in P0 — raw events carry payload schemas inline; structured kinds
-# arrive when the three-source unification is wired up (P1).
+# Raw events carry payload schemas inline; the unified Symbol envelope
+# (internal/source_live/symbol.go) is the contract code.core consumes.
 schema:
   entity_kinds: []
   relation_kinds: []
