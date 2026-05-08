@@ -43,6 +43,7 @@ func newValidateDiffCmd() *cobra.Command {
 	c.Flags().String("against-plan", "", "validate against an explicit plan.gh")
 	c.Flags().String("finding", "", "re-run validation for a specific finding ID")
 	c.Flags().Bool("json", false, "emit findings as JSON")
+	addExtractorToggleFlags(c)
 	return c
 }
 

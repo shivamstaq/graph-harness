@@ -44,11 +44,12 @@ const (
 // Concurrency: IndexAll/IndexFile may be called from multiple
 // goroutines; per-file SCIP cache lookup is read-locked.
 type Orchestrator struct {
-	root    string
-	store   *code_core.Store
-	unifier *code_core.Unifier
-	host    *lsp.Host       // nil-safe
-	refresh *scip.Refresher // nil-safe
+	root             string
+	store            *code_core.Store
+	unifier          *code_core.Unifier
+	host             *lsp.Host       // nil-safe
+	refresh          *scip.Refresher // nil-safe
+	enableTreesitter bool            // false = skip tree-sitter parsing entirely
 
 	scipMu  sync.RWMutex
 	scipMap map[string][]source_live.Symbol // workspace-relative path → SCIP-derived symbols
@@ -58,11 +59,14 @@ type Orchestrator struct {
 }
 
 // Options controls which sources the Orchestrator consults. Setters
-// default to "enabled if discoverable"; pass DisableLSP/DisableSCIP
-// to skip a source unconditionally (useful in tests).
+// default to "enabled if discoverable"; pass any of the Disable*
+// fields to skip a source unconditionally (useful in tests + the
+// SPEC §6.11 build-order-tolerance specs that exercise single-source
+// behaviour).
 type Options struct {
-	DisableLSP  bool
-	DisableSCIP bool
+	DisableLSP        bool
+	DisableSCIP       bool
+	DisableTreesitter bool
 }
 
 // NewOrchestrator wires the sources up. It does not spawn any LSP
@@ -81,11 +85,12 @@ func NewOrchestrator(root string, store *code_core.Store, unifier *code_core.Uni
 		return nil, fmt.Errorf("orchestrator: unifier is nil")
 	}
 	o := &Orchestrator{
-		root:        abs,
-		store:       store,
-		unifier:     unifier,
-		scipMap:     make(map[string][]source_live.Symbol),
-		lspDisabled: make(map[string]bool),
+		root:             abs,
+		store:            store,
+		unifier:          unifier,
+		enableTreesitter: !opts.DisableTreesitter,
+		scipMap:          make(map[string][]source_live.Symbol),
+		lspDisabled:      make(map[string]bool),
 	}
 	if !opts.DisableLSP {
 		o.host = lsp.NewHost(lsp.NewRegistry(), abs)
@@ -174,57 +179,148 @@ func (o *Orchestrator) IndexAll(ctx context.Context, seq uint64) error {
 }
 
 // IndexFile gathers Symbols for a single workspace-relative path from
-// every available source and runs them through Unifier.Unify. Files
+// every enabled source and runs them through Unifier.Unify. Files
 // that fail to parse are skipped silently — fsnotify storms during
 // editor saves shouldn't surface as errors.
 //
-// Always writes the File entity directly with tree-sitter provenance
-// so file-level lookups don't depend on three-source agreement.
+// When all three sources are disabled the call is a no-op (no file
+// entity, no symbol unification). Tests use that mode to validate
+// build-order tolerance from the inverse direction; production
+// callers always have at least one source enabled.
+//
+// The File entity is written when tree-sitter is enabled (its source
+// of truth for Files); when tree-sitter is disabled but LSP / SCIP
+// describe the file, the LSP / SCIP language is used. The Unifier
+// intentionally doesn't materialize Files itself — this is the only
+// place File entities enter code.core.
 func (o *Orchestrator) IndexFile(ctx context.Context, rel string, seq uint64) error {
 	abs := filepath.Join(o.root, rel)
 	data, err := os.ReadFile(abs) //nolint:gosec // rel is workspace-relative under controlled root
 	if err != nil {
 		return nil //nolint:nilerr // unreadable file is a no-op for indexing
 	}
-	pf, err := source_live.ParseFile(rel, data)
-	if err != nil || pf == nil {
-		return nil
-	}
 
-	// File entity: written directly because the Unifier intentionally
-	// does not materialize Files (only Functions / Methods / TypeDecls).
-	fileEnt := code_core.Entity{
-		ID:            code_core.FileID(rel),
-		Kind:          code_core.KindFile,
-		LanguageID:    pf.Language,
-		QualifiedName: rel,
-		Path:          rel,
-	}
-	if err := o.store.PutEntity(ctx, fileEnt, seq); err != nil {
-		return fmt.Errorf("put file entity: %w", err)
-	}
-	if err := o.store.UpsertProvenance(ctx, fileEnt.ID, treesitterFileEntry(seq)); err != nil {
-		return fmt.Errorf("provenance file entity: %w", err)
-	}
+	var (
+		syms     []source_live.Symbol
+		language string
+	)
 
-	// Gather per-file Symbols from every source.
-	syms := ParsedFileToSymbols(pf)
+	if o.enableTreesitter {
+		pf, err := source_live.ParseFile(rel, data)
+		if err == nil && pf != nil {
+			language = pf.Language
+			syms = append(syms, ParsedFileToSymbols(pf)...)
+		}
+	}
 
 	if o.host != nil {
-		if lspSyms, ok := o.gatherLSP(ctx, pf.Language, rel); ok {
-			syms = append(syms, lspSyms...)
+		hostLang := language
+		if hostLang == "" {
+			hostLang = source_live.LanguageOf(rel)
+		}
+		if hostLang != "" {
+			if lspSyms, ok := o.gatherLSP(ctx, hostLang, rel); ok {
+				// When tree-sitter is also active, drop LSP-emitted
+				// Function / Method symbols. Per-language signature
+				// rendering differs between gopls / tsserver / pyright
+				// and our tree-sitter parsers (gopls puts `func(…)…`
+				// in Detail; tree-sitter emits `(…)…`), which makes
+				// the §6.12 normalized-signature hash diverge in a
+				// non-trivial subset of cases — duplicate entity rows
+				// would break unique-cardinality selectors. Tree-sitter
+				// is source-of-truth for function-level extraction;
+				// LSP retains live_lsp provenance on Class / Interface
+				// / File entities until per-language signature
+				// post-processing is fully aligned (P2 polish).
+				if o.enableTreesitter {
+					lspSyms = filterOutFunctions(lspSyms)
+				}
+				syms = append(syms, lspSyms...)
+				if language == "" {
+					language = hostLang
+				}
+			}
 		}
 	}
 
 	o.scipMu.RLock()
 	scipSyms := append([]source_live.Symbol(nil), o.scipMap[rel]...)
 	o.scipMu.RUnlock()
-	syms = append(syms, scipSyms...)
+	if len(scipSyms) > 0 {
+		syms = append(syms, scipSyms...)
+		if language == "" {
+			language = scipSyms[0].LanguageID
+		}
+	}
 
+	// File entity (only when at least one source observed the file).
+	if language != "" {
+		fileEnt := code_core.Entity{
+			ID:            code_core.FileID(rel),
+			Kind:          code_core.KindFile,
+			LanguageID:    language,
+			QualifiedName: rel,
+			Path:          rel,
+		}
+		if err := o.store.PutEntity(ctx, fileEnt, seq); err != nil {
+			return fmt.Errorf("put file entity: %w", err)
+		}
+		if err := o.store.UpsertProvenance(ctx, fileEnt.ID, fileEntryFor(o, seq)); err != nil {
+			return fmt.Errorf("provenance file entity: %w", err)
+		}
+	}
+
+	if len(syms) == 0 {
+		return nil
+	}
 	if _, err := o.unifier.Unify(ctx, syms, seq); err != nil {
 		return fmt.Errorf("unify %s: %w", rel, err)
 	}
 	return nil
+}
+
+// filterOutFunctions returns syms with all Function and Method kinds
+// removed. See the call site in IndexFile for the rationale: tree-sitter
+// owns function-level extraction in v1; LSP keeps File / Class /
+// Interface symbols.
+func filterOutFunctions(syms []source_live.Symbol) []source_live.Symbol {
+	out := syms[:0]
+	for _, s := range syms {
+		if s.Kind == source_live.SymbolKindFunction || s.Kind == source_live.SymbolKindMethod {
+			continue
+		}
+		out = append(out, s)
+	}
+	return out
+}
+
+// fileEntryFor picks the SourceEntry attribution for the synthetic
+// File entity based on which sources are enabled. Tree-sitter wins
+// when enabled (it's the source-of-truth for File-level facts);
+// otherwise the first enabled source claims attribution so the
+// build-order-tolerance specs that disable tree-sitter still see
+// File-level provenance reflecting the active source.
+func fileEntryFor(o *Orchestrator, seq uint64) code_core.SourceEntry {
+	switch {
+	case o.enableTreesitter:
+		return treesitterFileEntry(seq)
+	case o.host != nil:
+		return code_core.SourceEntry{
+			SourceClass: code_core.SourceClassLSP,
+			Confidence:  1.0,
+			LastSeenSeq: seq,
+			Freshness:   code_core.FreshnessLive,
+			ProducedBy:  "extractor:lsp",
+		}
+	default:
+		return code_core.SourceEntry{
+			SourceClass: code_core.SourceClassSCIP,
+			Confidence:  1.0,
+			LastSeenSeq: seq,
+			Freshness:   code_core.FreshnessCurrent,
+			ProducedBy:  "extractor:scip",
+		}
+	}
 }
 
 // gatherLSP fetches DocumentSymbol facts for a single (language, file)
