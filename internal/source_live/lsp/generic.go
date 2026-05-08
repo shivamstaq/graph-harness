@@ -52,6 +52,16 @@ type driverConf struct {
 	// Python "method" comes back as Function; tsserver uses Variable
 	// for arrow-function fields).
 	kindMap func(int) source_live.SymbolKind
+	// postProcessSymbol is the per-driver normalization hook that
+	// runs after the generic flattener has populated a Symbol but
+	// before it is appended to the result. Drivers use it to align
+	// shape with the tree-sitter / SCIP parsers — gopls in particular
+	// emits Method symbols as flat top-level entries with names like
+	// `(*Type).Method`, which the hook splits into Receiver + Name +
+	// pkg-prefixed QualifiedName so the §6.12 canonical key matches
+	// the tree-sitter side. fileBody carries the file's raw bytes so
+	// drivers can derive package / module prefixes locally.
+	postProcessSymbol func(sym *source_live.Symbol, fileBody []byte)
 }
 
 // newGenericDriver returns a driver wired for conf. It does not spawn
@@ -181,6 +191,10 @@ func (d *genericDriver) DocumentSymbol(ctx context.Context, path string) ([]sour
 	if err := d.didOpen(ctx, abs); err != nil {
 		return nil, err
 	}
+	// Read file body once so per-driver postProcessSymbol hooks can
+	// derive language-specific prefixes (Go package name, Python
+	// module path) without an extra disk read per symbol.
+	body, _ := os.ReadFile(abs) //nolint:gosec // path comes from caller-controlled root
 	res, err := d.conn.Call(ctx, "textDocument/documentSymbol", documentSymbolParams{
 		TextDocument: textDocumentIdentifier{URI: pathToURI(abs)},
 	})
@@ -194,13 +208,13 @@ func (d *genericDriver) DocumentSymbol(ctx context.Context, path string) ([]sour
 	// Try the rich shape first, then fall back to flat.
 	var rich []documentSymbol
 	if err := json.Unmarshal(res, &rich); err == nil && len(rich) > 0 && rich[0].SelectionRange != (rangeT{}) {
-		return d.flattenDocumentSymbols(rich, path, nil), nil
+		return d.flattenDocumentSymbols(rich, path, nil, body), nil
 	}
 	var flat []symbolInformation
 	if err := json.Unmarshal(res, &flat); err != nil {
 		return nil, fmt.Errorf("documentSymbol: unmarshal: %w", err)
 	}
-	return d.flattenSymbolInformation(flat, path), nil
+	return d.flattenSymbolInformation(flat, path, body), nil
 }
 
 // symbolInformation is the legacy flat result shape some servers still
@@ -213,7 +227,7 @@ type symbolInformation struct {
 	ContainerName string `json:"containerName,omitempty"`
 }
 
-func (d *genericDriver) flattenDocumentSymbols(syms []documentSymbol, path string, parents []string) []source_live.Symbol {
+func (d *genericDriver) flattenDocumentSymbols(syms []documentSymbol, path string, parents []string, fileBody []byte) []source_live.Symbol {
 	out := make([]source_live.Symbol, 0, len(syms))
 	for _, s := range syms {
 		kind := d.conf.kindMap(s.Kind)
@@ -233,15 +247,18 @@ func (d *genericDriver) flattenDocumentSymbols(syms []documentSymbol, path strin
 		if kind == source_live.SymbolKindMethod && len(parents) > 0 {
 			sym.Receiver = parents[len(parents)-1]
 		}
+		if d.conf.postProcessSymbol != nil {
+			d.conf.postProcessSymbol(&sym, fileBody)
+		}
 		out = append(out, sym)
 		if len(s.Children) > 0 {
-			out = append(out, d.flattenDocumentSymbols(s.Children, path, append(parents, s.Name))...)
+			out = append(out, d.flattenDocumentSymbols(s.Children, path, append(parents, s.Name), fileBody)...)
 		}
 	}
 	return out
 }
 
-func (d *genericDriver) flattenSymbolInformation(syms []symbolInformation, path string) []source_live.Symbol {
+func (d *genericDriver) flattenSymbolInformation(syms []symbolInformation, path string, fileBody []byte) []source_live.Symbol {
 	out := make([]source_live.Symbol, 0, len(syms))
 	for _, s := range syms {
 		kind := d.conf.kindMap(s.Kind)
@@ -262,6 +279,9 @@ func (d *genericDriver) flattenSymbolInformation(syms []symbolInformation, path 
 		}
 		if kind == source_live.SymbolKindMethod && s.ContainerName != "" {
 			sym.Receiver = s.ContainerName
+		}
+		if d.conf.postProcessSymbol != nil {
+			d.conf.postProcessSymbol(&sym, fileBody)
 		}
 		out = append(out, sym)
 	}

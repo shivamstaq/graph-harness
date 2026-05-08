@@ -71,11 +71,25 @@ func openCodeStore(ws *daemon.Workspace) (*code_core.Store, *sql.DB, error) {
 //
 // Idempotent: re-running is cheap because identity is
 // content-addressable; the unifier upserts provenance per-source.
+//
+// Retained for any future caller that doesn't wire the
+// addExtractorToggleFlags / extractOptionsFromFlags helpers; current
+// callers all pass extract.Options explicitly via WithOptions.
+//
+//nolint:unused // see comment above
 func indexWorkspaceCode(ctx context.Context, ws *daemon.Workspace, store *code_core.Store, log *facts.EventLog) error {
-	opts := extract.Options{
-		DisableLSP:  os.Getenv("GRAPH_HARNESS_ENABLE_LSP") != "1",
+	return indexWorkspaceCodeWithOptions(ctx, ws, store, log, extract.Options{
+		DisableLSP:  os.Getenv("GRAPH_HARNESS_DISABLE_LSP") == "1",
 		DisableSCIP: false,
-	}
+	})
+}
+
+// indexWorkspaceCodeWithOptions is the option-taking variant used by
+// CLI commands that wire addExtractorToggleFlags so the user can
+// flip --no-lsp / --no-scip / --no-treesitter for a single
+// invocation. Plain indexWorkspaceCode keeps the production-default
+// shape for callers that don't expose the toggles.
+func indexWorkspaceCodeWithOptions(ctx context.Context, ws *daemon.Workspace, store *code_core.Store, log *facts.EventLog, opts extract.Options) error {
 	unifier := &code_core.Unifier{
 		Store:   store,
 		Emitter: codeCoreEventEmitter(log),
