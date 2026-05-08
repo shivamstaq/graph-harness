@@ -43,28 +43,28 @@ const (
 // `code_entity_provenance` table (SPEC §4.4 + §6.11) — it is not part
 // of the entity's content-addressable identity.
 type Entity struct {
-	ID            string
-	Kind          EntityKind
-	LanguageID    string
-	QualifiedName string
-	Receiver      string // methods only
-	Path          string // files only
-	BodyHash      string // functions/methods only
-	KindTag       string // §6.12 catch-all + anonymous-entity discriminator
-	ParentID      string // anonymous entities only
-	Ordinal       uint32 // anonymous entities only
+	ID            string     `json:"id"`
+	Kind          EntityKind `json:"kind"`
+	LanguageID    string     `json:"language_id"`
+	QualifiedName string     `json:"qualified_name"`
+	Receiver      string     `json:"receiver,omitempty"`  // methods only
+	Path          string     `json:"path,omitempty"`      // files only
+	BodyHash      string     `json:"body_hash,omitempty"` // functions/methods only
+	KindTag       string     `json:"kind_tag,omitempty"`  // §6.12 catch-all + anonymous-entity discriminator
+	ParentID      string     `json:"parent_id,omitempty"` // anonymous entities only
+	Ordinal       uint32     `json:"ordinal,omitempty"`   // anonymous entities only
 
 	// Per-language normalized signature for Function / Method entities.
 	// Populated by the unifier from normalize.ForLanguage(language_id, raw).
 	// Stored alongside the entity so selector anchors (function_signature)
 	// can match without recomputing from source.
-	NormalizedSignature string
+	NormalizedSignature string `json:"normalized_signature,omitempty"`
 
 	// Fingerprints used by selector anchors (SPEC §3.1 signature family).
 	// Optional: extractors that emit these populate them; evaluators that
 	// need them degrade gracefully when absent.
-	SymbolFingerprint string
-	ASTHash           string
+	SymbolFingerprint string `json:"symbol_fingerprint,omitempty"`
+	ASTHash           string `json:"ast_hash,omitempty"`
 }
 
 // FileID = sha256(workspace_relative_path) per SPEC §6.12.
