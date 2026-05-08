@@ -143,19 +143,19 @@ func (r *Resources) Close() error {
 
 func (r *Resources) indexWorkspaceCode(ctx context.Context) error {
 	root := r.Workspace.Root
-	files, err := goFilesUnder(root)
+	files, err := sourceFilesUnder(root)
 	if err != nil {
 		return err
 	}
 	for _, abs := range files {
-		// #nosec G304 -- abs originates from goFilesUnder under workspace root
+		// #nosec G304 -- abs originates from sourceFilesUnder under workspace root
 		data, err := os.ReadFile(abs)
 		if err != nil {
 			continue
 		}
 		rel, _ := filepath.Rel(root, abs)
-		pf, err := source_live.ParseGoFile(rel, data)
-		if err != nil {
+		pf, err := source_live.ParseFile(rel, data)
+		if err != nil || pf == nil {
 			continue
 		}
 		seq := r.Log.LastSeq()
@@ -166,7 +166,11 @@ func (r *Resources) indexWorkspaceCode(ctx context.Context) error {
 	return nil
 }
 
-func goFilesUnder(root string) ([]string, error) {
+// sourceFilesUnder returns every supported source file under root. The
+// per-language dispatch lives in source_live.LanguageOf — this routine
+// picks anything LanguageOf recognises so adding a language is a single
+// change in source_live.
+func sourceFilesUnder(root string) ([]string, error) {
 	var out []string
 	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
@@ -174,14 +178,14 @@ func goFilesUnder(root string) ([]string, error) {
 		}
 		if d.IsDir() {
 			name := d.Name()
-			if strings.HasPrefix(name, ".") || name == "vendor" || name == "node_modules" || name == "bin" || name == "dist" {
+			if strings.HasPrefix(name, ".") || name == "vendor" || name == "node_modules" || name == "bin" || name == "dist" || name == "__pycache__" {
 				if path != root {
 					return filepath.SkipDir
 				}
 			}
 			return nil
 		}
-		if strings.HasSuffix(path, ".go") {
+		if source_live.LanguageOf(path) != "" {
 			out = append(out, path)
 		}
 		return nil
