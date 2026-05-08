@@ -30,6 +30,13 @@ type Adapter struct {
 	mu    sync.Mutex
 	tools map[string]toolHandler
 	res   map[string]resourceHandler
+
+	// entityResourcePrefix + entityResourceDesc back the dynamic
+	// gh://entity/code.core/<kind>/<id> resource (P1.T38). resources/list
+	// reports the templated descriptor; resources/read matches incoming
+	// URIs by prefix and parses the remainder into kind + entity_id.
+	entityResourcePrefix string
+	entityResourceDesc   ResourceDescriptor
 }
 
 // service returns the live jsonrpc.Service. With a lazy adapter, the first
@@ -275,7 +282,7 @@ func (a *Adapter) registerTools() {
 	}
 }
 
-// registerResources wires the resource surface (one example per phase).
+// registerResources wires the resource surface.
 func (a *Adapter) registerResources() {
 	a.res["gh://workspace/status"] = resourceHandler{
 		desc: ResourceDescriptor{
@@ -291,6 +298,17 @@ func (a *Adapter) registerResources() {
 			}
 			return svc.Status(ctx)
 		},
+	}
+	// gh://entity/code.core/<kind>/<id> — dynamic per-entity resource
+	// (P1.T38). Static enumeration in resources/list reports a templated
+	// example URI; resources/read matches by prefix and parses the
+	// remainder into kind + entity_id, then drills via entity.provenance.
+	a.entityResourcePrefix = "gh://entity/code.core/"
+	a.entityResourceDesc = ResourceDescriptor{
+		URI:         a.entityResourcePrefix + "{kind}/{entity_id}",
+		Name:        "code.core entity provenance",
+		Description: "Merged provenance (folded summary + per-source claims) for a code.core entity. Supply <kind>/<entity_id> in the URI.",
+		MimeType:    "application/json",
 	}
 }
 
@@ -405,9 +423,12 @@ func (a *Adapter) dispatch(ctx context.Context, req rpcReq) rpcResp {
 		}
 	case "resources/list":
 		a.mu.Lock()
-		out := make([]ResourceDescriptor, 0, len(a.res))
+		out := make([]ResourceDescriptor, 0, len(a.res)+1)
 		for _, r := range a.res {
 			out = append(out, r.desc)
+		}
+		if a.entityResourcePrefix != "" {
+			out = append(out, a.entityResourceDesc)
 		}
 		a.mu.Unlock()
 		resp.Result = map[string]any{"resources": out}
@@ -417,6 +438,36 @@ func (a *Adapter) dispatch(ctx context.Context, req rpcReq) rpcResp {
 		}
 		if err := json.Unmarshal(req.Params, &p); err != nil {
 			resp.Error = &rpcError{Code: -32602, Message: err.Error()}
+			return resp
+		}
+		// Dynamic gh://entity/code.core/<kind>/<id> first — exact match
+		// against the templated descriptor would never hit, so prefix
+		// matching is the dispatch.
+		if a.entityResourcePrefix != "" && strings.HasPrefix(p.URI, a.entityResourcePrefix) {
+			tail := strings.TrimPrefix(p.URI, a.entityResourcePrefix)
+			parts := strings.SplitN(tail, "/", 2)
+			if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+				resp.Error = &rpcError{Code: -32602, Message: fmt.Sprintf("malformed entity URI %q (want gh://entity/code.core/<kind>/<id>)", p.URI)}
+				return resp
+			}
+			svc, err := a.service()
+			if err != nil {
+				resp.Error = &rpcError{Code: -32603, Message: err.Error()}
+				return resp
+			}
+			out, err := svc.EntityProvenance(ctx, jsonrpc.EntityProvenanceParams{EntityID: parts[1]})
+			if err != nil {
+				resp.Error = &rpcError{Code: -32603, Message: err.Error()}
+				return resp
+			}
+			bs, _ := json.Marshal(out)
+			resp.Result = map[string]any{
+				"contents": []map[string]any{{
+					"uri":      p.URI,
+					"mimeType": a.entityResourceDesc.MimeType,
+					"text":     string(bs),
+				}},
+			}
 			return resp
 		}
 		a.mu.Lock()
