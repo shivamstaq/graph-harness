@@ -1,0 +1,83 @@
+{
+  "name": "graph-harness",
+  "displayName": "Graph Harness",
+  "description": "Semantic layer for codebases — selector live preview, flow findings, anchor authoring.",
+  "version": "0.1.0",
+  "publisher": "shivamstaq",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/shivamstaq/graph-harness.git"
+  },
+  "engines": {
+    "vscode": "^1.86.0"
+  },
+  "categories": ["Linters", "Programming Languages", "Other"],
+  "activationEvents": [
+    "onLanguage:graph-harness",
+    "onLanguage:go",
+    "onLanguage:typescript",
+    "onLanguage:typescriptreact",
+    "onLanguage:javascript",
+    "onLanguage:javascriptreact",
+    "onLanguage:python",
+    "workspaceContains:**/.graph-harness"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "languages": [
+      {
+        "id": "graph-harness",
+        "aliases": ["Graph Harness", "gh"],
+        "extensions": [".gh"],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "graph-harness",
+        "scopeName": "source.gh",
+        "path": "./syntaxes/gh.tmLanguage.json"
+      }
+    ],
+    "commands": [
+      {
+        "command": "graphHarness.validateDiff",
+        "title": "Graph Harness: Validate current diff"
+      },
+      {
+        "command": "graphHarness.testSelectorAtCursor",
+        "title": "Graph Harness: Test selector under cursor"
+      },
+      {
+        "command": "graphHarness.openStudio",
+        "title": "Graph Harness: Open Studio"
+      }
+    ],
+    "configuration": {
+      "title": "Graph Harness",
+      "properties": {
+        "graphHarness.cliPath": {
+          "type": "string",
+          "default": "graph-harness",
+          "description": "Path to the graph-harness CLI binary."
+        },
+        "graphHarness.codeLens.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show live match-count code lenses on selector / flow declarations."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "package": "vsce package"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.86.0",
+    "typescript": "^5.4.0"
+  }
+}
