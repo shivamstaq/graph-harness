@@ -165,8 +165,16 @@ selector CheckoutValidator
     3. code.core:Method  language=python  qualified_name=checkout.validator.CheckoutValidator.validate    via_anchor=path_glob
   resolved_at: kernel_event_seq=...
 
-$ graph-harness bench --scenario 1 --regime mature
-{ "scenario": {...}, "detection_axis": { "score": 1.0, "detected": 3, "expected": 3 }, ... }
+$ graph-harness bench --scenario 1 --regime mature --language all
+{
+  "scenario": { "id": 1, "languages": ["go", "python", "typescript"], ... },
+  "per_language": {
+    "go":         { "detection_axis": { "score": 1.0, "detected": 1, "expected": 1 }, ... },
+    "typescript": { "detection_axis": { "score": 1.0, "detected": 1, "expected": 1 }, ... },
+    "python":     { "detection_axis": { "score": 1.0, "detected": 1, "expected": 1 }, ... }
+  },
+  "aggregate":    { "detection_axis": { "score": 1.0, "detected": 3, "expected": 3 } }
+}
 ```
 
 Bench fixtures for the three-language scenario 1 live under
