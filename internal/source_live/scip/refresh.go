@@ -37,6 +37,9 @@ type Refresher struct {
 	events    chan Event
 	stopped   chan struct{}
 	once      sync.Once
+
+	startedMu sync.Mutex
+	started   bool // true once run() has been launched
 }
 
 // NewRefresher creates a Refresher rooted at root. importers maps
@@ -86,7 +89,7 @@ func (r *Refresher) Events() <-chan Event { return r.events }
 func (r *Refresher) Start(ctx context.Context) error {
 	if _, err := os.Stat(r.indexDir); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			go r.run(ctx)
+			r.launchRun(ctx)
 			return nil
 		}
 		return fmt.Errorf("stat index dir: %w", err)
@@ -94,15 +97,34 @@ func (r *Refresher) Start(ctx context.Context) error {
 	if err := r.w.Add(r.indexDir); err != nil {
 		return fmt.Errorf("watch %s: %w", r.indexDir, err)
 	}
-	go r.run(ctx)
+	r.launchRun(ctx)
 	return nil
 }
 
-// Stop closes the watcher and the events channel.
+func (r *Refresher) launchRun(ctx context.Context) {
+	r.startedMu.Lock()
+	defer r.startedMu.Unlock()
+	if r.started {
+		return
+	}
+	r.started = true
+	go r.run(ctx)
+}
+
+// Stop closes the watcher and the events channel. Safe to call even
+// if Start() was never invoked — the embedded sync.Once + the started
+// flag prevent the unblocked goroutine wait from deadlocking the
+// caller. (Required because the orchestrator's RefreshAll-only paths
+// build a Refresher without ever calling Start.)
 func (r *Refresher) Stop() {
 	r.once.Do(func() {
 		_ = r.w.Close()
-		<-r.stopped
+		r.startedMu.Lock()
+		started := r.started
+		r.startedMu.Unlock()
+		if started {
+			<-r.stopped
+		}
 		close(r.events)
 	})
 }

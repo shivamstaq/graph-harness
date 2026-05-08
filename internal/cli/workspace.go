@@ -3,19 +3,20 @@ package cli
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
-	"strings"
+	"time"
 
 	_ "modernc.org/sqlite" // SQLite driver
 
 	"github.com/shivamstaq/graph-harness/internal/code_core"
 	"github.com/shivamstaq/graph-harness/internal/daemon"
+	"github.com/shivamstaq/graph-harness/internal/extract"
 	"github.com/shivamstaq/graph-harness/internal/facts"
+	"github.com/shivamstaq/graph-harness/internal/kernel"
 	"github.com/shivamstaq/graph-harness/internal/semantic_overlay"
-	"github.com/shivamstaq/graph-harness/internal/source_live"
 )
 
 // activeWorkspace returns the discovered workspace (must be initialized) or
@@ -51,74 +52,69 @@ func openCodeStore(ws *daemon.Workspace) (*code_core.Store, *sql.DB, error) {
 	return store, db, nil
 }
 
-// indexWorkspaceCode walks the workspace, parses every supported source
-// file (Go / TypeScript / TSX / JS / JSX / Python) via the multi-language
-// dispatcher, and ingests entities into code.core. Per SPEC §6.11 the P1
-// scope extends ingestion beyond Go; LSP and SCIP feeds layer on top via
-// their own packages when their drivers / indexes are available.
+// indexWorkspaceCode runs the source.live → code.core ingestion path
+// through extract.Orchestrator so every available source feeds
+// code_core.Unifier per SPEC §6.11. Tree-sitter + SCIP are enabled
+// unconditionally — both are fast (parse / file-read). LSP is opt-in
+// behind GRAPH_HARNESS_ENABLE_LSP=1 because cold-start latency
+// (gopls/tsserver/pyright workspace load) makes per-CLI-invocation
+// spawning impractical for latency-sensitive paths like
+// `selectors test` / `validate-diff`. The daemon's long-lived
+// background indexer owns the persistent LSP host (P2 wire-up); CI /
+// dev users can opt in with the env var to verify three-source merge
+// end-to-end.
 //
-// Idempotent: re-running is cheap because identity is content-addressable.
-// Files that fail to parse are skipped (with a degraded-quality fact path
-// in source_live.Watcher for the live-edit case); a parse error here does
-// not abort the whole index.
+// Build-order tolerance: when SCIP indexes are absent or LSP is
+// disabled, the orchestrator degrades to tree-sitter-only ingestion —
+// single-source provenance is still produced and downstream paths
+// keep working (SPEC §6.11).
+//
+// Idempotent: re-running is cheap because identity is
+// content-addressable; the unifier upserts provenance per-source.
 func indexWorkspaceCode(ctx context.Context, ws *daemon.Workspace, store *code_core.Store, log *facts.EventLog) error {
-	root := ws.Root
-	files, err := sourceFilesUnder(root)
+	opts := extract.Options{
+		DisableLSP:  os.Getenv("GRAPH_HARNESS_ENABLE_LSP") != "1",
+		DisableSCIP: false,
+	}
+	unifier := &code_core.Unifier{
+		Store:   store,
+		Emitter: codeCoreEventEmitter(log),
+	}
+	orch, err := extract.NewOrchestrator(ws.Root, store, unifier, opts)
 	if err != nil {
 		return err
 	}
-	for _, abs := range files {
-		// #nosec G304 -- abs originates from sourceFilesUnder under workspace root
-		data, err := os.ReadFile(abs)
-		if err != nil {
-			continue
-		}
-		rel, _ := filepath.Rel(root, abs)
-		pf, err := source_live.ParseFile(rel, data)
-		if err != nil || pf == nil {
-			continue
-		}
-		seq := uint64(0)
-		if log != nil {
-			seq = log.LastSeq()
-		}
-		if _, err := store.IngestParsedFile(ctx, pf, seq); err != nil {
-			return err
-		}
+	defer func() {
+		// Bound shutdown so a hung LSP server doesn't deadlock the CLI.
+		shutCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		_ = orch.Close(shutCtx)
+	}()
+	seq := uint64(0)
+	if log != nil {
+		seq = log.LastSeq()
 	}
-	return nil
+	return orch.IndexAll(ctx, seq)
 }
 
-// sourceFilesUnder walks root and returns absolute paths for every file
-// whose extension matches one of the languages source_live supports
-// (Go / TypeScript / TSX / JS / JSX / Python). Mirrors the directory
-// pruning used by source_live.Watcher so workspace indexing and live
-// watching see the same file set.
-func sourceFilesUnder(root string) ([]string, error) {
-	var out []string
-	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
-		if err != nil {
-			return nil // tolerate transient errors
-		}
-		if d.IsDir() {
-			name := d.Name()
-			if strings.HasPrefix(name, ".") ||
-				name == "vendor" || name == "node_modules" ||
-				name == "bin" || name == "dist" || name == "build" ||
-				name == "venv" || name == ".venv" || name == "__pycache__" ||
-				name == "target" {
-				if path != root {
-					return filepath.SkipDir
-				}
-			}
-			return nil
-		}
-		if source_live.LanguageOf(path) != "" {
-			out = append(out, path)
-		}
+// codeCoreEventEmitter adapts the kernel facts.EventLog to the
+// code_core.EventEmitter contract so the unifier can publish
+// SymbolDisambiguation events without taking a kernel/facts dep.
+// Returns nil when log is nil (CLI calls that don't open the event
+// log — none today, but defensive against future use sites).
+func codeCoreEventEmitter(log *facts.EventLog) code_core.EventEmitter {
+	if log == nil {
 		return nil
+	}
+	return code_core.EventEmitterFunc(func(ctx context.Context, kind string, payload []byte) error {
+		_, err := log.Append(ctx, []kernel.Event{{
+			Layer:      "code.core",
+			Kind:       kind,
+			Payload:    json.RawMessage(payload),
+			ProducedBy: kernel.SourceClass("layer:code.core"),
+		}})
+		return err
 	})
-	return out, err
 }
 
 // loadOverlay reads .graph-harness/overlay/**/*.gh into an Overlay.
