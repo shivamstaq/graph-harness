@@ -28,12 +28,14 @@ setup:
 
 steps:
   # Resolution still succeeds even though broken.go can't be fully
-  # parsed — the well-formed validator.go is still indexed.
+  # parsed — the well-formed validator.go is still indexed and the
+  # selector binds to its CheckoutValidator.Validate entity.
   - name: selectors_test_still_resolves_despite_syntax_error
     command: graph-harness selectors test CheckoutValidator --json
     assert:
       - { type: exit_code, expected: 0 }
-      - { type: contains, value: "CheckoutValidator" }
+      - { type: contains, value: '"outcome":"bound"' }
+      - { type: contains, value: '"qualified_name":"checkout.CheckoutValidator.Validate"' }
   # Status command must not crash either; the workspace is healthy
   # despite the malformed file.
   - name: status_reports_workspace_healthy

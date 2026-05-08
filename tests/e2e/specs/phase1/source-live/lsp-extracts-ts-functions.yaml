@@ -21,8 +21,17 @@ setup:
     assert: [{ type: exit_code, expected: 0 }]
 
 steps:
+  # Probes that `selectors test` ran source.live ingestion + resolver
+  # end-to-end and returned the JSON envelope shape. Note: the helper
+  # overlay's anchor uses an unprefixed qualified_name while the
+  # multi-language ingester emits module-prefixed names — so the
+  # match-by-qualified_name is `unresolved` here. The assertion
+  # verifies the pipeline reached a verdict, not which one. (A stronger
+  # `bound` probe would require updating the helper overlay; that's a
+  # T-surfaces-bench helpers/repos.go change tracked separately.)
   - name: selectors_test_targets_ts_validate
     command: graph-harness selectors test CheckoutValidator --json
     assert:
       - { type: exit_code, expected: 0 }
-      - { type: contains, value: "CheckoutValidator" }
+      - { type: contains, value: '"selector_id":"CheckoutValidator"' }
+      - { type: contains, value: '"outcome":' }
