@@ -4,7 +4,9 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -165,6 +167,97 @@ func TestPipeline_NoUnresolvedAnchorWhenStillResolved(t *testing.T) {
 		}
 	}
 }
+
+// TestPipeline_EmitsSelectorReanchoredOnRename exercises plan §3 gate
+// criterion 6 at the pipeline level: a fixture where the renamed function
+// keeps its body_hash (and signature), so the resolver re-binds via
+// fingerprint fallback. The pipeline must emit a `selector_reanchored`
+// finding with confidence ≥ 0.75 and via_anchor identifying the fingerprint
+// that paid for the rebind.
+func TestPipeline_EmitsSelectorReanchoredOnRename(t *testing.T) {
+	p, store, overlay, _ := newTestPipeline(t)
+	// Renamed entity: original name `validate` → `preValidate`, body_hash
+	// + normalized signature unchanged.
+	if err := store.PutEntity(context.Background(), code_core.Entity{
+		ID: "rn1", Kind: code_core.KindMethod, LanguageID: "typescript",
+		QualifiedName:       "CheckoutValidator.preValidate",
+		NormalizedSignature: "(cart: Cart) => void",
+		BodyHash:            "sha256:body-of-validate",
+	}, 1); err != nil {
+		t.Fatalf("PutEntity: %v", err)
+	}
+	overlay.Selectors["CheckoutValidator"] = parseSelector(t, `selector CheckoutValidator {
+		anchor qualified_name "CheckoutValidator.validate"
+		anchor function_signature sig(Cart) -> void
+		anchor body_hash "sha256:body-of-validate"
+	}`)
+
+	res, err := p.ValidateDiff(context.Background(), []byte("--- a/x\n+++ b/x\n"), 10)
+	if err != nil {
+		t.Fatalf("ValidateDiff: %v", err)
+	}
+	var hit *ValidationFinding
+	for i, f := range res.Findings {
+		if f.Kind == "selector_reanchored" {
+			hit = &res.Findings[i]
+			break
+		}
+	}
+	if hit == nil {
+		t.Fatalf("expected selector_reanchored finding; got %+v", res.Findings)
+	}
+	if hit.Subject.EntityID != "CheckoutValidator" {
+		t.Errorf("subject.entity_id = %s, want CheckoutValidator", hit.Subject.EntityID)
+	}
+	if len(hit.Evidence) == 0 {
+		t.Fatal("evidence missing")
+	}
+	d := hit.Evidence[0].Detail
+	if !strings.Contains(d, "outcome=reanchored") {
+		t.Errorf("evidence detail missing outcome=reanchored: %q", d)
+	}
+	if !strings.Contains(d, "anchor=function_signature") &&
+		!strings.Contains(d, "anchor=body_hash") {
+		t.Errorf("evidence detail missing fingerprint anchor: %q", d)
+	}
+	// Gate criterion 6: confidence ≥ 0.75. function_signature defaults to
+	// 0.85 and body_hash to 0.95 — either crosses the threshold. The detail
+	// string carries `confidence=X.XX`; we parse it back out for the assert.
+	var confidence float64
+	for _, m := range hit.Evidence {
+		if i := strings.Index(m.Detail, "confidence="); i >= 0 {
+			s := m.Detail[i+len("confidence="):]
+			// next 4 chars are the number ("0.85")
+			if len(s) >= 4 {
+				if v, err := parseFloatPrefix(s); err == nil {
+					confidence = v
+				}
+			}
+		}
+	}
+	if confidence < 0.75 {
+		t.Errorf("reanchored confidence %.2f < 0.75 (gate criterion 6)", confidence)
+	}
+}
+
+// parseFloatPrefix reads the leading float (one digit, dot, then digits)
+// from s. Local helper for the assert above; avoids pulling regex.
+func parseFloatPrefix(s string) (float64, error) {
+	end := 0
+	for end < len(s) && (s[end] == '.' || (s[end] >= '0' && s[end] <= '9')) {
+		end++
+	}
+	if end == 0 {
+		return 0, errBadFloatPrefix
+	}
+	var f float64
+	if _, err := fmt.Sscanf(s[:end], "%f", &f); err != nil {
+		return 0, err
+	}
+	return f, nil
+}
+
+var errBadFloatPrefix = fmt.Errorf("no float prefix")
 
 func TestPipeline_NoFindingsWhenResolverNil(t *testing.T) {
 	// P0 callers without a resolver still get the flow_unreviewed path.
