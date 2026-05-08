@@ -1,0 +1,62 @@
+# yaml-language-server: $schema=https://github.com/shivamstaq/gotit/raw/main/schema/spec.schema.json
+spec_version: 1
+name: cross-language-name-collision-distinguished-by-language-id
+description: >
+  When the same qualified name (`User.save`) appears in Go and Python, code.core
+  materializes two distinct entities because SPEC §6.12's FunctionID formula
+  mixes language_id into the hash. The canonical IDs differ; both rows persist
+  and surface side-by-side under `graph-harness code list`. Plan §7.
+tags: [phase1, code-core, identity, polyglot]
+order: 32
+requires:
+  - cgo
+  - tree-sitter
+  - feature:p1-multi-language
+  # Gated on extractor-wiring even though the assertion only needs
+  # tree-sitter: the CLI path (`code provenance` / `code list`)
+  # routes through extract.Orchestrator, whose deferred Close
+  # currently hangs in scip.Refresher.Stop when no .scip-index/ is
+  # present. Reproduces as a 30s timeout. Tracked: T-extractors.
+  # Flips on alongside the rest of phase1/code-core/* once that
+  # wiring fix lands.
+  - feature:p1-extractor-wiring
+repo:
+  helper: polyglot-colliding-user-save
+
+setup:
+  - name: init_workspace
+    command: graph-harness init
+    assert: [{ type: exit_code, expected: 0 }]
+
+steps:
+  - name: go_user_save_materializes
+    command: graph-harness code provenance "User.save" --language go --json
+    assert:
+      - { type: exit_code, expected: 0 }
+      - { type: contains, value: "\"qualified_name\":\"User.save\"" }
+      - { type: contains, value: "\"language_id\":\"go\"" }
+
+  - name: python_user_save_materializes
+    command: graph-harness code provenance "User.save" --language python --json
+    assert:
+      - { type: exit_code, expected: 0 }
+      - { type: contains, value: "\"qualified_name\":\"User.save\"" }
+      - { type: contains, value: "\"language_id\":\"python\"" }
+
+  - name: list_returns_both_languages
+    command: graph-harness code list --qualified-name "User.save"
+    assert:
+      - { type: exit_code, expected: 0 }
+      # Two entities — one per language — distinguished only by
+      # language_id, which proves the FunctionID hash mixes
+      # language_id into identity per SPEC §6.12.
+      - { type: contains, value: "go" }
+      - { type: contains, value: "python" }
+      - { type: contains, value: "2 entities" }
+
+  - name: distinct_canonical_ids_in_json
+    command: graph-harness code list --qualified-name "User.save" --json
+    assert:
+      - { type: exit_code, expected: 0 }
+      - { type: contains, value: "\"language_id\":\"go\"" }
+      - { type: contains, value: "\"language_id\":\"python\"" }

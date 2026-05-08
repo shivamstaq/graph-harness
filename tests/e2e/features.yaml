@@ -9,6 +9,13 @@ enabled:
 
   # ---- Cross-phase gating (flip in the PR that ships the feature) ----
   p1-multi-language:       true
+  # P1 production extractor wiring: indexWorkspaceCode currently only
+  # invokes tree-sitter; LSP and SCIP are package-built but not yet
+  # routed through the CLI's code.core ingestion path. Specs that
+  # require merged provenance from all three sources, disagreement
+  # events, or single-source-only output (--no-lsp / --no-scip) gate
+  # on this flag and SKIP until the wiring lands. Owner: T-extractors.
+  p1-extractor-wiring:     false
   p2-framework-extractors: false
   p3-rule-engine:          false
   p3-repair-instructions:  false
