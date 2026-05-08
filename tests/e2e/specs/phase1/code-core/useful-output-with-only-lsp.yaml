@@ -27,6 +27,7 @@ setup:
 steps:
   - name: selector_resolves_with_only_lsp
     command: graph-harness selectors test CheckoutValidator --no-treesitter --no-scip --json
+    env: { GRAPH_HARNESS_ENABLE_LSP: "1" }
     assert:
       - { type: exit_code, expected: 0 }
       - { type: contains, value: "CheckoutValidator" }
@@ -34,6 +35,7 @@ steps:
 
   - name: provenance_carries_only_lsp
     command: graph-harness code provenance "checkout.CheckoutValidator.Validate" --no-treesitter --no-scip --json
+    env: { GRAPH_HARNESS_ENABLE_LSP: "1" }
     assert:
       - { type: exit_code, expected: 0 }
       - { type: contains, value: "\"source_count\":1" }
@@ -41,6 +43,7 @@ steps:
 
   - name: tree_sitter_and_scip_not_in_provenance
     command: sh -c "graph-harness code provenance 'checkout.CheckoutValidator.Validate' --no-treesitter --no-scip --json | grep -c 'structural_treesitter\\|index_scip' || true"
+    env: { GRAPH_HARNESS_ENABLE_LSP: "1" }
     assert:
       - { type: exit_code, expected: 0 }
       - { type: contains, value: "0" }

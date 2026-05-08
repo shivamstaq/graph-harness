@@ -29,6 +29,11 @@ setup:
   - name: install_overlay
     command: sh -c "mkdir -p .graph-harness/overlay && cp demo.checkout.gh .graph-harness/overlay/checkout.gh"
     assert: [{ type: exit_code, expected: 0 }]
+  # SCIP imports require an existing .scip-index/. The orchestrator
+  # deliberately does NOT auto-generate one (phase plan §1.B).
+  - name: generate_scip_index
+    command: sh -c "mkdir -p .scip-index && scip-go --output .scip-index/index.scip"
+    assert: [{ type: exit_code, expected: 0 }]
   - name: refresh_scip
     command: graph-harness scip refresh
     assert: [{ type: exit_code, expected: 0 }]
@@ -36,6 +41,10 @@ setup:
 steps:
   - name: selector_resolves
     command: graph-harness selectors test CheckoutValidator --json
+    # LSP is opt-in per CLI invocation (gopls cold start makes
+    # selectors test latency-sensitive). The three-source agreement
+    # gate criterion specifically needs LSP; opt in here.
+    env: { GRAPH_HARNESS_ENABLE_LSP: "1" }
     assert:
       - { type: exit_code, expected: 0 }
       - { type: contains, value: "CheckoutValidator" }
@@ -43,6 +52,7 @@ steps:
 
   - name: provenance_carries_all_three_sources
     command: graph-harness code provenance "checkout.CheckoutValidator.Validate" --json
+    env: { GRAPH_HARNESS_ENABLE_LSP: "1" }
     assert:
       - { type: exit_code, expected: 0 }
       # Folded summary: §4.5 fold over three constituent claims.
@@ -57,6 +67,7 @@ steps:
 
   - name: human_rendering_includes_per_source_claims
     command: graph-harness code provenance "checkout.CheckoutValidator.Validate"
+    env: { GRAPH_HARNESS_ENABLE_LSP: "1" }
     assert:
       - { type: exit_code, expected: 0 }
       - { type: contains, value: "source_count:    3" }
