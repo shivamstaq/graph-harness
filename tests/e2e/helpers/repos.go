@@ -103,14 +103,14 @@ func main() {
 func TSModuleWithCheckoutValidator(_, workDir string, _ map[string]any) error {
 	overlayGH := `selector CheckoutValidator {
   unique
-  anchor qualified_name "CheckoutValidator.validate"
+  anchor qualified_name "validator.CheckoutValidator.validate"
   anchor symbol_fingerprint "f:validate/sig=Cart:void"
 }
 
 flow CheckoutValidation {
   description "Pre-payment cart validation (TypeScript)"
   scope CheckoutValidator
-  step ValidateCart targets selector { qualified_name "CheckoutValidator.validate" }
+  step ValidateCart targets selector { qualified_name "validator.CheckoutValidator.validate" }
 }
 `
 	diff := `--- a/src/checkout/validator.ts
@@ -180,14 +180,14 @@ export { v };
 func PythonModuleWithCheckoutValidator(_, workDir string, _ map[string]any) error {
 	overlayGH := `selector CheckoutValidator {
   unique
-  anchor qualified_name "CheckoutValidator.validate"
+  anchor qualified_name "checkout.validator.CheckoutValidator.validate"
   anchor symbol_fingerprint "f:validate/sig=Cart:None"
 }
 
 flow CheckoutValidation {
   description "Pre-payment cart validation (Python)"
   scope CheckoutValidator
-  step ValidateCart targets selector { qualified_name "CheckoutValidator.validate" }
+  step ValidateCart targets selector { qualified_name "checkout.validator.CheckoutValidator.validate" }
 }
 `
 	diff := `--- a/checkout/validator.py
