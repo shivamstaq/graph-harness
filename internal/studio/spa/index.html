@@ -11,6 +11,7 @@
     <h1>graph-harness <span class="muted">studio</span></h1>
     <nav>
       <button data-page="editor" class="active">Overlay editor</button>
+      <button data-page="author">New selector</button>
       <button data-page="preview">Selector preview</button>
       <button data-page="entity">Entity drill-down</button>
     </nav>
@@ -41,6 +42,35 @@ flow CheckoutValidation {
       <h3>Anchor coverage</h3>
       <p class="muted">Selectors without a fingerprint anchor will not survive function-rename. (P1.I/T34.)</p>
       <ul id="coverage"></ul>
+    </section>
+
+    <!-- Page: anchor-authoring form -->
+    <section id="page-author" class="page">
+      <div class="row">
+        <input id="author-name" placeholder="selector name" value="CheckoutValidator" />
+        <label><input type="checkbox" id="author-unique" checked /> unique</label>
+      </div>
+
+      <div id="author-anchors"></div>
+      <div class="row">
+        <select id="author-add-kind">
+          <option value="qualified_name">qualified_name</option>
+          <option value="symbol_fingerprint">symbol_fingerprint</option>
+          <option value="body_hash">body_hash</option>
+          <option value="path_glob">path_glob</option>
+          <option value="ast_hash">ast_hash</option>
+        </select>
+        <button id="author-add">Add anchor</button>
+        <span class="muted">— first anchor that resolves wins (SPEC §3.3)</span>
+      </div>
+
+      <h3>Generated .gh</h3>
+      <pre id="author-gh"></pre>
+      <div class="row">
+        <input id="author-rel" placeholder="rel/path.gh" value="checkout.gh" />
+        <button id="author-save">Save .gh</button>
+        <span id="author-msg" class="muted"></span>
+      </div>
     </section>
 
     <!-- Page: selector preview -->
