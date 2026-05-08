@@ -573,6 +573,8 @@ github.com/sashamelentyev/usestdlibvars v1.29.0 h1:8J0MoRrw4/NAXtjQqTHrbW9NN+3iM
 github.com/sashamelentyev/usestdlibvars v1.29.0/go.mod h1:8PpnjHMk5VdeWlVb4wCdrB8PNbLqZ3wBZTZWkrpZZL8=
 github.com/scip-code/scip v0.7.1 h1:0crNMwMMayDebi68n62TPrNaMRKOlVqcE9L0yl/LM8A=
 github.com/scip-code/scip v0.7.1/go.mod h1:PzGCjgoVDuKyYzPvhG5TX0Z9TsuPNj/9XOKTl0LJqEI=
+github.com/scip-code/scip/bindings/go/scip v0.7.1 h1:x2QVP2nO09TFUGVrNJ+8XakD45KyXn/tSalzAELcB3Q=
+github.com/scip-code/scip/bindings/go/scip v0.7.1/go.mod h1:XC4dP3um0lKaSDRFIMwYlkBjFxKy1Rw7xFt6KDtRjAk=
 github.com/securego/gosec/v2 v2.26.1 h1:gdkttGhQFVehqRJ8grKH4DrpqM/QlPKNHBnl8QgcEC4=
 github.com/securego/gosec/v2 v2.26.1/go.mod h1:57UW4p0uoP3kxoTkhoo3axLdVAi+OWrLg/Ax/kdqtPE=
 github.com/sergi/go-diff v1.2.0 h1:XU+rvMAioB0UC3q1MFrIQy4Vo5/4VsRDQQXHsEya6xQ=
@@ -588,6 +590,8 @@ github.com/sivchari/containedctx v1.0.3 h1:x+etemjbsh2fB5ewm5FeLNi5bUjK0V8n0RB+W
 github.com/sivchari/containedctx v1.0.3/go.mod h1:c1RDvCbnJLtH4lLcYD/GqwiBSSf4F5Qk0xld2rBqzJ4=
 github.com/sonatard/noctx v0.5.1 h1:wklWg9c9ZYugOAk7qG4yP4PBrlQsmSLPTvW1K4PRQMs=
 github.com/sonatard/noctx v0.5.1/go.mod h1:64XdbzFb18XL4LporKXp8poqZtPKbCrqQ402CV+kJas=
+github.com/sourcegraph/beaut v0.0.0-20240611013027-627e4c25335a h1:j/CQ27s679M9wRGBRJYyXGrfkYuQA6VMnD7R08mHD9c=
+github.com/sourcegraph/beaut v0.0.0-20240611013027-627e4c25335a/go.mod h1:JG1sdvGTKWwe/oH3/3UKQ26vfcHIN//7fwEJhoqaBcM=
 github.com/sourcegraph/go-diff v0.8.0 h1:ipIyu4cTsLbIrln4l0qtHA3r0a7gyK4ntKjtQytHhvY=
 github.com/sourcegraph/go-diff v0.8.0/go.mod h1:hWlcO7Al+UZStZAP8rBumHpCK5ZHQ5BXsMls8p4+F5E=
 github.com/sourcegraph/jsonrpc2 v0.2.1 h1:2GtljixMQYUYCmIg7W9aF2dFmniq/mOr2T9tFRh6zSQ=
