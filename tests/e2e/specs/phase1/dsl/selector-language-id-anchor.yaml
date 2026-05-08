@@ -2,12 +2,19 @@
 spec_version: 1
 name: selector-language-id-anchor
 description: >
-  Plan §7: a selector with `anchor language_id "ts"` filters resolution to
-  TypeScript-tagged code.core entities only, even when the same
-  qualified_name (e.g. `CheckoutValidator.validate`) also exists in Go and
-  Python. The polyglot fixture stitches all three languages into one
-  workspace; with the filter active, resolution must surface only the TS
-  entity. Without the filter, resolution returns matches across all three.
+  Plan §7: a selector with `anchor language_id "<lang>"` filters resolution
+  to entities tagged with that language. The polyglot fixture has entities
+  in Go, TypeScript, and Python under their own qualified-name namespaces
+  (parser-emitted qualified names include the module path); the spec
+  verifies the filter narrows resolution to the requested language even
+  when other anchors also apply.
+  Two scenarios:
+  (a) `language_id "typescript"` + qualified_name pointing at the TS entity
+      → outcome=bound, only the TS entity returned, trace shows the
+      filter rung.
+  (b) `language_id "go"` + qualified_name pointing at the TS entity
+      → outcome=unresolved (the TS-tagged entity is filtered out, no Go
+      entity has that qualified name).
 tags: [phase1, dsl, language-id]
 order: 25
 requires:
@@ -23,37 +30,47 @@ setup:
     assert: [{ type: exit_code, expected: 0 }]
   - name: install_overlay
     command: |
-      sh -c "mkdir -p .graph-harness/overlay && cat > .graph-harness/overlay/checkout.gh <<'EOF'
-      selector CheckoutValidatorTS {
-        anchor qualified_name \"CheckoutValidator.validate\"
-        anchor language_id \"ts\"
+      bash -c '
+      mkdir -p .graph-harness/overlay
+      cat > .graph-harness/overlay/checkout.gh << "GHEOF"
+      selector ValidatorTS {
+        anchor qualified_name "validator.CheckoutValidator.validate"
+        anchor language_id "typescript"
       }
 
-      selector CheckoutValidatorAny {
-        anchor qualified_name \"CheckoutValidator.validate\"
+      selector ValidatorWantsGoButTSEntity {
+        anchor qualified_name "validator.CheckoutValidator.validate"
+        anchor language_id "go"
       }
-      EOF"
+
+      selector ValidatorAny {
+        anchor qualified_name "validator.CheckoutValidator.validate"
+      }
+      GHEOF
+      '
     assert: [{ type: exit_code, expected: 0 }]
 
 steps:
-  - name: language_id_filter_narrows_to_ts
-    command: graph-harness selectors test CheckoutValidatorTS --json --explain
+  - name: language_id_ts_filter_returns_ts_entity
+    command: graph-harness selectors test ValidatorTS --json --explain
     assert:
       - { type: exit_code, expected: 0 }
       - { type: contains, value: "\"outcome\":\"bound\"" }
       - { type: contains, value: "\"language_id\":\"typescript\"" }
       - { type: contains, value: "\"kind\":\"language_id\"" }
       - { type: contains, value: "filter active" }
-      # Must NOT contain the Go or Python language tags in the matches.
-      - { type: not_contains, value: "\"language_id\":\"go\"" }
-      - { type: not_contains, value: "\"language_id\":\"python\"" }
 
-  - name: without_filter_resolution_does_not_constrain_language
-    # The unfiltered selector resolves to one of the polyglot matches; the
-    # exact pick depends on insertion order in code.core, so we just assert
-    # the resolution succeeds (any of the three languages is valid) and the
-    # explain trace does NOT show a language_id rung.
-    command: graph-harness selectors test CheckoutValidatorAny --explain
+  - name: language_id_go_filter_excludes_ts_entity
+    command: graph-harness selectors test ValidatorWantsGoButTSEntity --json --explain
+    assert:
+      - { type: exit_code, expected: 0 }
+      - { type: contains, value: "\"outcome\":\"unresolved\"" }
+      - { type: contains, value: "language_id filter" }
+
+  - name: without_filter_resolves_unconstrained
+    # No language_id → resolution proceeds normally; the spec just asserts
+    # the trace does NOT show a language_id rung.
+    command: graph-harness selectors test ValidatorAny --explain
     assert:
       - { type: exit_code, expected: 0 }
       - { type: not_contains, value: "language_id" }
