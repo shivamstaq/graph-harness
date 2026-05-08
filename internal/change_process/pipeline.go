@@ -101,7 +101,7 @@ func (p *Pipeline) ValidateDiff(ctx context.Context, unified []byte, validationS
 	// covers the demo end-to-end and graduates as the indexer matures.
 	touched := map[string]string{} // qualified_name -> entity_id
 	for _, h := range hunks {
-		for _, qn := range extractFunctionNames(h.AddedLines) {
+		for _, qn := range extractFunctionNames(h.Path, h.AddedLines) {
 			ent, err := p.Code.LookupByQualifiedNameSuffix(ctx, qn)
 			if err != nil {
 				return nil, err
@@ -362,26 +362,115 @@ func parseUnifiedDiff(b []byte) []Hunk {
 	return hunks
 }
 
-// extractFunctionNames grabs `func Name(` and `func (recv *T) Method(`
-// signatures out of added lines. The names returned are package-less
-// (resolution against code.core handles namespacing via the qualified_name
-// column, which preserves package prefix when the file was ingested).
+// extractFunctionNames pulls function/method declaration names out of the
+// added lines of one diff hunk. Detection is dispatched by file extension
+// derived from the hunk's path so a polyglot diff (Go + TypeScript +
+// Python) is handled uniformly.
 //
-// In P0 the matcher operates by suffix: the qualified_name column carries
-// `pkg.Name` or `pkg.Recv.Name`, so we match on the trailing component.
+// The names returned are package-less; resolution against code.core
+// happens via the qualified_name suffix lookup, so the trailing
+// component is enough.
+//
+// Per-language patterns (deliberately lenient — false positives in
+// `extractFunctionNames` are harmless because the suffix lookup against
+// code.core only matches real entities):
+//
+//	go         — `func Name(`, `func (recv) Method(`
+//	typescript — top-level `function`, `export function`, `async function`,
+//	             arrow-bound `const Name = (…) =>`, class-method `Name(…) {`,
+//	             also `static Name(`. Includes JS / JSX / TSX.
+//	python     — `def name`, `async def name`. Class methods use the
+//	             same `def` form so no separate pattern needed.
 var (
-	funcRE   = regexp.MustCompile(`^\s*func\s+([A-Z][A-Za-z0-9_]*)\s*\(`)
-	methodRE = regexp.MustCompile(`^\s*func\s+\([^)]*\)\s+([A-Z][A-Za-z0-9_]*)\s*\(`)
+	goFuncRE     = regexp.MustCompile(`^\s*func\s+([A-Z][A-Za-z0-9_]*)\s*\(`)
+	goMethodRE   = regexp.MustCompile(`^\s*func\s+\([^)]*\)\s+([A-Z][A-Za-z0-9_]*)\s*\(`)
+	tsFunctionRE = regexp.MustCompile(`^\s*(?:export\s+)?(?:default\s+)?(?:async\s+)?function\s*\*?\s*([A-Za-z_$][A-Za-z0-9_$]*)\s*[<(]`)
+	tsArrowRE    = regexp.MustCompile(`^\s*(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*(?::\s*[^=]+)?=\s*(?:async\s*)?\(`)
+	tsMethodRE   = regexp.MustCompile(`^\s*(?:public\s+|private\s+|protected\s+|static\s+|async\s+|readonly\s+)*([A-Za-z_$][A-Za-z0-9_$]*)\s*(?:<[^>]*>)?\s*\([^)]*\)\s*(?::\s*[^{]+)?\s*\{`)
+	pyFuncRE     = regexp.MustCompile(`^\s*(?:async\s+)?def\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(`)
 )
 
-func extractFunctionNames(addedLines []string) []string {
+// tsMethodReservedKeywords enumerates statement-leading keywords that
+// would otherwise be matched by tsMethodRE's "ident(args) {" shape.
+// Filtering them out keeps the false-positive rate sane on real diffs.
+var tsMethodReservedKeywords = map[string]struct{}{
+	"if": {}, "for": {}, "while": {}, "switch": {}, "catch": {},
+	"return": {}, "throw": {}, "do": {}, "else": {}, "function": {},
+	"new": {}, "typeof": {}, "in": {}, "of": {}, "await": {},
+}
+
+func extractFunctionNames(path string, addedLines []string) []string {
+	switch detectLanguageFromPath(path) {
+	case "go":
+		return extractGoFunctionNames(addedLines)
+	case "ts":
+		return extractTSFunctionNames(addedLines)
+	case "py":
+		return extractPyFunctionNames(addedLines)
+	}
+	return nil
+}
+
+// detectLanguageFromPath maps a file path's extension to the same language
+// IDs the rest of the code base uses (`go` / `ts` / `py`). Unknown
+// extensions return the empty string and the diff hunk is skipped.
+func detectLanguageFromPath(path string) string {
+	switch {
+	case strings.HasSuffix(path, ".go"):
+		return "go"
+	case strings.HasSuffix(path, ".ts"),
+		strings.HasSuffix(path, ".tsx"),
+		strings.HasSuffix(path, ".js"),
+		strings.HasSuffix(path, ".jsx"),
+		strings.HasSuffix(path, ".mjs"),
+		strings.HasSuffix(path, ".cjs"):
+		return "ts"
+	case strings.HasSuffix(path, ".py"):
+		return "py"
+	}
+	return ""
+}
+
+func extractGoFunctionNames(addedLines []string) []string {
 	out := []string{}
 	for _, l := range addedLines {
-		if m := methodRE.FindStringSubmatch(l); m != nil {
+		if m := goMethodRE.FindStringSubmatch(l); m != nil {
 			out = append(out, m[1])
 			continue
 		}
-		if m := funcRE.FindStringSubmatch(l); m != nil {
+		if m := goFuncRE.FindStringSubmatch(l); m != nil {
+			out = append(out, m[1])
+		}
+	}
+	return out
+}
+
+func extractTSFunctionNames(addedLines []string) []string {
+	out := []string{}
+	for _, l := range addedLines {
+		if m := tsFunctionRE.FindStringSubmatch(l); m != nil {
+			out = append(out, m[1])
+			continue
+		}
+		if m := tsArrowRE.FindStringSubmatch(l); m != nil {
+			out = append(out, m[1])
+			continue
+		}
+		if m := tsMethodRE.FindStringSubmatch(l); m != nil {
+			name := m[1]
+			if _, reserved := tsMethodReservedKeywords[name]; reserved {
+				continue
+			}
+			out = append(out, name)
+		}
+	}
+	return out
+}
+
+func extractPyFunctionNames(addedLines []string) []string {
+	out := []string{}
+	for _, l := range addedLines {
+		if m := pyFuncRE.FindStringSubmatch(l); m != nil {
 			out = append(out, m[1])
 		}
 	}
