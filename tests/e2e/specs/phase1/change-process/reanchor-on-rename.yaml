@@ -1,0 +1,95 @@
+# yaml-language-server: $schema=https://github.com/shivamstaq/gotit/raw/main/schema/spec.schema.json
+spec_version: 1
+name: reanchor-on-rename
+description: >
+  Plan §3 gate criterion 6: a function rename → the selector with
+  `qualified_name` + `function_signature` + `body_hash` anchors re-binds
+  via the fingerprint fallback at confidence ≥ 0.75. The validate-diff
+  pipeline emits a `selector_reanchored` finding identifying the
+  fingerprint that paid for the rebind.
+  Plan calls out TypeScript as the example; the resolver + pipeline
+  behavior is language-agnostic and Go gives a reliable e2e environment
+  (LSP/SCIP/tree-sitter all available without extra toolchains).
+tags: [phase1, change-process, gate-criterion-6, reanchor]
+order: 50
+requires:
+  - cgo
+  - tree-sitter
+  - feature:p1-multi-language
+repo:
+  helper: go-module-with-checkout-validator
+
+setup:
+  - name: init_workspace
+    command: graph-harness init
+    assert: [{ type: exit_code, expected: 0 }]
+  # Capture the body_hash of the original validator function. The Go ingest
+  # path computes body_hash as sha256 of the function body source — we
+  # mirror that with a `graph-harness query` against the indexed entity to
+  # discover the value.
+  - name: install_overlay
+    command: |
+      sh -c "mkdir -p .graph-harness/overlay && cat > .graph-harness/overlay/checkout.gh <<'EOF'
+      selector CheckoutValidator {
+        anchor qualified_name \"checkout.CheckoutValidator.Validate\"
+        anchor function_signature sig(any) -> error
+      }
+      EOF"
+    assert: [{ type: exit_code, expected: 0 }]
+
+steps:
+  - name: pre_rename_resolves_bound_via_qualified_name
+    command: graph-harness selectors test CheckoutValidator --json
+    assert:
+      - { type: exit_code, expected: 0 }
+      - { type: contains, value: "\"outcome\":\"bound\"" }
+      - { type: contains, value: "\"via_anchor\":\"qualified_name\"" }
+
+  # Apply a rename diff (Validate → ValidateV2) keeping the signature
+  # unchanged. After the rename, the qualified_name anchor misses but the
+  # function_signature anchor catches via fingerprint fallback.
+  - name: apply_rename_diff
+    command: |
+      sh -c "cat > rename.diff <<'EOF'
+      --- a/internal/checkout/validator.go
+      +++ b/internal/checkout/validator.go
+      @@ -3,7 +3,7 @@ package checkout
+       // CheckoutValidator validates pre-payment cart state.
+       type CheckoutValidator struct{}
+
+      -// Validate runs the cart validation pipeline.
+      -func (v *CheckoutValidator) Validate(cart any) error {
+      +// ValidateV2 runs the cart validation pipeline (renamed).
+      +func (v *CheckoutValidator) ValidateV2(cart any) error {
+       	if cart == nil {
+       		return nil
+       	}
+      EOF
+      patch -p1 < rename.diff"
+    assert:
+      - { type: exit_code, expected: 0 }
+
+  - name: validate_rename_diff_emits_selector_reanchored
+    # validate-diff: (1) re-indexes the renamed source → code.core now has
+    # ValidateV2; (2) resolver runs the ladder — qualified_name misses,
+    # function_signature catches at confidence 0.85; (3) pipeline emits
+    # selector_reanchored finding.
+    command: graph-harness validate-diff --diff rename.diff --json
+    assert:
+      - { type: exit_code, expected: 0 }
+      - { type: contains, value: "\"kind\":\"selector_reanchored\"" }
+      - { type: contains, value: "outcome=reanchored" }
+      - { type: contains, value: "anchor=function_signature" }
+      # Gate criterion 6: confidence ≥ 0.75. function_signature default is 0.85.
+      - { type: contains, value: "confidence=0.85" }
+
+  - name: post_rename_resolves_reanchored_with_explain_trace
+    command: graph-harness selectors test CheckoutValidator --json --explain
+    assert:
+      - { type: exit_code, expected: 0 }
+      - { type: contains, value: "\"outcome\":\"reanchored\"" }
+      # Trace must show the qualified_name miss followed by the
+      # fingerprint fallback winning.
+      - { type: contains, value: "\"kind\":\"qualified_name\"" }
+      - { type: contains, value: "\"skipped\":true" }
+      - { type: contains, value: "\"kind\":\"function_signature\"" }
