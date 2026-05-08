@@ -1,0 +1,53 @@
+# yaml-language-server: $schema=https://github.com/shivamstaq/gotit/raw/main/schema/spec.schema.json
+spec_version: 1
+name: useful-output-with-only-tree-sitter
+description: >
+  SPEC §6.11 build-order tolerance: code.core must produce useful output even
+  when only one source is available. This spec disables LSP and SCIP via
+  --no-lsp / --no-scip and asserts that the parse-on-edit / tree-sitter path
+  still materializes entities, populates provenance with a single
+  structural_treesitter row, and resolves selectors.
+tags: [phase1, code-core, single-source, tree-sitter]
+order: 33
+requires:
+  - cgo
+  - tree-sitter
+  - feature:p1-multi-language
+  # The --no-lsp / --no-scip flags ride alongside the production
+  # extractor wiring (T-extractors) — until that wiring lands the
+  # flags are no-ops anyway and the spec's assertion ("only ts row in
+  # provenance") is trivially true. Gate to keep the spec scoped to
+  # the post-wiring world where the assertion is meaningful.
+  - feature:p1-extractor-wiring
+repo:
+  helper: go-module-with-checkout-validator
+
+setup:
+  - name: init_workspace
+    command: graph-harness init
+    assert: [{ type: exit_code, expected: 0 }]
+  - name: install_overlay
+    command: sh -c "mkdir -p .graph-harness/overlay && cp demo.checkout.gh .graph-harness/overlay/checkout.gh"
+    assert: [{ type: exit_code, expected: 0 }]
+
+steps:
+  - name: selector_resolves_with_only_tree_sitter
+    command: graph-harness selectors test CheckoutValidator --no-lsp --no-scip --json
+    assert:
+      - { type: exit_code, expected: 0 }
+      - { type: contains, value: "CheckoutValidator" }
+      - { type: contains, value: "\"outcome\":\"bound\"" }
+
+  - name: provenance_carries_only_tree_sitter
+    command: graph-harness code provenance "checkout.CheckoutValidator.Validate" --no-lsp --no-scip --json
+    assert:
+      - { type: exit_code, expected: 0 }
+      - { type: contains, value: "\"source_count\":1" }
+      - { type: contains, value: "\"source_class\":\"structural_treesitter\"" }
+
+  - name: lsp_and_scip_not_in_provenance
+    command: sh -c "graph-harness code provenance 'checkout.CheckoutValidator.Validate' --no-lsp --no-scip --json | grep -c 'live_lsp\\|index_scip' || true"
+    assert:
+      - { type: exit_code, expected: 0 }
+      # No LSP / SCIP rows when both are disabled — single-source mode.
+      - { type: contains, value: "0" }

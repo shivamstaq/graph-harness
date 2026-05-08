@@ -277,6 +277,22 @@ func (s *Store) LookupByQualifiedName(ctx context.Context, qn string) (*Entity, 
 	return &e, nil
 }
 
+// LookupAllByQualifiedName returns every entity whose qualified_name
+// equals qn. Distinct from LookupByQualifiedName, which returns only the
+// first match — selector resolution wants the full candidate set so a
+// `unique` selector can raise cardinality violations and a `language_id`
+// filter can narrow polyglot matches to one language.
+func (s *Store) LookupAllByQualifiedName(ctx context.Context, qn string) ([]Entity, error) {
+	if qn == "" {
+		return nil, nil
+	}
+	return s.queryEntities(ctx,
+		`SELECT id, kind, language_id, qualified_name, receiver, path, body_hash,
+		        kind_tag, parent_id, ordinal,
+		        normalized_signature, symbol_fingerprint, ast_hash
+		 FROM code_entities WHERE qualified_name = ?`, qn)
+}
+
 // LookupByBodyHash returns every entity whose body_hash equals bh. Used by
 // the body_hash anchor evaluator (SPEC §3.1). Empty bh returns no rows
 // (the empty body hash is treated as "no signal", not a wildcard).
@@ -414,6 +430,71 @@ func scanStrings(rows *sql.Rows) ([]string, error) {
 func (s *Store) DeleteEntity(ctx context.Context, id string) error {
 	_, err := s.db.ExecContext(ctx, `DELETE FROM code_entities WHERE id = ?`, id)
 	return err
+}
+
+// ListFilter narrows [Store.ListEntities] results. All fields are
+// optional; the empty filter returns every entity. Filters AND
+// together — populating both fields requires an exact match on both
+// columns.
+type ListFilter struct {
+	QualifiedName string
+	LanguageID    string
+}
+
+// ListEntities returns every entity matching the filter, ordered by
+// (language_id, qualified_name, id) so two equal queries return rows
+// in the same order across runs. The empty filter walks the whole
+// table; callers that only care about counts should prefer
+// [Store.CountByKind] or a SQL count to avoid materializing rows.
+// Used by the `graph-harness code list` CLI to support multi-entity
+// e2e assertions ("Go and Python both materialize User.save").
+func (s *Store) ListEntities(ctx context.Context, f ListFilter) ([]Entity, error) {
+	const baseQuery = `SELECT id, kind, language_id, qualified_name, receiver, path, body_hash,
+		        kind_tag, parent_id, ordinal,
+		        normalized_signature, symbol_fingerprint, ast_hash
+		 FROM code_entities`
+	var (
+		conds []string
+		args  []any
+	)
+	if f.QualifiedName != "" {
+		conds = append(conds, "qualified_name = ?")
+		args = append(args, f.QualifiedName)
+	}
+	if f.LanguageID != "" {
+		conds = append(conds, "language_id = ?")
+		args = append(args, f.LanguageID)
+	}
+	q := baseQuery
+	if len(conds) > 0 {
+		q += " WHERE " + strings.Join(conds, " AND ")
+	}
+	q += " ORDER BY language_id ASC, qualified_name ASC, id ASC"
+	rows, err := s.db.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var out []Entity
+	for rows.Next() {
+		var e Entity
+		var kind string
+		var receiver, path, bodyHash sql.NullString
+		if err := rows.Scan(&e.ID, &kind, &e.LanguageID, &e.QualifiedName, &receiver, &path, &bodyHash,
+			&e.KindTag, &e.ParentID, &e.Ordinal,
+			&e.NormalizedSignature, &e.SymbolFingerprint, &e.ASTHash); err != nil {
+			return nil, err
+		}
+		e.Kind = EntityKind(kind)
+		e.Receiver = receiver.String
+		e.Path = path.String
+		e.BodyHash = bodyHash.String
+		out = append(out, e)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 // CountByKind returns how many entities of a given kind are stored.

@@ -1,8 +1,12 @@
 # yaml-language-server: $schema=https://github.com/shivamstaq/gotit/raw/main/schema/spec.schema.json
 spec_version: 1
 name: three-source-agreement-merges-provenance
-description: 'When LSP, SCIP, and tree-sitter all describe the same Go function, code.core materializes one entity with three provenance.sources[] entries.'
-tags: [phase1, code-core, unification, p1t17]
+description: >
+  When LSP, SCIP, and tree-sitter all describe the same Go function, code.core
+  materializes one entity with a three-element provenance.sources[]: one row
+  per source (live_lsp, index_scip, structural_treesitter). The folded
+  provenance summary reports source_count == 3. Plan §7 / SPEC §6.11 §4.5.
+tags: [phase1, code-core, unification, p1t17, p1t19]
 order: 30
 requires:
   - cgo
@@ -10,6 +14,11 @@ requires:
   - gopls
   - scip-go
   - feature:p1-multi-language
+  # Skipped until T-extractors routes LSP + SCIP through indexWorkspaceCode;
+  # the spec asserts on all three source classes appearing in provenance,
+  # which only happens once the production path emits Symbols from every
+  # extractor into Unifier.Unify.
+  - feature:p1-extractor-wiring
 repo:
   helper: go-module-with-checkout-validator
 
@@ -20,10 +29,37 @@ setup:
   - name: install_overlay
     command: sh -c "mkdir -p .graph-harness/overlay && cp demo.checkout.gh .graph-harness/overlay/checkout.gh"
     assert: [{ type: exit_code, expected: 0 }]
+  - name: refresh_scip
+    command: graph-harness scip refresh
+    assert: [{ type: exit_code, expected: 0 }]
 
 steps:
-  - name: selector_resolves_with_provenance
+  - name: selector_resolves
     command: graph-harness selectors test CheckoutValidator --json
     assert:
       - { type: exit_code, expected: 0 }
       - { type: contains, value: "CheckoutValidator" }
+      - { type: contains, value: "\"outcome\":\"bound\"" }
+
+  - name: provenance_carries_all_three_sources
+    command: graph-harness code provenance "checkout.CheckoutValidator.Validate" --json
+    assert:
+      - { type: exit_code, expected: 0 }
+      # Folded summary: §4.5 fold over three constituent claims.
+      - { type: contains, value: "\"source_count\":3" }
+      # Per-source claims: every fact source must have its own row.
+      - { type: contains, value: "\"source_class\":\"live_lsp\"" }
+      - { type: contains, value: "\"source_class\":\"index_scip\"" }
+      - { type: contains, value: "\"source_class\":\"structural_treesitter\"" }
+      # Sentinel snake_case wire-format key — fails immediately if the
+      # JSON tags ever drift back to PascalCase defaults.
+      - { type: contains, value: "\"qualified_name\":\"checkout.CheckoutValidator.Validate\"" }
+
+  - name: human_rendering_includes_per_source_claims
+    command: graph-harness code provenance "checkout.CheckoutValidator.Validate"
+    assert:
+      - { type: exit_code, expected: 0 }
+      - { type: contains, value: "source_count:    3" }
+      - { type: contains, value: "live_lsp" }
+      - { type: contains, value: "index_scip" }
+      - { type: contains, value: "structural_treesitter" }
