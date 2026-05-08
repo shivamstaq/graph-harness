@@ -1,0 +1,12 @@
+selector CheckoutValidator {
+  unique
+  anchor qualified_name "CheckoutValidator.Validate"
+  anchor symbol_fingerprint "f:Validate/sig=any:error"
+  anchor body_hash "sha256:replace-on-rebake"
+}
+
+flow CheckoutValidation {
+  description "Pre-payment cart validation (Go variant)"
+  scope CheckoutValidator
+  step ValidateCart targets selector { qualified_name "CheckoutValidator.Validate" }
+}

@@ -1,0 +1,42 @@
+# yaml-language-server: $schema=https://github.com/shivamstaq/gotit/raw/main/schema/spec.schema.json
+spec_version: 1
+name: tracer-multi-lang-demo
+description: 'Phase-1 capstone: same .gh flow targets equivalent functions in Go / TS / Python repos; rename in each → re-anchor via fingerprint fallback; LSP / SCIP conflict surfaces in Conflicts panel. Mirrors plan/01-multi-language-three-source.md §4.'
+tags: [phase1, demo, capstone, p1t41]
+order: 100
+requires:
+  - cgo
+  - tree-sitter
+  - feature:p1-multi-language
+repo:
+  helper: polyglot-repo-go-ts-py
+
+setup:
+  - name: init_workspace
+    command: graph-harness init
+    assert:
+      - { type: exit_code, expected: 0 }
+  - name: install_overlay
+    command: sh -c "mkdir -p .graph-harness/overlay && cp demo.checkout.gh .graph-harness/overlay/checkout.gh"
+    assert:
+      - { type: exit_code, expected: 0 }
+
+steps:
+  - name: selector_resolves_in_each_language
+    command: graph-harness selectors test CheckoutValidator --json
+    assert:
+      - { type: exit_code, expected: 0 }
+      - { type: contains, value: "CheckoutValidator" }
+      - { type: contains, value: "matches" }
+
+  - name: validate_diff_runs_clean_on_unmodified_fixture
+    command: sh -c 'echo "" | graph-harness validate-diff --json'
+    assert:
+      - { type: exit_code, expected: 0 }
+      - { type: contains, value: "0 findings" }
+
+  - name: bench_scenario_1_three_languages
+    command: graph-harness bench --scenario 1 --regime mature
+    assert:
+      - { type: exit_code, expected: 0 }
+      - { type: contains, value: "detection_axis" }
