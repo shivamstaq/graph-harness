@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/shivamstaq/graph-harness/internal/code_core/normalize"
 	"github.com/shivamstaq/graph-harness/internal/source_live"
 )
 
@@ -33,7 +34,7 @@ func (s *Store) IngestParsedFile(ctx context.Context, pf *source_live.ParsedFile
 	out = append(out, fileEnt.ID)
 
 	for _, fn := range pf.Functions {
-		ns := NormalizeGoSignature(fn.Signature)
+		ns := normalize.ForLanguage(pf.Language, fn.Signature)
 		var ent Entity
 		if fn.Receiver == "" {
 			ent = Entity{
