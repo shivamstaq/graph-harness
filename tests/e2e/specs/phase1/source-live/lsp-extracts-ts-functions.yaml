@@ -34,3 +34,14 @@ steps:
       - { type: contains, value: '"outcome":"bound"' }
       - { type: contains, value: '"qualified_name":"validator.CheckoutValidator.validate"' }
       - { type: contains, value: '"via_anchor":"qualified_name"' }
+
+  # Provenance probe: tsserver's DocumentSymbol response carries the
+  # CheckoutValidator class as a Class symbol; tree-sitter doesn't
+  # emit class declarations as top-level entities, so this entity's
+  # source list is solely live_lsp.
+  - name: code_provenance_carries_live_lsp_source
+    command: graph-harness code provenance "CheckoutValidator" --language typescript --json
+    assert:
+      - { type: exit_code, expected: 0 }
+      - { type: contains, value: '"source_class":"live_lsp"' }
+      - { type: contains, value: '"produced_by":"extractor:lsp:tsserver"' }
