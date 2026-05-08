@@ -312,3 +312,38 @@ flow CheckoutValidation {
 	}
 	return runner.WriteFile(filepath.Join(workDir, "demo.checkout.gh"), overlayGH)
 }
+
+// PolyglotCollidingUserSave creates a small repository with `User.save`
+// declared in both Go and Python under identical qualified names. The
+// fixture exercises SPEC §6.12's `language_id` discriminator: the
+// canonical content-addressable IDs must be distinct because the
+// FunctionID hash mixes the language_id prefix, so two materialized
+// entities — one per language — coexist with different IDs.
+func PolyglotCollidingUserSave(_, workDir string, _ map[string]any) error {
+	files := map[string]string{
+		"go.mod": "module example.com/users\n\ngo 1.23\n",
+		// Go: package `User`, function `save` at file scope. The qualified
+		// name surfaced by tree-sitter is "User.save" — matching the
+		// Python class-method qualified name byte-for-byte.
+		"User/save.go": `package User
+
+// save persists the user record. Same qualified name ("User.save") as the
+// Python sibling — language_id is the only thing that disambiguates them.
+func save(id int) error { return nil }
+`,
+		"users/__init__.py": "from .User import User\n",
+		"users/User.py": `class User:
+    def save(self) -> None:
+        pass
+`,
+	}
+	for relPath, content := range files {
+		if err := runner.WriteFile(filepath.Join(workDir, relPath), content); err != nil {
+			return err
+		}
+	}
+	if err := runner.GitInit(workDir); err != nil {
+		return err
+	}
+	return runner.GitCommitAll(workDir, "initial colliding-name polyglot fixture")
+}

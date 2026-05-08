@@ -29,6 +29,7 @@ func TestE2E(t *testing.T) {
 			"ts-module-with-checkout-validator":     helpers.TSModuleWithCheckoutValidator,
 			"python-module-with-checkout-validator": helpers.PythonModuleWithCheckoutValidator,
 			"polyglot-repo-go-ts-py":                helpers.PolyglotRepoGoTSPy,
+			"polyglot-colliding-user-save":          helpers.PolyglotCollidingUserSave,
 		},
 		RequirementCheckers: map[string]runner.RequirementChecker{
 			"cgo":             helpers.CheckCGO,

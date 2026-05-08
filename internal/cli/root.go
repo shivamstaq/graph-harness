@@ -27,6 +27,7 @@ func NewRootCmd() *cobra.Command {
 		newLayersCmd(),
 		newDaemonCmd(),
 		newQueryCmd(),
+		newCodeCmd(),
 		newSelectorsCmd(),
 		newFlowsCmd(),
 		newValidateDiffCmd(),
