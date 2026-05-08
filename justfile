@@ -46,12 +46,18 @@ tidy:
     go mod tidy
     go mod verify
 
-# Smoke test — exercises the end-to-end demo from plan §4. Populated by P0.T49.
+# Smoke test — exercises the end-to-end demos from plan §4 (P0 single-Go +
+# P1 polyglot). Both run when present; failure of either fails the recipe.
 smoke:
     @if [ -x tests/smoke/p0/run.sh ]; then \
         bash tests/smoke/p0/run.sh; \
     else \
         echo "P0 smoke pending P0.T49"; \
+    fi
+    @if [ -x tests/smoke/p1/demo.sh ]; then \
+        bash tests/smoke/p1/demo.sh; \
+    else \
+        echo "P1 smoke pending P1.T41"; \
     fi
 
 # E2E suite — gotit-driven YAML specs under tests/e2e/specs/. CI surface.

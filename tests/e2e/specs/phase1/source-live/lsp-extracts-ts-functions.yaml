@@ -1,0 +1,28 @@
+# yaml-language-server: $schema=https://github.com/shivamstaq/gotit/raw/main/schema/spec.schema.json
+spec_version: 1
+name: lsp-extracts-ts-functions
+description: 'When typescript-language-server is on PATH, source.live LSP host extracts TS function symbols.'
+tags: [phase1, source-live, lsp, p1t03]
+order: 11
+requires:
+  - cgo
+  - tree-sitter
+  - tsserver
+  - feature:p1-multi-language
+repo:
+  helper: ts-module-with-checkout-validator
+
+setup:
+  - name: init_workspace
+    command: graph-harness init
+    assert: [{ type: exit_code, expected: 0 }]
+  - name: install_overlay
+    command: sh -c "mkdir -p .graph-harness/overlay && cp demo.checkout.gh .graph-harness/overlay/checkout.gh"
+    assert: [{ type: exit_code, expected: 0 }]
+
+steps:
+  - name: selectors_test_targets_ts_validate
+    command: graph-harness selectors test CheckoutValidator --json
+    assert:
+      - { type: exit_code, expected: 0 }
+      - { type: contains, value: "CheckoutValidator" }
