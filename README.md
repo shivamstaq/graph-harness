@@ -134,18 +134,19 @@ exit 1
 
 ### Multi-language quickstart
 
-The same `.gh` selector works across Go, TypeScript, and Python. With Phase-1
-support, a single declaration pins to the equivalent function in each
-language and reports findings uniformly.
+The same `.gh` flow works across Go, TypeScript, and Python. Each language's
+parser materializes a module-prefixed qualified name (Go: `pkg.Class.Method`,
+TS: `module.Class.method` from the file basename, Python:
+`dotted.path.Class.method`), so a cross-language selector typically combines
+a path-glob anchor for the common shape with a body-hash / fingerprint
+anchor for rename-survival.
 
 ```gh
 // .graph-harness/overlay/checkout.gh
 selector CheckoutValidator {
-  unique
-  anchor qualified_name "CheckoutValidator.validate"
-  anchor symbol_fingerprint "f:validate/sig=Cart:void"
-  anchor body_hash "sha256:..."
-  anchor path_glob "**/checkout/validator.{go,ts,py}"
+  anchor path_glob          "**/checkout/validator.{go,ts,py}"
+  anchor symbol_fingerprint "f:validate"
+  anchor body_hash          "sha256:..."
 }
 
 flow CheckoutValidation {
@@ -158,20 +159,22 @@ flow CheckoutValidation {
 ```console
 $ graph-harness selectors test CheckoutValidator --explain
 selector CheckoutValidator
-  outcome:    bound  (cardinality=one → 3 matches across languages)
-    1. code.core:Method  language=go      qualified_name=CheckoutValidator.Validate  via_anchor=qualified_name
-    2. code.core:Method  language=ts      qualified_name=CheckoutValidator.validate  via_anchor=qualified_name
-    3. code.core:Method  language=python  qualified_name=CheckoutValidator.validate  via_anchor=qualified_name
-  resolved_at: kernel_event_seq=4127
+  outcome:    bound  (3 matches across languages)
+    1. code.core:Method  language=go      qualified_name=checkout.CheckoutValidator.Validate              via_anchor=path_glob
+    2. code.core:Method  language=ts      qualified_name=validator.CheckoutValidator.validate             via_anchor=path_glob
+    3. code.core:Method  language=python  qualified_name=checkout.validator.CheckoutValidator.validate    via_anchor=path_glob
+  resolved_at: kernel_event_seq=...
 
 $ graph-harness bench --scenario 1 --regime mature
 { "scenario": {...}, "detection_axis": { "score": 1.0, "detected": 3, "expected": 3 }, ... }
 ```
 
 Bench fixtures for the three-language scenario 1 live under
-[`tests/testdata/bench/scenario1/{go,ts,py}/`](tests/testdata/bench/scenario1/).
-The end-to-end multi-language demo automated by
-[`tests/smoke/p1/demo.sh`](tests/smoke/p1/demo.sh) (`just smoke`) drives
+[`tests/testdata/bench/scenario1/{go,ts,py}/`](tests/testdata/bench/scenario1/);
+each variant ships its own `.gh` overlay with a per-language qualified-name
+anchor and a real body-hash sha256 (regenerate via
+`go run ./cmd/bench-rebake`). The end-to-end multi-language demo automated
+by [`tests/smoke/p1/demo.sh`](tests/smoke/p1/demo.sh) (`just smoke`) drives
 the same fixtures through `init` → `selectors test` → `validate-diff`
 → `bench` for each language.
 
