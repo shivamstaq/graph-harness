@@ -6,13 +6,12 @@ description: >
   evaluation trace, showing which anchor matched + the score for each rung.
 tags: [phase1, selectors, p1t29]
 order: 20
-features: [p1-multi-language]
-repo:
-  helper: go-module-with-checkout-validator
-
 requires:
   - cgo
   - tree-sitter
+  - feature:p1-multi-language
+repo:
+  helper: go-module-with-checkout-validator
 
 setup:
   - name: init_workspace

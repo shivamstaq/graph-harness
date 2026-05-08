@@ -8,7 +8,8 @@ description: >
   block — and renders back to canonical .gh that re-parses cleanly.
 tags: [phase1, dsl, p1t21, p1t22, p1t23, p1t24]
 order: 10
-features: [p1-multi-language]
+requires:
+  - feature:p1-multi-language
 repo:
   helper: go-module-empty
 
