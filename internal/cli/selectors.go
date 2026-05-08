@@ -208,7 +208,20 @@ func newValidateDiffCmdReal() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			pipeline := &change_process.Pipeline{Overlay: overlay, Code: store}
+			// Wire P1 finding sources: the multi-anchor resolver supplies
+			// before/after envelopes for unresolved_anchor detection, and
+			// the event log supplies code.core.SymbolDisambiguation events
+			// for the symbol_disambiguation finding kind.
+			resolver, err := semantic_overlay.NewResolver(overlay, store, nil)
+			if err != nil {
+				return err
+			}
+			pipeline := &change_process.Pipeline{
+				Overlay:  overlay,
+				Code:     store,
+				Resolver: resolver,
+				Events:   log,
+			}
 			res, err := pipeline.ValidateDiff(ctx, unified, log.LastSeq())
 			if err != nil {
 				return err

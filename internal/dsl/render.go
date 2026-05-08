@@ -90,8 +90,9 @@ func renderFlow(b *strings.Builder, f *Flow) {
 		fmt.Fprintf(b, "  risk %s\n", f.Risk)
 	}
 	for _, s := range f.Steps {
-		fmt.Fprintf(b, "  step %s targets selector { ", s.Name)
-		if s.Targets != nil && s.Targets.InlineSelector != nil {
+		switch {
+		case s.Targets != nil && s.Targets.InlineSelector != nil:
+			fmt.Fprintf(b, "  step %s targets selector { ", s.Name)
 			for i, a := range s.Targets.InlineSelector.Anchors {
 				if i > 0 {
 					b.WriteString("; ")
@@ -99,8 +100,12 @@ func renderFlow(b *strings.Builder, f *Flow) {
 				fmt.Fprintf(b, "%s ", a.Kind)
 				writeAnchorValue(b, a.Value, "  ")
 			}
+			b.WriteString(" }\n")
+		case s.Targets != nil && s.Targets.SelectorName != "":
+			fmt.Fprintf(b, "  step %s targets %s\n", s.Name, s.Targets.SelectorName)
+		default:
+			fmt.Fprintf(b, "  step %s targets selector {  }\n", s.Name)
 		}
-		b.WriteString(" }\n")
 	}
 	b.WriteString("}\n")
 }
