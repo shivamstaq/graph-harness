@@ -59,10 +59,11 @@ run_variant() {
         fi
     fi
 
-    # 2. Run selector resolution. We don't gate on outcome=bound here
-    #    because the bench fixtures ship sentinel body_hash values
-    #    (replace-on-rebake) — qualified_name fallback resolves the
-    #    selector cleanly across all three languages.
+    # 2. Run selector resolution. The bench fixtures carry real
+    #    qualified_name + symbol_fingerprint + body_hash anchors
+    #    (regenerate body_hash sentinels via `go run ./cmd/bench-rebake`)
+    #    so the selector binds via the qualified_name primary anchor at
+    #    confidence ≥ 0.95.
     echo "─── ${lang}: selectors test CheckoutValidator ──────"
     graph-harness selectors test CheckoutValidator --json | head -c 400
     echo
