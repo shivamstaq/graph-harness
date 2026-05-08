@@ -2,14 +2,15 @@ apiVersion: graph-harness.kernel/v1
 kind: Layer
 metadata:
   name: code.core
-  version: 0.1.0
+  version: 0.2.0
   depends_on:
     - source.live@^0.1.0
   description: >
-    Normalized language-level code graph derived from source.live. v1 unifies
-    LSP + SCIP + tree-sitter facts into content-addressable entities; Phase 0
-    is single-source (tree-sitter) per plan §P0.T21. Three-source unification
-    lands in P1.
+    Normalized language-level code graph derived from source.live. Three-source
+    unification (LSP + SCIP + tree-sitter) per SPEC §6.11–§6.12: when sources
+    agree on the canonical content-addressable key, one entity is materialized
+    with a merged provenance.sources[]; when sources disagree, both entities
+    are recorded and a SymbolDisambiguation event is emitted.
 
 schema:
   entity_kinds:
@@ -35,6 +36,23 @@ schema:
         qualified_name: { type: string, indexed: true }
         kind_tag:       { type: enum,   indexed: true }      # struct|interface|alias
         language_id:    { type: string, indexed: true }
+    - name: Class
+      attributes:
+        qualified_name: { type: string, indexed: true }
+        kind_tag:       { type: enum,   indexed: true }
+        language_id:    { type: string, indexed: true }
+    - name: Interface
+      attributes:
+        qualified_name: { type: string, indexed: true }
+        kind_tag:       { type: enum,   indexed: true }
+        language_id:    { type: string, indexed: true }
+    - name: Symbol                                            # §6.12 catch-all
+      attributes:
+        qualified_name: { type: string, indexed: true }
+        kind_tag:       { type: string, indexed: true }
+        language_id:    { type: string, indexed: true }
+        parent_id:      { type: string, indexed: true }       # anonymous entities
+        ordinal:        { type: int,    indexed: false }
   relation_kinds:
     - name: calls
       from: Function
@@ -45,10 +63,44 @@ schema:
       to:   Function
       attributes: {}
 
+# Provenance schema: code.core records every fact source's claim on
+# every materialized entity in a (entity_id, source_class)-keyed table.
+# These are the only valid source_class values; extractors emitting
+# anything else are ignored (and the unifier returns no provenance row
+# for that source).
+provenance_schema:
+  source_classes:
+    - id: live_lsp
+      from_layer: source.live
+      default_freshness: live
+      description: Language-Server-Protocol facts (gopls, tsserver, pyright).
+    - id: index_scip
+      from_layer: source.live
+      default_freshness: current
+      description: SCIP indexer output for committed state.
+    - id: structural_treesitter
+      from_layer: source.live
+      default_freshness: live
+      description: Tree-sitter structural parsing — type-unaware fallback.
+  entry_fields:
+    - { name: source_class,  type: enum,   required: true }
+    - { name: confidence,    type: float,  required: true,  range: [0.0, 1.0] }
+    - { name: last_seen_seq, type: uint64, required: true }
+    - { name: freshness,     type: enum,   required: true }
+    - { name: produced_by,   type: string, required: false }
+
+# Three-source unification rule, conflict-as-event (SPEC §6.12).
+unify:
+  # Materialize a SymbolDisambiguation event when at least this many
+  # distinct canonical IDs are observed at the same source-text
+  # location. Default 2 — any disagreement at all surfaces. Raise to
+  # 3 to suppress noise during the launch window per SPEC §5 risks.
+  disagreement_threshold: 2
+
 capabilities:
   - kv_lookup_by_id
   - filter_by_attribute:
-      fields: [qualified_name, language_id, path]
+      fields: [qualified_name, language_id, path, kind_tag, parent_id]
       ops: [eq, prefix, glob]
   - traversal:
       edge_kinds: [calls, references]
@@ -58,12 +110,13 @@ capabilities:
   - as_of_seq_read
   - streaming_subscribe
   - batch_ingest
+  - provenance_lookup           # GetProvenance(entity_id) -> []SourceEntry
 
 events:
   emits:
     - EntityMaterialized
     - EntitySuperseded         # rename / signature change → new ID + supersession
-    - SymbolDisambiguation     # populated in P1 when LSP/SCIP/tree-sitter disagree
+    - SymbolDisambiguation     # emitted when ≥ disagreement_threshold sources disagree
 
 storage:
   adapter: sqlite

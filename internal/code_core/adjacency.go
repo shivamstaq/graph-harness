@@ -33,10 +33,14 @@ CREATE TABLE IF NOT EXISTS code_entities (
     receiver       TEXT,
     path           TEXT,
     body_hash      TEXT,
+    kind_tag       TEXT NOT NULL DEFAULT '',
+    parent_id      TEXT NOT NULL DEFAULT '',
+    ordinal        INTEGER NOT NULL DEFAULT 0,
     created_seq    INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_code_entities_qn ON code_entities(qualified_name);
 CREATE INDEX IF NOT EXISTS idx_code_entities_kind ON code_entities(kind);
+CREATE INDEX IF NOT EXISTS idx_code_entities_parent ON code_entities(parent_id);
 
 CREATE TABLE IF NOT EXISTS code_relations (
     relation TEXT NOT NULL,         -- "calls" | "references"
@@ -46,26 +50,126 @@ CREATE TABLE IF NOT EXISTS code_relations (
 );
 CREATE INDEX IF NOT EXISTS idx_relations_from ON code_relations(relation, from_id);
 CREATE INDEX IF NOT EXISTS idx_relations_to   ON code_relations(relation, to_id);
+
+-- Per-entity provenance, keyed by (entity_id, source_class). One row per
+-- fact source that has independently produced the entity. SPEC §6.11
+-- (three-input model) + §4.4 (provenance fold). last_seen_seq feeds
+-- freshness; confidence is the source's self-reported claim; freshness
+-- is the per-source freshness class at the time of last observation.
+CREATE TABLE IF NOT EXISTS code_entity_provenance (
+    entity_id     TEXT NOT NULL,
+    source_class  TEXT NOT NULL,
+    confidence    REAL NOT NULL DEFAULT 1.0,
+    last_seen_seq INTEGER NOT NULL DEFAULT 0,
+    freshness     TEXT NOT NULL DEFAULT 'current',
+    produced_by   TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (entity_id, source_class),
+    FOREIGN KEY (entity_id) REFERENCES code_entities(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_provenance_source ON code_entity_provenance(source_class);
 `
-	_, err := s.db.Exec(schema)
+	if _, err := s.db.Exec(schema); err != nil {
+		return err
+	}
+	return s.migrateP0Provenance()
+}
+
+// migrateP0Provenance backfills a single tree-sitter provenance row for
+// every code_entities row that has no provenance entry yet. P0 wrote
+// entities without recording provenance; the unifier now expects every
+// entity to have at least one source. Idempotent: rerunning is a no-op
+// for already-migrated rows.
+func (s *Store) migrateP0Provenance() error {
+	const stmt = `
+INSERT OR IGNORE INTO code_entity_provenance
+    (entity_id, source_class, confidence, last_seen_seq, freshness, produced_by)
+SELECT id, 'structural_treesitter', 1.0, created_seq, 'current', 'extractor:treesitter:p0'
+FROM code_entities
+WHERE id NOT IN (SELECT entity_id FROM code_entity_provenance)
+`
+	_, err := s.db.Exec(stmt)
 	return err
 }
 
 // PutEntity inserts or replaces an entity. Idempotent at the same content
-// (same id) — entity identity is content-addressable.
+// (same id) — entity identity is content-addressable, so an upsert at the
+// same id with different mutable fields (e.g. body_hash) reflects the
+// latest observation rather than producing a new row.
 func (s *Store) PutEntity(ctx context.Context, e Entity, createdSeq uint64) error {
 	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO code_entities (id, kind, language_id, qualified_name, receiver, path, body_hash, created_seq)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO code_entities
+		    (id, kind, language_id, qualified_name, receiver, path, body_hash,
+		     kind_tag, parent_id, ordinal, created_seq)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
 		    kind = excluded.kind,
 		    language_id = excluded.language_id,
 		    qualified_name = excluded.qualified_name,
 		    receiver = excluded.receiver,
 		    path = excluded.path,
-		    body_hash = excluded.body_hash
-	`, e.ID, string(e.Kind), e.LanguageID, e.QualifiedName, e.Receiver, e.Path, e.BodyHash, createdSeq)
+		    body_hash = excluded.body_hash,
+		    kind_tag = excluded.kind_tag,
+		    parent_id = excluded.parent_id,
+		    ordinal = excluded.ordinal
+	`, e.ID, string(e.Kind), e.LanguageID, e.QualifiedName, e.Receiver,
+		e.Path, e.BodyHash, e.KindTag, e.ParentID, e.Ordinal, createdSeq)
 	return err
+}
+
+// UpsertProvenance records (or refreshes) a fact source's claim on an
+// entity. Keyed by (entity_id, source_class) — one row per source.
+// Subsequent calls for the same key update confidence / last_seen_seq /
+// freshness so the table tracks the freshest observation per source.
+func (s *Store) UpsertProvenance(ctx context.Context, entityID string, e SourceEntry) error {
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO code_entity_provenance
+		    (entity_id, source_class, confidence, last_seen_seq, freshness, produced_by)
+		VALUES (?, ?, ?, ?, ?, ?)
+		ON CONFLICT(entity_id, source_class) DO UPDATE SET
+		    confidence    = excluded.confidence,
+		    last_seen_seq = excluded.last_seen_seq,
+		    freshness     = excluded.freshness,
+		    produced_by   = excluded.produced_by
+	`, entityID, string(e.SourceClass), e.Confidence, e.LastSeenSeq, string(e.Freshness), e.ProducedBy)
+	return err
+}
+
+// GetProvenance returns every recorded source claim for entityID, in
+// stable ascending source_class order so callers can compare across
+// runs without a separate sort step.
+func (s *Store) GetProvenance(ctx context.Context, entityID string) ([]SourceEntry, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT source_class, confidence, last_seen_seq, freshness, produced_by
+		FROM code_entity_provenance
+		WHERE entity_id = ?
+		ORDER BY source_class ASC
+	`, entityID)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var out []SourceEntry
+	for rows.Next() {
+		var (
+			sc, freshness, producedBy string
+			confidence                float64
+			lastSeenSeq               uint64
+		)
+		if err := rows.Scan(&sc, &confidence, &lastSeenSeq, &freshness, &producedBy); err != nil {
+			return nil, err
+		}
+		out = append(out, SourceEntry{
+			SourceClass: SourceClass(sc),
+			Confidence:  confidence,
+			LastSeenSeq: lastSeenSeq,
+			Freshness:   Freshness(freshness),
+			ProducedBy:  producedBy,
+		})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 // AddRelation inserts a typed edge (idempotent on dup).
