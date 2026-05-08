@@ -7,7 +7,8 @@ description: >
   `graph-harness review add-evidence` promotes back to `pending_review`.
 tags: [phase1, review-queue, p1t32, p1t33]
 order: 30
-features: [p1-multi-language]
+requires:
+  - feature:p1-multi-language
 repo:
   helper: go-module-empty
 
