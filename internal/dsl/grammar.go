@@ -1,8 +1,12 @@
 // Package dsl is the single Participle v2 parser for the .gh surface form.
 //
-// Phase 0 scope per plan §P0.T15: selector, flow, query, import declarations
-// plus Cypher `match … return …` query bodies. Datalog `rule … :- …` is
-// rejected with a clear error message until P0.C lands.
+// SPEC §11.2 surface scope: selector, flow, query, import declarations.
+// Selectors carry a multi-anchor ladder (qualified_name, function_signature,
+// body_hash, call_neighborhood, symbol_fingerprint, ast_hash, path_glob) plus
+// optional thresholds. The fallback keyword is a synonym for anchor that
+// signals lower priority to a human reader; both are equally valid entries on
+// the resolution ladder. Datalog `rule … :- …` is rejected with a clear error
+// message until P3 lands the rule engine.
 package dsl
 
 import (
@@ -37,20 +41,119 @@ type Import struct {
 }
 
 // Selector declares a named multi-anchor matcher.
+//
+// SPEC §3.3: anchors are an ordered ladder; the resolver evaluates top-down
+// and the first anchor above its threshold wins. The optional `thresholds`
+// block overrides per-outcome defaults.
 type Selector struct {
-	Name    string    `"selector" @Ident "{"`
-	Unique  bool      `( @"unique"`
-	Anchors []*Anchor `| @@ )*`
-	End     struct{}  `"}"`
+	Name       string      `"selector" @Ident "{"`
+	Unique     bool        `( @"unique"`
+	Anchors    []*Anchor   `| @@`
+	Thresholds *Thresholds `| @@ )*`
+	End        struct{}    `"}"`
 }
 
-// Anchor is one entry in the multi-anchor ladder.
+// Anchor is one entry on the multi-anchor ladder. Marker is the literal
+// keyword used in source (`anchor` or `fallback`); both forms are preserved
+// to keep round-trip rendering byte-stable.
 type Anchor struct {
-	Kind  string `"anchor" @Ident`
-	Value *Lit   `( @@ )?`
+	Marker string       `@("anchor" | "fallback")`
+	Kind   string       `@Ident`
+	Value  *AnchorValue `( @@ )?`
 }
 
-// Lit is a string, integer, or float literal.
+// AnchorValue is the right-hand side of an anchor declaration. Exactly one
+// of the fields is non-nil after a successful parse. The shape is keyed
+// implicitly by the surrounding anchor kind:
+//
+//	qualified_name / body_hash / symbol_fingerprint / ast_hash / path_glob → Str
+//	function_signature                                                     → Sig
+//	call_neighborhood                                                      → Neighbor
+type AnchorValue struct {
+	Str      *string           `  @String`
+	Int      *int              `| @Int`
+	Float    *float64          `| @Float`
+	Sig      *FunctionSig      `| @@`
+	Neighbor *CallNeighborhood `| @@`
+}
+
+// FunctionSig is the body of `anchor function_signature sig(<types> -> <ret>)`.
+// Param/return types are arbitrary identifiers (dotted names allowed); the
+// per-language signature normalizer in code_core/normalize/ produces the
+// canonical strings these are matched against.
+type FunctionSig struct {
+	LParen struct{}   `"sig" "("`
+	Params []string   `( @Ident ( "," @Ident )* )?`
+	RParen struct{}   `")"`
+	Arrow  struct{}   `"->"`
+	Return *SigReturn `@@`
+}
+
+// SigReturn is either a single named return type or a parenthesized tuple.
+type SigReturn struct {
+	Single *string   `  @Ident`
+	Tuple  *SigTuple `| @@`
+}
+
+// SigTuple is `(T1, T2, …)` on the right of the arrow.
+type SigTuple struct {
+	LParen struct{} `"("`
+	Items  []string `( @Ident ( "," @Ident )* )?`
+	RParen struct{} `")"`
+}
+
+// CallNeighborhood is the body of
+//
+//	anchor call_neighborhood {
+//	  callers: [...]
+//	  callees: [...]
+//	}
+//
+// Either field may be omitted. Callers' / callees' values are qualified-name
+// strings matched against the code_core adjacency table.
+type CallNeighborhood struct {
+	LBrace  struct{}    `"{"`
+	Callers *StringList `( "callers" ":" @@ )?`
+	Callees *StringList `( "callees" ":" @@ )?`
+	RBrace  struct{}    `"}"`
+}
+
+// StringList is `[ "a", "b", … ]`.
+type StringList struct {
+	LBrack struct{} `"["`
+	Items  []string `( @String ( "," @String )* )?`
+	RBrack struct{} `"]"`
+}
+
+// Thresholds is the optional `thresholds { … }` block.
+//
+// `bound` and `reanchored` are single floats; `ambiguous_zone` is a two-element
+// `[lo, hi]` range. Parser accepts the full SPEC §3.3 surface; the resolver
+// honors `bound` and `reanchored` in P1, while `ambiguous_zone` is parsed but
+// only enforced once the `ambiguous` outcome lands in P3.
+type Thresholds struct {
+	Begin struct{}         `"thresholds" "{"`
+	Items []*ThresholdItem `( @@ )*`
+	End   struct{}         `"}"`
+}
+
+// ThresholdItem is `<name>: <number>` or `<name>: [lo, hi]`.
+type ThresholdItem struct {
+	Name  string      `@Ident ":"`
+	Float *float64    `(  @Float`
+	Int   *int        ` | @Int`
+	Range *FloatRange ` | @@ )`
+}
+
+// FloatRange is a two-element `[lo, hi]` literal.
+type FloatRange struct {
+	LBrack struct{} `"["`
+	Lo     float64  `@Float ","`
+	Hi     float64  `@Float`
+	RBrack struct{} `"]"`
+}
+
+// Lit is a string, integer, or float literal (used by Query bodies).
 type Lit struct {
 	Str   *string  `  @String`
 	Int   *int     `| @Int`
@@ -79,14 +182,20 @@ type Target struct {
 }
 
 // InlineSelector is a one-off selector with anchors literal-encoded.
+//
+// Anchors inside an inline selector use the compact `<kind> <value>` form
+// (no `anchor` keyword). Multi-anchor inline selectors separate entries with
+// optional `;` for readability.
 type InlineSelector struct {
-	Anchors []*InlineAnchor `"{" @@+ "}"`
+	LBrace  struct{}        `"{"`
+	Anchors []*InlineAnchor `( @@ ( ";"? @@ )* )?`
+	RBrace  struct{}        `"}"`
 }
 
 // InlineAnchor is a `<kind> <value>` inside an inline selector body.
 type InlineAnchor struct {
-	Kind  string `@Ident`
-	Value *Lit   `@@`
+	Kind  string       `@Ident`
+	Value *AnchorValue `@@`
 }
 
 // Query is a named DSL query. v0 supports Cypher match/return only.
@@ -96,7 +205,7 @@ type Query struct {
 	End  struct{} `"}"`
 }
 
-// Rule is the Datalog form. P0 rejects these in semantic validation; the
+// Rule is the Datalog form. P0/P1 reject these in semantic validation; the
 // grammar accepts them so we can produce a clear "deferred to P3" error.
 type Rule struct {
 	Head string `"rule" @Ident`
@@ -106,11 +215,12 @@ type Rule struct {
 
 var ghLexer = lexer.MustSimple([]lexer.SimpleRule{
 	{Name: "Comment", Pattern: `(?:\/\/[^\n]*|\/\*[\s\S]*?\*\/)`},
+	{Name: "Arrow", Pattern: `\->`},
 	{Name: "Float", Pattern: `[-+]?\d+\.\d+`},
 	{Name: "Int", Pattern: `[-+]?\d+`},
 	{Name: "Ident", Pattern: `[a-zA-Z_][a-zA-Z0-9_\.]*`},
 	{Name: "String", Pattern: `"(\\"|[^"])*"`},
-	{Name: "Punct", Pattern: `[\{\}\(\)\[\],:=]`},
+	{Name: "Punct", Pattern: `[\{\}\(\)\[\],:=;]`},
 	{Name: "whitespace", Pattern: `[ \t\r\n]+`},
 })
 
@@ -143,7 +253,7 @@ func ParseString(name, source string) (*File, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := validateP0Surface(f); err != nil {
+	if err := validateSurface(f); err != nil {
 		return nil, err
 	}
 	return f, nil
@@ -168,10 +278,10 @@ func hasDatalogRule(src string) bool {
 	return strings.Contains(in, ":-")
 }
 
-// validateP0Surface enforces SPEC §11.2 + plan §P0.T15: Datalog rules are
-// deferred to P3 with a clear message. Callers see a single, helpful error
-// rather than discovering it during evaluation later.
-func validateP0Surface(f *File) error {
+// validateSurface enforces SPEC §11.2: Datalog rules are deferred to P3 with
+// a clear message. Callers see a single, helpful error rather than discovering
+// it during evaluation later.
+func validateSurface(f *File) error {
 	for _, d := range f.Decls {
 		if d.Rule != nil {
 			return fmt.Errorf("datalog rules deferred to P3 (rule %s); v0 supports selector/flow/query/import only", d.Rule.Head)

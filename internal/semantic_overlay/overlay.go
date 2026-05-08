@@ -1,6 +1,7 @@
 // Package semantic_overlay implements the semantic.overlay layer importer
-// and the single-anchor selector resolver. SPEC §3, §11. Phase 0 single
-// anchor + outcomes {bound, unresolved}; multi-anchor + 5-outcome lands in P3.
+// and the multi-anchor selector resolver. SPEC §3, §11. The P1 resolver
+// supports the full multi-anchor ladder with outcomes {bound, reanchored,
+// unresolved}; the `ambiguous` and `superseded` outcomes remain P3-deferred.
 package semantic_overlay
 
 import (
@@ -72,13 +73,15 @@ func (o *Overlay) Load(overlayDir string) (map[string]error, error) {
 	return errs, walkErr
 }
 
-// ResolutionOutcome enumerates the P0 subset of SPEC §3.2 outcomes.
-// Multi-anchor outcomes (reanchored, ambiguous, superseded) land in P3.
+// ResolutionOutcome enumerates the SPEC §3.2 outcomes. P1 supports the
+// `bound`, `reanchored`, and `unresolved` subset; `ambiguous` and `superseded`
+// remain deferred to P3.
 type ResolutionOutcome string
 
-// Phase 0 resolution outcomes (SPEC §3.2 subset).
+// SPEC §3.2 resolution outcomes (P1-active subset).
 const (
 	OutcomeBound      ResolutionOutcome = "bound"
+	OutcomeReanchored ResolutionOutcome = "reanchored"
 	OutcomeUnresolved ResolutionOutcome = "unresolved"
 )
 
@@ -91,7 +94,8 @@ type ResolutionMatch struct {
 }
 
 // ResolutionEnvelope is the structured result returned by selector resolution
-// (SPEC §3.2). v0 envelope; multi-anchor extras land in P3.
+// (SPEC §3.2). The drift-signals slice and full ambiguous-set extras land
+// alongside the `ambiguous` outcome in P3.
 type ResolutionEnvelope struct {
 	SelectorID string            `json:"selector_id"`
 	Outcome    ResolutionOutcome `json:"outcome"`
@@ -99,8 +103,11 @@ type ResolutionEnvelope struct {
 	ResolvedAt uint64            `json:"resolved_at_kernel_seq"`
 }
 
-// Resolve runs the v0 single-anchor resolver against the code.core store.
-// Looks up the qualified_name anchor; everything else is "unresolved" in P0.
+// Resolve runs the qualified-name shortcut against the code.core store. This
+// preserves the P0 single-anchor entry point while task P1.F (the
+// multi-anchor ladder under internal/semantic_overlay/anchors/) is being
+// brought up; once that lands, this method delegates to the ladder
+// evaluator and only the qualified_name anchor still hits the inline path.
 func (o *Overlay) Resolve(ctx context.Context, name string, store *code_core.Store, atSeq uint64) (*ResolutionEnvelope, error) {
 	sel, ok := o.Selectors[name]
 	if !ok {
@@ -115,6 +122,8 @@ func (o *Overlay) Resolve(ctx context.Context, name string, store *code_core.Sto
 		if anchor.Kind != "qualified_name" || anchor.Value == nil || anchor.Value.Str == nil {
 			continue
 		}
+		// New P1 anchor value type is *AnchorValue; the qualified_name anchor
+		// keeps its string payload under the same Str field.
 		qn := *anchor.Value.Str
 		ent, err := store.LookupByQualifiedName(ctx, qn)
 		if err != nil {
@@ -125,7 +134,7 @@ func (o *Overlay) Resolve(ctx context.Context, name string, store *code_core.Sto
 			env.Matches = append(env.Matches, ResolutionMatch{
 				EntityID:      ent.ID,
 				QualifiedName: ent.QualifiedName,
-				Confidence:    0.97, // single-anchor exact match in P0
+				Confidence:    0.97, // qualified_name exact match (anchor-ladder default for the nominal anchor)
 				ViaAnchor:     "qualified_name",
 			})
 			break
