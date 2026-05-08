@@ -1,0 +1,12 @@
+selector CheckoutValidator {
+  unique
+  anchor qualified_name "CheckoutValidator.validate"
+  anchor symbol_fingerprint "f:validate/sig=Cart:void"
+  anchor body_hash "sha256:replace-on-rebake"
+}
+
+flow CheckoutValidation {
+  description "Pre-payment cart validation (TypeScript variant)"
+  scope CheckoutValidator
+  step ValidateCart targets selector { qualified_name "CheckoutValidator.validate" }
+}

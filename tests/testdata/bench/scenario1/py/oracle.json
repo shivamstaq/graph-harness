@@ -1,0 +1,13 @@
+{
+  "scenario_id": 1,
+  "language": "python",
+  "name": "auth-sensitive edit (Python)",
+  "expected": [
+    {
+      "kind": "flow_unreviewed",
+      "severity": "medium",
+      "subject_qualified_name": "CheckoutValidator.validate",
+      "flow": "CheckoutValidation"
+    }
+  ]
+}

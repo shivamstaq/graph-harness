@@ -1,0 +1,13 @@
+{
+  "scenario_id": 1,
+  "language": "typescript",
+  "name": "auth-sensitive edit (TypeScript)",
+  "expected": [
+    {
+      "kind": "flow_unreviewed",
+      "severity": "medium",
+      "subject_qualified_name": "CheckoutValidator.validate",
+      "flow": "CheckoutValidation"
+    }
+  ]
+}

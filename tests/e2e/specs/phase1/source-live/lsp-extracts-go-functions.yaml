@@ -1,0 +1,25 @@
+# yaml-language-server: $schema=https://github.com/shivamstaq/gotit/raw/main/schema/spec.schema.json
+spec_version: 1
+name: lsp-extracts-go-functions
+description: 'When gopls is on PATH, source.live LSP host extracts Go function symbols and code.core stores entities with extractor:lsp provenance.'
+tags: [phase1, source-live, lsp, p1t02]
+order: 10
+requires:
+  - cgo
+  - tree-sitter
+  - gopls
+  - feature:p1-multi-language
+repo:
+  helper: go-module-with-checkout-validator
+
+setup:
+  - name: init_workspace
+    command: graph-harness init
+    assert: [{ type: exit_code, expected: 0 }]
+
+steps:
+  - name: selectors_test_resolves_via_lsp_or_treesitter
+    command: graph-harness selectors test CheckoutValidator --json
+    assert:
+      - { type: exit_code, expected: 0 }
+      - { type: contains, value: "CheckoutValidator" }

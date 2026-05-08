@@ -1,0 +1,29 @@
+# yaml-language-server: $schema=https://github.com/shivamstaq/gotit/raw/main/schema/spec.schema.json
+spec_version: 1
+name: three-source-agreement-merges-provenance
+description: 'When LSP, SCIP, and tree-sitter all describe the same Go function, code.core materializes one entity with three provenance.sources[] entries.'
+tags: [phase1, code-core, unification, p1t17]
+order: 30
+requires:
+  - cgo
+  - tree-sitter
+  - gopls
+  - scip-go
+  - feature:p1-multi-language
+repo:
+  helper: go-module-with-checkout-validator
+
+setup:
+  - name: init_workspace
+    command: graph-harness init
+    assert: [{ type: exit_code, expected: 0 }]
+  - name: install_overlay
+    command: sh -c "mkdir -p .graph-harness/overlay && cp demo.checkout.gh .graph-harness/overlay/checkout.gh"
+    assert: [{ type: exit_code, expected: 0 }]
+
+steps:
+  - name: selector_resolves_with_provenance
+    command: graph-harness selectors test CheckoutValidator --json
+    assert:
+      - { type: exit_code, expected: 0 }
+      - { type: contains, value: "CheckoutValidator" }

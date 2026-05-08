@@ -1,0 +1,13 @@
+{
+  "scenario_id": 1,
+  "language": "go",
+  "name": "auth-sensitive edit (Go)",
+  "expected": [
+    {
+      "kind": "flow_unreviewed",
+      "severity": "medium",
+      "subject_qualified_name": "CheckoutValidator.Validate",
+      "flow": "CheckoutValidation"
+    }
+  ]
+}
