@@ -364,7 +364,10 @@ func (q *Queue) List(ctx context.Context, stateFilter State) ([]Proposal, error)
 	return out, rows.Err()
 }
 
-// Get returns a single proposal by ID.
+// Get returns a single proposal by ID. Proposals in `needs_evidence` have
+// their MissingItems list re-computed from the loaded requirements so
+// callers (CLI, JSON-RPC) can report what is still outstanding without
+// re-running Submit.
 func (q *Queue) Get(ctx context.Context, id string) (*Proposal, error) {
 	row := q.db.QueryRowContext(ctx, `
 		SELECT id, target_layer, kind, author, state, payload, evidence, description, created_at
@@ -375,6 +378,9 @@ func (q *Queue) Get(ctx context.Context, id string) (*Proposal, error) {
 	}
 	if err != nil {
 		return nil, err
+	}
+	if p.State == StateNeedsEvidence {
+		p.MissingItems = q.validateEvidence(p)
 	}
 	return &p, nil
 }
