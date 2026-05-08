@@ -79,7 +79,7 @@ func openCodeStore(ws *daemon.Workspace) (*code_core.Store, *sql.DB, error) {
 //nolint:unused // see comment above
 func indexWorkspaceCode(ctx context.Context, ws *daemon.Workspace, store *code_core.Store, log *facts.EventLog) error {
 	return indexWorkspaceCodeWithOptions(ctx, ws, store, log, extract.Options{
-		DisableLSP:  os.Getenv("GRAPH_HARNESS_DISABLE_LSP") == "1",
+		DisableLSP:  os.Getenv("GRAPH_HARNESS_ENABLE_LSP") != "1",
 		DisableSCIP: false,
 	})
 }

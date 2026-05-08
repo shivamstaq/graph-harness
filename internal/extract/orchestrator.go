@@ -20,9 +20,20 @@ import (
 // workspace; pyright spins up its analyzer). Per-file DocumentSymbol
 // is fast once the server is warm. We bound both so a misbehaving or
 // missing server doesn't stall the CLI past per-test e2e budgets.
+//
+// The per-call budget is generous (5s) because gopls's first
+// DocumentSymbol after Initialize can race with workspace load —
+// returning an empty result or stalling briefly until imports are
+// resolved. A short budget there used to fast-disable the language
+// for the rest of the sweep on the very first file, which was the
+// "LSP fast-fails in 1s without producing symbols" symptom T-core
+// caught. With 5s we let gopls recover; the global cap stays bounded
+// at lspMaxConsecutiveTimeouts before the language is suspended for
+// the workspace sweep.
 const (
-	lspInitTimeout    = 8 * time.Second
-	lspPerCallTimeout = 2 * time.Second
+	lspInitTimeout            = 8 * time.Second
+	lspPerCallTimeout         = 5 * time.Second
+	lspMaxConsecutiveTimeouts = 3
 )
 
 // Orchestrator is the source.live → code.core production wiring per
@@ -54,8 +65,9 @@ type Orchestrator struct {
 	scipMu  sync.RWMutex
 	scipMap map[string][]source_live.Symbol // workspace-relative path → SCIP-derived symbols
 
-	lspMu       sync.Mutex
-	lspDisabled map[string]bool // languageID → "skip; we already tried and failed"
+	lspMu                sync.Mutex
+	lspDisabled          map[string]bool // languageID → "skip; we already tried and failed"
+	lspConsecutiveCallTO map[string]int  // languageID → consecutive per-call timeouts since last success
 }
 
 // Options controls which sources the Orchestrator consults. Setters
@@ -85,12 +97,13 @@ func NewOrchestrator(root string, store *code_core.Store, unifier *code_core.Uni
 		return nil, fmt.Errorf("orchestrator: unifier is nil")
 	}
 	o := &Orchestrator{
-		root:             abs,
-		store:            store,
-		unifier:          unifier,
-		enableTreesitter: !opts.DisableTreesitter,
-		scipMap:          make(map[string][]source_live.Symbol),
-		lspDisabled:      make(map[string]bool),
+		root:                 abs,
+		store:                store,
+		unifier:              unifier,
+		enableTreesitter:     !opts.DisableTreesitter,
+		scipMap:              make(map[string][]source_live.Symbol),
+		lspDisabled:          make(map[string]bool),
+		lspConsecutiveCallTO: make(map[string]int),
 	}
 	if !opts.DisableLSP {
 		o.host = lsp.NewHost(lsp.NewRegistry(), abs)
@@ -372,15 +385,25 @@ func (o *Orchestrator) gatherLSP(ctx context.Context, languageID, rel string) ([
 	syms, err := driver.DocumentSymbol(callCtx, rel)
 	if err != nil {
 		// Single-file failures don't disable the language — the next
-		// file might be fine. But timeouts probably indicate broader
-		// trouble; flag and skip the language to bound the budget.
+		// file might be fine. Repeated consecutive timeouts suggest
+		// the server is genuinely stuck; suspend after
+		// lspMaxConsecutiveTimeouts so we don't burn the rest of the
+		// workspace budget on a hung server. Any non-timeout error
+		// resets the counter (it's a real refusal, not slowness).
 		if errors.Is(err, context.DeadlineExceeded) {
 			o.lspMu.Lock()
-			o.lspDisabled[languageID] = true
+			o.lspConsecutiveCallTO[languageID]++
+			if o.lspConsecutiveCallTO[languageID] >= lspMaxConsecutiveTimeouts {
+				o.lspDisabled[languageID] = true
+			}
 			o.lspMu.Unlock()
 		}
 		return nil, false
 	}
+	// Successful call resets the consecutive-timeout counter.
+	o.lspMu.Lock()
+	o.lspConsecutiveCallTO[languageID] = 0
+	o.lspMu.Unlock()
 	return syms, true
 }
 

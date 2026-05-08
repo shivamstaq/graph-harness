@@ -36,20 +36,20 @@ func addExtractorToggleFlags(cmd *cobra.Command) {
 }
 
 // extractOptionsFromFlags reads the toggle flags and the
-// GRAPH_HARNESS_DISABLE_LSP env var into an extract.Options. CLI
+// GRAPH_HARNESS_ENABLE_LSP env var into an extract.Options. CLI
 // callers that have wired addExtractorToggleFlags use this to build
-// the orchestrator's option set. LSP is enabled by default — the
-// orchestrator's bounded fast-fail (lspInitTimeout / lspPerCallTimeout
-// in internal/extract/orchestrator.go) protects against cold-start
-// stalls. Opt out per-invocation with --no-lsp or globally via
-// GRAPH_HARNESS_DISABLE_LSP=1.
+// the orchestrator's option set. LSP is OFF by default per the
+// cold-start-latency rationale documented above; opt in per-shell
+// with GRAPH_HARNESS_ENABLE_LSP=1, or per-invocation with the
+// command's environment. --no-lsp unconditionally disables for the
+// invocation regardless of the env var.
 func extractOptionsFromFlags(cmd *cobra.Command) extract.Options {
 	noLSP, _ := cmd.Flags().GetBool("no-lsp")
 	noSCIP, _ := cmd.Flags().GetBool("no-scip")
 	noTS, _ := cmd.Flags().GetBool("no-treesitter")
-	envDisableLSP := os.Getenv("GRAPH_HARNESS_DISABLE_LSP") == "1"
+	envEnableLSP := os.Getenv("GRAPH_HARNESS_ENABLE_LSP") == "1"
 	return extract.Options{
-		DisableLSP:        noLSP || envDisableLSP,
+		DisableLSP:        noLSP || !envEnableLSP,
 		DisableSCIP:       noSCIP,
 		DisableTreesitter: noTS,
 	}
