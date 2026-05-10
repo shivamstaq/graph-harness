@@ -12,6 +12,7 @@ import (
 
 	"github.com/shivamstaq/graph-harness/internal/code_core"
 	"github.com/shivamstaq/graph-harness/internal/source_live"
+	"github.com/shivamstaq/graph-harness/internal/source_live/detect"
 	"github.com/shivamstaq/graph-harness/internal/source_live/lsp"
 	"github.com/shivamstaq/graph-harness/internal/source_live/scip"
 )
@@ -68,6 +69,19 @@ type Orchestrator struct {
 	lspMu                sync.Mutex
 	lspDisabled          map[string]bool // languageID → "skip; we already tried and failed"
 	lspConsecutiveCallTO map[string]int  // languageID → consecutive per-call timeouts since last success
+
+	// Detection state (P1.L). Lazily populated on the first IndexAll /
+	// IndexFile call so cheap CLI paths that never need detection
+	// (e.g. health checks) don't pay the probe cost. Only exercised
+	// when enableDetection is true (Options.EnableDetection); off by
+	// default so one-shot CLI commands aren't subject to subprocess
+	// probe cost. Long-running surfaces (daemon, doctor) opt in.
+	detectRegistry  *detect.Registry
+	detectEvents    *code_core.ExtractorUnavailableEmitter
+	detectOnce      sync.Once
+	detectMu        sync.RWMutex
+	detectReports   []detect.Report
+	enableDetection bool
 }
 
 // Options controls which sources the Orchestrator consults. Setters
@@ -79,6 +93,17 @@ type Options struct {
 	DisableLSP        bool
 	DisableSCIP       bool
 	DisableTreesitter bool
+
+	// EnableDetection turns on the source.live detector probe inside
+	// IndexAll so code.core.ExtractorUnavailable events are emitted
+	// when primary extractors are missing. OFF by default because the
+	// detector spawns multiple subprocess probes (bun/pnpm/yarn/pipx/
+	// uv/npm) and each one-shot CLI command paying that cost would
+	// noticeably slow down `selectors test` / `validate-diff` /
+	// `code provenance`. Long-running surfaces (daemon, doctor command,
+	// MCP gh://doctor handler) opt in. The doctor command runs its own
+	// detector independently, so it doesn't need this either.
+	EnableDetection bool
 }
 
 // NewOrchestrator wires the sources up. It does not spawn any LSP
@@ -104,6 +129,9 @@ func NewOrchestrator(root string, store *code_core.Store, unifier *code_core.Uni
 		scipMap:              make(map[string][]source_live.Symbol),
 		lspDisabled:          make(map[string]bool),
 		lspConsecutiveCallTO: make(map[string]int),
+		detectRegistry:       detect.NewRegistry(),
+		detectEvents:         code_core.NewExtractorUnavailableEmitter(unifier.Emitter),
+		enableDetection:      opts.EnableDetection,
 	}
 	if !opts.DisableLSP {
 		o.host = lsp.NewHost(lsp.NewRegistry(), abs)
@@ -116,6 +144,69 @@ func NewOrchestrator(root string, store *code_core.Store, unifier *code_core.Uni
 		o.refresh = ref
 	}
 	return o, nil
+}
+
+// detectionTimeout caps the entire registry probe sweep so a stuck
+// subprocess probe (bun pm bin, npm root -g, etc.) cannot freeze
+// indexing. Per-probe timeout in detect.realExecer.Run is the
+// fine-grained guard; this is the belt-and-braces overall cap.
+const detectionTimeout = 4 * time.Second
+
+// runDetection probes every registered detector exactly once per
+// orchestrator instance. ExtractorUnavailable events are emitted
+// idempotently for missing tools — repeated calls are no-ops. Errors
+// from individual detectors are absorbed into the per-language Report
+// so a single broken probe doesn't kill the indexing path.
+//
+// The full Reports slice is cached on the orchestrator so the daemon /
+// MCP / doctor command can read it without re-probing.
+//
+// No-op when Options.EnableDetection is false (the default). One-shot
+// CLI commands set EnableDetection=false so subprocess probe cost
+// doesn't slow down `selectors test` / `validate-diff` /
+// `code provenance`; long-running surfaces (daemon, MCP) opt in.
+func (o *Orchestrator) runDetection(ctx context.Context) {
+	if !o.enableDetection {
+		return
+	}
+	o.detectOnce.Do(func() {
+		if o.detectRegistry == nil {
+			return
+		}
+		probeCtx, cancel := context.WithTimeout(ctx, detectionTimeout)
+		defer cancel()
+		reports, _ := o.detectRegistry.ProbeAll(probeCtx, o.root)
+		o.detectMu.Lock()
+		o.detectReports = reports
+		o.detectMu.Unlock()
+		// Emit ExtractorUnavailable events for every missing primary tool
+		// (LSP / SCIP). Embedded parsers can never be missing, so they
+		// are skipped by the emitter's Status filter.
+		if o.detectEvents == nil {
+			return
+		}
+		for _, r := range reports {
+			for _, t := range r.Tools {
+				_ = o.detectEvents.Emit(probeCtx, o.root, r.LanguageID, t)
+			}
+		}
+	})
+}
+
+// DetectionReports returns the cached per-language detection reports.
+// Returns nil before runDetection has been called. Used by daemon
+// /health/extractors and MCP gh://doctor.
+func (o *Orchestrator) DetectionReports() []detect.Report {
+	o.detectMu.RLock()
+	defer o.detectMu.RUnlock()
+	return append([]detect.Report(nil), o.detectReports...)
+}
+
+// EnsureDetected runs detection if it hasn't been already. Surfaces
+// (doctor command, daemon health endpoint) call this when they need
+// the report without going through IndexAll.
+func (o *Orchestrator) EnsureDetected(ctx context.Context) {
+	o.runDetection(ctx)
 }
 
 // Close releases every spawned subprocess and watcher. Idempotent.
@@ -178,7 +269,12 @@ func (o *Orchestrator) PreloadSCIP() error {
 // also routed through IndexFile so their SCIP-derived symbols still
 // land in code.core — IndexFile handles the missing-source-file case
 // gracefully.
+//
+// Detection (SPEC §6.18) runs once before the sweep so missing-tool
+// signals reach the event log before any symbols are unified, letting
+// downstream consumers attach low_confidence flags consistently.
 func (o *Orchestrator) IndexAll(ctx context.Context, seq uint64) error {
+	o.runDetection(ctx)
 	if err := o.PreloadSCIP(); err != nil {
 		return err
 	}

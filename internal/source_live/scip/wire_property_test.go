@@ -75,10 +75,14 @@ func TestWireFormat_StaticFixtureCrossDecodes(t *testing.T) {
 	if len(syms) != 3 {
 		t.Fatalf("import emitted %d symbols, want 3: %+v", len(syms), syms)
 	}
+	// goQualifyOverride trims namespace descriptors that carry a
+	// module-relative path ("pkg/checkout") to their leaf segment
+	// ("checkout") so the §6.12 canonical IDs computed from SCIP
+	// match the IDs computed from tree-sitter / gopls.
 	wantQNs := map[string]bool{
-		"pkg/checkout.Validator":          true,
-		"pkg/checkout.Validator.Validate": true,
-		"pkg/checkout.Helper":             true,
+		"checkout.Validator":          true,
+		"checkout.Validator.Validate": true,
+		"checkout.Helper":             true,
 	}
 	for _, s := range syms {
 		if !wantQNs[s.QualifiedName] {

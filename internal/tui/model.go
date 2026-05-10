@@ -17,12 +17,13 @@ import (
 type Model struct {
 	svc *jsonrpc.Service
 
-	view   int // 0 status, 1 findings, 2 conflicts
+	view   int // 0 status, 1 findings, 2 conflicts, 3 doctor
 	width  int
 	height int
 	status jsonrpc.StatusResult
 	finds  []change_process.ValidationFinding
 	confs  []jsonrpc.ConflictRecord
+	doctor jsonrpc.DoctorReportResult
 	cursor int
 	err    error
 	tick   time.Time
@@ -57,6 +58,7 @@ type tickMsg time.Time
 type refreshMsg struct {
 	status jsonrpc.StatusResult
 	confs  []jsonrpc.ConflictRecord
+	doctor jsonrpc.DoctorReportResult
 	err    error
 }
 
@@ -65,14 +67,17 @@ func (m *Model) refreshCmd() tea.Cmd {
 		if m.svc == nil {
 			return refreshMsg{}
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 		defer cancel()
 		st, err := m.svc.Status(ctx)
 		if err != nil {
 			return refreshMsg{err: err}
 		}
 		c, _ := m.svc.ConflictsList(ctx)
-		return refreshMsg{status: st, confs: c.Conflicts}
+		// Doctor probe is bounded; failures fall through quietly so the
+		// cockpit still renders the other panes.
+		doctor, _ := m.svc.DoctorReport(ctx)
+		return refreshMsg{status: st, confs: c.Conflicts, doctor: doctor}
 	}
 }
 
@@ -86,10 +91,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "ctrl+c", "q":
 			return m, tea.Quit
 		case "tab", "right", "l":
-			m.view = (m.view + 1) % 3
+			m.view = (m.view + 1) % 4
 			m.cursor = 0
 		case "shift+tab", "left", "h":
-			m.view = (m.view + 2) % 3
+			m.view = (m.view + 3) % 4
 			m.cursor = 0
 		case "down", "j":
 			m.cursor++
@@ -109,6 +114,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.status = msg.status
 			m.confs = msg.confs
+			m.doctor = msg.doctor
 			m.err = nil
 		}
 	}
@@ -132,7 +138,7 @@ func (m *Model) View() string {
 	b.WriteString(mutedStyle.Render("  cockpit"))
 	b.WriteString("\n")
 
-	tabs := []string{"workspace", "findings", "conflicts"}
+	tabs := []string{"workspace", "findings", "conflicts", "doctor"}
 	for i, t := range tabs {
 		if i == m.view {
 			b.WriteString(tabActive.Render(t))
@@ -149,6 +155,8 @@ func (m *Model) View() string {
 		b.WriteString(m.renderFindings())
 	case 2:
 		b.WriteString(m.renderConflicts())
+	case 3:
+		b.WriteString(m.renderDoctor())
 	}
 
 	if m.err != nil {
@@ -158,7 +166,7 @@ func (m *Model) View() string {
 	}
 
 	b.WriteString("\n")
-	b.WriteString(mutedStyle.Render("[tab] switch view  [j/k] move  [r] refresh  [q] quit"))
+	b.WriteString(mutedStyle.Render("[tab] switch view  [j/k] move  [r] refresh  [q] quit  (workspace · findings · conflicts · doctor)"))
 	return b.String()
 }
 
@@ -218,6 +226,42 @@ func (m *Model) renderConflicts() string {
 		fmt.Fprintf(&b, "%sseq=%d %s\n", marker, c.Seq, c.Qualified)
 		fmt.Fprintf(&b, "    selector: %s    sources: %s\n", c.Selector, strings.Join(c.Sources, ", "))
 		fmt.Fprintf(&b, "    detected: %s\n", c.DetectedAt.Format(time.RFC3339))
+	}
+	return b.String()
+}
+
+func (m *Model) renderDoctor() string {
+	if len(m.doctor.Languages) == 0 {
+		return mutedStyle.Render("doctor: no detection report yet (wait for refresh, or run `graph-harness doctor`).")
+	}
+	var b strings.Builder
+	for _, lang := range m.doctor.Languages {
+		b.WriteString(titleStyle.Render(lang.LanguageID))
+		b.WriteString("\n")
+		for _, t := range lang.Tools {
+			glyph := "?"
+			color := mutedStyle
+			switch t.Status {
+			case "available":
+				glyph = "✓"
+				color = lipgloss.NewStyle().Foreground(lipgloss.Color("#1f883d"))
+			case "embedded":
+				glyph = "✓ embed"
+				color = mutedStyle
+			case "missing":
+				glyph = "✗"
+				color = errStyle
+			}
+			line := fmt.Sprintf("  %s %s", glyph, t.Name)
+			if t.Path != "" {
+				line += "  " + mutedStyle.Render(t.Path)
+			} else if len(t.InstallHints) > 0 {
+				line += "  " + mutedStyle.Render("install: "+t.InstallHints[0].Command)
+			}
+			b.WriteString(color.Render(line))
+			b.WriteString("\n")
+		}
+		b.WriteString("\n")
 	}
 	return b.String()
 }

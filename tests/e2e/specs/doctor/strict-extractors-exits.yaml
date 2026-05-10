@@ -1,0 +1,35 @@
+# yaml-language-server: $schema=https://github.com/shivamstaq/gotit/raw/main/schema/spec.schema.json
+spec_version: 1
+name: strict-extractors-exits
+description: '`graph-harness doctor --strict` exits 3 when any primary extractor (LSP or SCIP) is missing for an in-workspace language. Default (non-strict) exits 0 even with missing tools (build-order tolerance per SPEC §6.11).'
+tags: [doctor, strict-mode, p1l]
+order: 10
+requires:
+  - cgo
+  - tree-sitter
+  - feature:p1-multi-language
+repo:
+  helper: polyglot-missing-extractors
+
+setup:
+  - name: init_workspace
+    command: graph-harness init
+    assert: [{ type: exit_code, expected: 0 }]
+
+steps:
+  # PATH is sanitised so any real gopls / tsserver / pyright on the host
+  # cannot accidentally satisfy the probes — this test demands all
+  # extractors come back missing.
+  - name: doctor_default_exits_zero_with_missing_extractors
+    command: graph-harness doctor
+    env: { PATH: "/usr/bin:/bin" }
+    assert:
+      - { type: exit_code, expected: 0 }
+      - { type: contains, value: "missing" }
+
+  - name: doctor_strict_exits_three_with_missing_extractors
+    command: graph-harness doctor --strict
+    env: { PATH: "/usr/bin:/bin" }
+    assert:
+      - { type: exit_code, expected: 3 }
+      - { type: contains, value: "primary extractor(s) missing" }

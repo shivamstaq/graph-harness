@@ -1,0 +1,27 @@
+# yaml-language-server: $schema=https://github.com/shivamstaq/gotit/raw/main/schema/spec.schema.json
+spec_version: 1
+name: selectors-test-bound-in-each-language
+description: 'A single selector with multi-anchor declarations resolves independently in Go, TS, and Python repos when those toolchains are present.'
+tags: [selectors, dsl, multi-anchor, p1t26]
+order: 40
+requires:
+  - cgo
+  - tree-sitter
+  - feature:p1-multi-language
+repo:
+  helper: polyglot-repo-go-ts-py
+
+setup:
+  - name: init_workspace
+    command: graph-harness init
+    assert: [{ type: exit_code, expected: 0 }]
+  - name: install_overlay
+    command: sh -c "mkdir -p .graph-harness/overlay && cp demo.checkout.gh .graph-harness/overlay/checkout.gh"
+    assert: [{ type: exit_code, expected: 0 }]
+
+steps:
+  - name: selector_resolves_polyglot
+    command: graph-harness selectors test CheckoutValidator --json
+    assert:
+      - { type: exit_code, expected: 0 }
+      - { type: contains, value: "CheckoutValidator" }

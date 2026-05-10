@@ -1,0 +1,84 @@
+# yaml-language-server: $schema=https://github.com/shivamstaq/gotit/raw/main/schema/spec.schema.json
+spec_version: 1
+name: multi-source-agreement-merges-provenance
+description: >
+  When two or more sources agree on a Go entity, code.core materialises ONE
+  entity (single canonical §6.12 ID) with a multi-row provenance.sources[].
+  We assert this on the `checkout.CheckoutValidator` Class entity, which today
+  is observed by gopls (live_lsp) and scip-go (index_scip) but not by the Go
+  tree-sitter parser. SPEC §6.11 / §4.5; plan §3 gate criterion 4.
+tags: [code, unification, p1t17, p1t19]
+order: 30
+requires:
+  - cgo
+  - tree-sitter
+  - gopls
+  - scip-go
+  - feature:have-scip-go
+  - feature:p1-multi-language
+  - feature:p1-extractor-wiring
+repo:
+  helper: go-module-with-checkout-validator
+
+# ─────────────────────────────────────────────────────────────────────────
+# Architectural gap (tracked for P2 graduation):
+#
+#   1. tree-sitter parser_go.go (internal/source_live/parser.go) only emits
+#      function_declaration / method_declaration nodes; type_declaration is
+#      not yet projected through ParsedFile.Functions. Until that lands,
+#      Class entities for Go cannot have a structural_treesitter row.
+#
+#   2. The orchestrator's filterOutFunctions (internal/extract/orchestrator
+#      .go ~250–270) strips LSP Function/Method symbols whenever tree-
+#      sitter is enabled — gopls-emitted method signatures don't normalize
+#      to the same form as tree-sitter, so a §6.12 MethodID computed from
+#      each source diverges and the unifier records two entities instead
+#      of one. Fully aligning per-language signature normalization is the
+#      P2 polish task referenced in that comment.
+#
+# Consequence: today the Class is the *only* Go kind where two sources
+# observably agree on the same canonical ID. Once (1) ships, the third
+# (structural_treesitter) row joins and we'd flip this spec to assert 3.
+# Once (2) ships, we can also re-target the Method entity here.
+# ─────────────────────────────────────────────────────────────────────────
+
+setup:
+  - name: init_workspace
+    command: graph-harness init
+    assert: [{ type: exit_code, expected: 0 }]
+  - name: install_overlay
+    command: sh -c "mkdir -p .graph-harness/overlay && cp demo.checkout.gh .graph-harness/overlay/checkout.gh"
+    assert: [{ type: exit_code, expected: 0 }]
+  # SCIP imports require an existing .scip-index/. The orchestrator
+  # deliberately does NOT auto-generate one (phase plan §1.B).
+  - name: generate_scip_index
+    command: sh -c "mkdir -p .scip-index && scip-go --output .scip-index/index.scip"
+    assert: [{ type: exit_code, expected: 0 }]
+
+steps:
+  # Trigger an indexing pass so all three sources have run.
+  - name: warm_indexer
+    command: graph-harness code list --json
+    assert:
+      - { type: exit_code, expected: 0 }
+
+  - name: provenance_carries_lsp_and_scip
+    command: graph-harness code provenance "checkout.CheckoutValidator" --json
+    assert:
+      - { type: exit_code, expected: 0 }
+      # Folded summary: §4.5 fold over two constituent claims.
+      - { type: contains, value: "\"source_count\":2" }
+      # Per-source claims: every fact source must have its own row.
+      - { type: contains, value: "\"source_class\":\"live_lsp\"" }
+      - { type: contains, value: "\"source_class\":\"index_scip\"" }
+      # Sentinel snake_case wire-format key — fails immediately if the
+      # JSON tags ever drift back to PascalCase defaults.
+      - { type: contains, value: "\"qualified_name\":\"checkout.CheckoutValidator\"" }
+
+  - name: human_rendering_includes_per_source_claims
+    command: graph-harness code provenance "checkout.CheckoutValidator"
+    assert:
+      - { type: exit_code, expected: 0 }
+      - { type: contains, value: "source_count:    2" }
+      - { type: contains, value: "live_lsp" }
+      - { type: contains, value: "index_scip" }

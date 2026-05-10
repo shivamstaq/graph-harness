@@ -21,6 +21,7 @@ import (
 	"github.com/shivamstaq/graph-harness/internal/kernel"
 	"github.com/shivamstaq/graph-harness/internal/review_queue"
 	"github.com/shivamstaq/graph-harness/internal/semantic_overlay"
+	"github.com/shivamstaq/graph-harness/internal/source_live/detect"
 )
 
 // Service is the application surface the JSON-RPC server dispatches into.
@@ -583,4 +584,41 @@ func (s *Service) ConflictsList(_ context.Context) (ConflictsListResult, error) 
 func (s *Service) DaemonShutdown(_ context.Context) (ReviewAck, error) {
 	s.Shutdown()
 	return ReviewAck{OK: true}, nil
+}
+
+// DoctorReportResult is the wire shape returned by health.extractors
+// (and by the MCP gh://doctor resource). It carries the raw
+// []detect.Report slice — the same data that backs `graph-harness
+// doctor --json --verbose`, but in the nested per-language form rather
+// than the CLI's flattened tools[] envelope.
+type DoctorReportResult struct {
+	WorkspaceRoot string          `json:"workspace_root"`
+	GeneratedAt   time.Time       `json:"generated_at"`
+	Languages     []detect.Report `json:"languages"`
+}
+
+// DoctorReport runs detection over the workspace's registered language
+// detectors and returns the per-language reports. Used by the daemon
+// /health/extractors endpoint and the MCP gh://doctor resource. P1.L
+// (T52/T53). The detector probe runs each call — detection is cheap
+// (sub-second on a warm cache) and the daemon does not yet hold a
+// cached Orchestrator handle to memoize against; we re-probe each time
+// so consumers always see the current environment.
+func (s *Service) DoctorReport(ctx context.Context) (DoctorReportResult, error) {
+	root := ""
+	if s.Workspace != nil {
+		root = s.Workspace.Root
+	}
+	registry := detect.NewRegistry()
+	probeCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
+	defer cancel()
+	reports, err := registry.ProbeAll(probeCtx, root)
+	if err != nil {
+		return DoctorReportResult{}, err
+	}
+	return DoctorReportResult{
+		WorkspaceRoot: root,
+		GeneratedAt:   time.Now().UTC(),
+		Languages:     reports,
+	}, nil
 }
