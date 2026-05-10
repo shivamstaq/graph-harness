@@ -1,8 +1,18 @@
 # Concepts
 
-> **Work in progress.** The conceptual model behind graph-harness: how the substrate is structured, how harnesses pin to regions of it, when their context attaches, and how every claim flows through one trust pipeline.
+The conceptual model behind Graph Harness: how the substrate is structured, how harnesses pin to regions of it, when their context attaches, and how every claim flows through one trust pipeline.
 
-- [The layered graph](the-layered-graph.md) — how the substrate is structured, what each layer holds, freshness and trust contracts.
-- [Lifecycle attachment](lifecycle-attachment.md) — when and why a harness attaches its context to whoever is operating.
-- [Three readers](three-readers.md) — how humans, CI, and agents read the same brief at a pinned sequence.
-- [The trust pipeline](the-trust-pipeline.md) — the proposal lifecycle every claim travels through, per-layer promotion modes, and conflict resolution.
+This section provides a high-level architectural overview for architects, DevOps teams, and enterprise evaluators.
+
+## Core Concepts
+
+| Concept | Description |
+|---|---|
+| [The layered graph](the-layered-graph.md) | How the substrate is structured. Covers the seven layers, the single global sequence, provenance folding, and replayability. |
+| [Lifecycle attachment](lifecycle-attachment.md) | When and why a harness attaches its context to an operation. Covers the six phases and relation-aware blast radius traversal. |
+| [Consistency across surfaces](consistency-across-surfaces.md) | How agents, humans, and CI read the same brief at a pinned sequence, and how they propose updates symmetrically. |
+| [The trust pipeline](the-trust-pipeline.md) | The proposal lifecycle every claim travels through. Covers per-layer promotion modes, evidence requirements, and conflict resolution. |
+
+## Reading Guide
+
+For a complete understanding of the system's architecture, we recommend reading the pages in the order listed above. Each page is designed to be self-contained but builds conceptually on the previous ones.
