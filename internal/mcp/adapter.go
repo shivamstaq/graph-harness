@@ -299,6 +299,21 @@ func (a *Adapter) registerResources() {
 			return svc.Status(ctx)
 		},
 	}
+	a.res["gh://doctor"] = resourceHandler{
+		desc: ResourceDescriptor{
+			URI:         "gh://doctor",
+			Name:        "Tooling detection report",
+			Description: "Per-language LSP / SCIP / parser availability with install hints (P1.L; SPEC §6.18). Mirrors `graph-harness doctor --json`.",
+			MimeType:    "application/json",
+		},
+		handle: func(ctx context.Context) (any, error) {
+			svc, err := a.service()
+			if err != nil {
+				return nil, err
+			}
+			return svc.DoctorReport(ctx)
+		},
+	}
 	// gh://entity/code.core/<kind>/<id> — dynamic per-entity resource
 	// (P1.T38). Static enumeration in resources/list reports a templated
 	// example URI; resources/read matches by prefix and parses the

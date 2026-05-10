@@ -26,3 +26,54 @@ enabled:
   p6-perf-bench:           false
   p6-publish:              false
   p6-hidden-corpus:        false
+
+  # ---- Tooling availability flags (workaround for gotit ≤0.2.1) ----
+  # The gotit TUI pre-flight (cmd/gotit/tui_cmd.go::runTUI) only
+  # short-circuits to StateSkipped for `feature:` and `git` requires —
+  # PATH-based custom requires (pyright, scip-go, scip-typescript,
+  # scip-python) are checked inside the spawned `go test` subprocess
+  # via testdriver.Run. That subprocess writes a one-line
+  # spec_end{skipped:true} record and exits within ~1ms; the TUI's
+  # tail (tui/runtime.go::SpawnGoTest) has a 250ms drain window with a
+  # 50ms-poll TailJSONL goroutine, and the `select` between
+  # tailEvents and drainDeadline races so the lone spec_end line can
+  # be lost. Affected specs then sit at StateRunning forever.
+  #
+  # We pre-gate with a feature flag of the same name so the TUI's
+  # pre-flight catches the skip and marks state without ever spawning.
+  # Headless `gotit run` and `go test ./tests/e2e` honor whichever path
+  # is checked first; both paths agree on the skip outcome.
+  #
+  # Flip these to true (or set GRAPH_HARNESS_E2E_FEATURES=have-pyright,
+  # have-scip-go,...) when the tool IS installed locally so the
+  # corresponding spec actually runs through the PATH-based requirement
+  # check at testdriver time.
+  have-gopls:           true   # gopls is on PATH on this host
+  have-tsserver:        true   # typescript-language-server is on PATH
+  have-pyright:         true   # pyright-langserver via pipx (~/.local/share/pipx/venvs/pyright)
+  have-scip-go:         true   # scip-go on PATH (~/go/bin/scip-go)
+  have-scip-typescript: true   # scip-typescript on PATH (mise node)
+  have-scip-python:     true   # scip-python on PATH (mise node)
+
+  # ---- Architectural gates (flip when the corresponding gap closes) ----
+  # SymbolDisambiguation events fire when ≥2 sources produce different
+  # §6.12 canonical IDs at the SAME locKey (path + byte-range + kind).
+  # In the current production wiring this can't happen for Go because:
+  #   1. LSP Function/Method symbols are stripped by the orchestrator's
+  #      filterOutFunctions (internal/extract/orchestrator.go ~250-270);
+  #      gopls's signature normalization differs from tree-sitter's, so
+  #      their MethodIDs diverge and the unifier emits two entities. The
+  #      filter is the workaround until per-language signature alignment
+  #      lands (P2 polish).
+  #   2. scip-go encodes line numbers but no byte offsets, so SCIP-imported
+  #      Symbols have Range{StartByte:0, EndByte:0} (internal/source_live
+  #      /scip/import.go::scipRange). Their locKey can never collide with
+  #      tree-sitter's byte-keyed locKey, so cross-source disambiguation
+  #      between SCIP and tree-sitter never groups together.
+  #   3. scip-go does not emit signature info, so all SCIP MethodIDs for
+  #      a given (recv, name) collapse to one ID — even two SCIP indexes
+  #      capturing different source states produce identical IDs.
+  # Property test internal/code_core/unify_test.go::TestConflictAsEvent
+  # exercises the disambiguation mechanism with synthetic inputs and is
+  # green; the e2e spec needs at least one of (1)-(3) closed.
+  cross-source-disagreement-emits-event: false

@@ -54,15 +54,13 @@ func openCodeStore(ws *daemon.Workspace) (*code_core.Store, *sql.DB, error) {
 
 // indexWorkspaceCode runs the source.live → code.core ingestion path
 // through extract.Orchestrator so every available source feeds
-// code_core.Unifier per SPEC §6.11. Tree-sitter + SCIP are enabled
-// unconditionally — both are fast (parse / file-read). LSP is opt-in
-// behind GRAPH_HARNESS_ENABLE_LSP=1 because cold-start latency
-// (gopls/tsserver/pyright workspace load) makes per-CLI-invocation
-// spawning impractical for latency-sensitive paths like
-// `selectors test` / `validate-diff`. The daemon's long-lived
-// background indexer owns the persistent LSP host (P2 wire-up); CI /
-// dev users can opt in with the env var to verify three-source merge
-// end-to-end.
+// code_core.Unifier per SPEC §6.11. Tree-sitter, SCIP, and LSP are all
+// enabled by default; the orchestrator's detector + lazy-spawn +
+// bounded-timeout machinery (SPEC §6.18) handles missing tools
+// gracefully — a missing LSP server emits a code.core.ExtractorUnavailable
+// event and the indexer carries on with the remaining sources. Set
+// GRAPH_HARNESS_DISABLE_LSP=1 (or pass --no-lsp) to suppress LSP for a
+// shell session or single invocation.
 //
 // Build-order tolerance: when SCIP indexes are absent or LSP is
 // disabled, the orchestrator degrades to tree-sitter-only ingestion —
@@ -79,9 +77,28 @@ func openCodeStore(ws *daemon.Workspace) (*code_core.Store, *sql.DB, error) {
 //nolint:unused // see comment above
 func indexWorkspaceCode(ctx context.Context, ws *daemon.Workspace, store *code_core.Store, log *facts.EventLog) error {
 	return indexWorkspaceCodeWithOptions(ctx, ws, store, log, extract.Options{
-		DisableLSP:  os.Getenv("GRAPH_HARNESS_ENABLE_LSP") != "1",
+		DisableLSP:  lspDisabledFromEnv(),
 		DisableSCIP: false,
 	})
+}
+
+// lspDisabledFromEnv resolves the LSP enable state from environment
+// variables. Default is enabled (per SPEC §6.18); an explicit
+// GRAPH_HARNESS_DISABLE_LSP=1 disables it. The legacy
+// GRAPH_HARNESS_ENABLE_LSP is honored for one minor version with a
+// deprecation note in the docs — when set to "0" it disables LSP, when
+// unset it leaves the default in place.
+func lspDisabledFromEnv() bool {
+	if os.Getenv("GRAPH_HARNESS_DISABLE_LSP") == "1" {
+		return true
+	}
+	// Backwards-compat: the old enable-flag is still honored when
+	// explicitly set to "0", which used to mean "force off". Setting it
+	// to "1" matches the new default and is now redundant.
+	if v := os.Getenv("GRAPH_HARNESS_ENABLE_LSP"); v == "0" {
+		return true
+	}
+	return false
 }
 
 // indexWorkspaceCodeWithOptions is the option-taking variant used by

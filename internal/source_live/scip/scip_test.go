@@ -116,10 +116,13 @@ func TestImportGo_TranslatesSCIPSymbols(t *testing.T) {
 	}
 	var validator, validate source_live.Symbol
 	for _, s := range syms {
+		// goQualifyOverride trims module-path namespace descriptors
+		// (e.g. `pkg/checkout`) to their leaf segment so SCIP-imported
+		// qualified names match what tree-sitter / gopls emit.
 		switch s.QualifiedName {
-		case "pkg/checkout.Validator":
+		case "checkout.Validator":
 			validator = s
-		case "pkg/checkout.Validator.Validate":
+		case "checkout.Validator.Validate":
 			validate = s
 		}
 	}
@@ -129,7 +132,7 @@ func TestImportGo_TranslatesSCIPSymbols(t *testing.T) {
 	if validate.Kind != source_live.SymbolKindMethod {
 		t.Errorf("validate kind = %q", validate.Kind)
 	}
-	if validate.Receiver != "pkg/checkout.Validator" {
+	if validate.Receiver != "checkout.Validator" {
 		t.Errorf("validate receiver = %q", validate.Receiver)
 	}
 	if validate.SourceClass != source_live.SourceClassSCIP {

@@ -1,0 +1,37 @@
+# yaml-language-server: $schema=https://github.com/shivamstaq/gotit/raw/main/schema/spec.schema.json
+spec_version: 1
+name: print-index-recipe
+description: '`graph-harness doctor --print-index-recipe` emits SCIP-generation commands for every detected language. Substitutes `graph-harness index` (deferred to P2 per plan/phase-1-gaps.md §7).'
+tags: [doctor, scip-recipe, p1l]
+order: 10
+requires:
+  - cgo
+  - tree-sitter
+  - feature:p1-multi-language
+repo:
+  helper: polyglot-with-detect-stubs
+
+setup:
+  - name: init_workspace
+    command: graph-harness init
+    assert: [{ type: exit_code, expected: 0 }]
+
+steps:
+  - name: recipe_includes_scip_go_command
+    command: graph-harness doctor --print-index-recipe
+    assert:
+      - { type: exit_code, expected: 0 }
+      - { type: contains, value: "mkdir -p .scip-index" }
+      - { type: contains, value: "vendor/bin/scip-go --module-root=. --output=.scip-index/index.go.scip" }
+
+  - name: recipe_includes_scip_typescript_command
+    command: graph-harness doctor --print-index-recipe
+    assert:
+      - { type: exit_code, expected: 0 }
+      - { type: contains, value: "node_modules/.bin/scip-typescript index --infer-tsconfig --output=.scip-index/index.ts.scip" }
+
+  - name: recipe_includes_scip_python_command
+    command: graph-harness doctor --print-index-recipe
+    assert:
+      - { type: exit_code, expected: 0 }
+      - { type: contains, value: ".venv/bin/scip-python index --output=.scip-index/index.py.scip ." }

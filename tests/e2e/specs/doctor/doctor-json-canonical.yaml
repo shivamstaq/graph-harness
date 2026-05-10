@@ -1,0 +1,48 @@
+# yaml-language-server: $schema=https://github.com/shivamstaq/gotit/raw/main/schema/spec.schema.json
+spec_version: 1
+name: doctor-json-canonical
+description: '`graph-harness doctor --json --verbose` emits the full doctor envelope: workspace_root, summary, coverage[], and a flat tools[] array where every entry carries class, status, probe_chain, and source. The slim default `--json` form drops probe_chain/source but still carries summary + coverage[].'
+tags: [doctor, p1l]
+order: 10
+requires:
+  - cgo
+  - tree-sitter
+  - feature:p1-multi-language
+repo:
+  helper: polyglot-with-detect-stubs
+
+setup:
+  - name: init_workspace
+    command: graph-harness init
+    assert: [{ type: exit_code, expected: 0 }]
+
+steps:
+  - name: doctor_json_envelope_verbose
+    command: graph-harness doctor --json --verbose
+    assert:
+      - { type: exit_code, expected: 0 }
+      - { type: contains, value: '"workspace_root"' }
+      - { type: contains, value: '"summary"' }
+      - { type: contains, value: '"coverage"' }
+      - { type: contains, value: '"tools"' }
+      - { type: contains, value: '"language": "go"' }
+      - { type: contains, value: '"language": "typescript"' }
+      - { type: contains, value: '"language": "python"' }
+      - { type: contains, value: '"class": "lsp"' }
+      - { type: contains, value: '"class": "scip"' }
+      - { type: contains, value: '"class": "parser"' }
+      - { type: contains, value: '"status": "available"' }
+      - { type: contains, value: '"status": "embedded"' }
+      - { type: contains, value: '"probe_chain"' }
+      - { type: contains, value: '"source": "project_local"' }
+
+  - name: doctor_json_envelope_slim
+    command: graph-harness doctor --json
+    assert:
+      - { type: exit_code, expected: 0 }
+      - { type: contains, value: '"workspace_root"' }
+      - { type: contains, value: '"summary"' }
+      - { type: contains, value: '"coverage"' }
+      - { type: contains, value: '"tools"' }
+      - { type: contains, value: '"language": "go"' }
+      - { type: not_contains, value: 'probe_chain' }

@@ -1,0 +1,43 @@
+# yaml-language-server: $schema=https://github.com/shivamstaq/gotit/raw/main/schema/spec.schema.json
+spec_version: 1
+name: print-install-prefers-ecosystem
+description: '`graph-harness doctor --print-install` emits the project-aware install command for each missing tool: pnpm-lock.yaml workspace → `pnpm add -g`; .venv detected → `pipx install pyright`.'
+tags: [doctor, install-hints, p1l]
+order: 10
+requires:
+  - cgo
+  - tree-sitter
+  - feature:p1-multi-language
+repo:
+  helper: polyglot-missing-extractors
+
+setup:
+  - name: init_workspace
+    command: graph-harness init
+    assert: [{ type: exit_code, expected: 0 }]
+
+steps:
+  # We sanitise PATH so the host's own gopls / typescript-language-server
+  # (if any) doesn't satisfy the probe — this spec specifically tests the
+  # missing-tool install hints.
+  - name: print_install_emits_pnpm_for_ts
+    command: graph-harness doctor --print-install
+    env: { PATH: "/usr/bin:/bin" }
+    assert:
+      - { type: exit_code, expected: 0 }
+      - { type: contains, value: "pnpm add -g typescript-language-server" }
+      - { type: contains, value: "pnpm add -g @sourcegraph/scip-typescript" }
+
+  - name: print_install_emits_pipx_for_pyright
+    command: graph-harness doctor --print-install
+    env: { PATH: "/usr/bin:/bin" }
+    assert:
+      - { type: exit_code, expected: 0 }
+      - { type: contains, value: "pipx install pyright" }
+
+  - name: print_install_emits_go_install_for_scip_go
+    command: graph-harness doctor --print-install
+    env: { PATH: "/usr/bin:/bin" }
+    assert:
+      - { type: exit_code, expected: 0 }
+      - { type: contains, value: "go install github.com/scip-code/scip-go/cmd/scip-go@latest" }
