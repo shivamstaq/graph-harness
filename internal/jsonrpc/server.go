@@ -176,6 +176,7 @@ func (s *Server) registerBuiltins() {
 	Register(s, "mcp.after_edit", "mcp", svc.MCPAfterEdit)
 
 	RegisterVoid(s, "conflicts.list", "conflicts", svc.ConflictsList)
+	RegisterVoid(s, "health.extractors", "doctor", svc.DoctorReport)
 }
 
 func (s *Server) capList() []string {

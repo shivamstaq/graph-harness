@@ -9,9 +9,9 @@
 #     bash tests/smoke/p1/demo.sh
 #
 # `just smoke` will dispatch into the canonical gotit spec
-# `tests/e2e/specs/phase1/tracer-multi-lang-demo.yaml` once the phase1
-# wave is open; the .sh form here is the manual / CI-fallback runner and
-# the source of truth gotit yamls reference.
+# `tests/e2e/specs/demo/tracer-multi-lang-demo.yaml` once the multi-language
+# capability is open; the .sh form here is the manual / CI-fallback runner
+# and the source of truth gotit yamls reference.
 
 set -euo pipefail
 

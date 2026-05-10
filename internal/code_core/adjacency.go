@@ -80,6 +80,10 @@ CREATE INDEX IF NOT EXISTS idx_provenance_source ON code_entity_provenance(sourc
 	_, _ = s.db.Exec(`ALTER TABLE code_entities ADD COLUMN normalized_signature TEXT NOT NULL DEFAULT ''`)
 	_, _ = s.db.Exec(`ALTER TABLE code_entities ADD COLUMN symbol_fingerprint TEXT NOT NULL DEFAULT ''`)
 	_, _ = s.db.Exec(`ALTER TABLE code_entities ADD COLUMN ast_hash TEXT NOT NULL DEFAULT ''`)
+	// P1.L provenance columns. Same best-effort ALTER pattern.
+	_, _ = s.db.Exec(`ALTER TABLE code_entity_provenance ADD COLUMN produced_by_path TEXT NOT NULL DEFAULT ''`)
+	_, _ = s.db.Exec(`ALTER TABLE code_entity_provenance ADD COLUMN server_id TEXT NOT NULL DEFAULT ''`)
+	_, _ = s.db.Exec(`ALTER TABLE code_entity_provenance ADD COLUMN low_confidence INTEGER NOT NULL DEFAULT 0`)
 	return s.migrateP0Provenance()
 }
 
@@ -135,16 +139,25 @@ func (s *Store) PutEntity(ctx context.Context, e Entity, createdSeq uint64) erro
 // Subsequent calls for the same key update confidence / last_seen_seq /
 // freshness so the table tracks the freshest observation per source.
 func (s *Store) UpsertProvenance(ctx context.Context, entityID string, e SourceEntry) error {
+	low := 0
+	if e.LowConfidence {
+		low = 1
+	}
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO code_entity_provenance
-		    (entity_id, source_class, confidence, last_seen_seq, freshness, produced_by)
-		VALUES (?, ?, ?, ?, ?, ?)
+		    (entity_id, source_class, confidence, last_seen_seq, freshness,
+		     produced_by, produced_by_path, server_id, low_confidence)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(entity_id, source_class) DO UPDATE SET
-		    confidence    = excluded.confidence,
-		    last_seen_seq = excluded.last_seen_seq,
-		    freshness     = excluded.freshness,
-		    produced_by   = excluded.produced_by
-	`, entityID, string(e.SourceClass), e.Confidence, e.LastSeenSeq, string(e.Freshness), e.ProducedBy)
+		    confidence       = excluded.confidence,
+		    last_seen_seq    = excluded.last_seen_seq,
+		    freshness        = excluded.freshness,
+		    produced_by      = excluded.produced_by,
+		    produced_by_path = excluded.produced_by_path,
+		    server_id        = excluded.server_id,
+		    low_confidence   = excluded.low_confidence
+	`, entityID, string(e.SourceClass), e.Confidence, e.LastSeenSeq, string(e.Freshness),
+		e.ProducedBy, e.ProducedByPath, e.ServerID, low)
 	return err
 }
 
@@ -153,7 +166,8 @@ func (s *Store) UpsertProvenance(ctx context.Context, entityID string, e SourceE
 // runs without a separate sort step.
 func (s *Store) GetProvenance(ctx context.Context, entityID string) ([]SourceEntry, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT source_class, confidence, last_seen_seq, freshness, produced_by
+		SELECT source_class, confidence, last_seen_seq, freshness,
+		       produced_by, produced_by_path, server_id, low_confidence
 		FROM code_entity_provenance
 		WHERE entity_id = ?
 		ORDER BY source_class ASC
@@ -165,19 +179,24 @@ func (s *Store) GetProvenance(ctx context.Context, entityID string) ([]SourceEnt
 	var out []SourceEntry
 	for rows.Next() {
 		var (
-			sc, freshness, producedBy string
-			confidence                float64
-			lastSeenSeq               uint64
+			sc, freshness, producedBy, producedByPath, serverID string
+			confidence                                          float64
+			lastSeenSeq                                         uint64
+			low                                                 int
 		)
-		if err := rows.Scan(&sc, &confidence, &lastSeenSeq, &freshness, &producedBy); err != nil {
+		if err := rows.Scan(&sc, &confidence, &lastSeenSeq, &freshness,
+			&producedBy, &producedByPath, &serverID, &low); err != nil {
 			return nil, err
 		}
 		out = append(out, SourceEntry{
-			SourceClass: SourceClass(sc),
-			Confidence:  confidence,
-			LastSeenSeq: lastSeenSeq,
-			Freshness:   Freshness(freshness),
-			ProducedBy:  producedBy,
+			SourceClass:    SourceClass(sc),
+			Confidence:     confidence,
+			LastSeenSeq:    lastSeenSeq,
+			Freshness:      Freshness(freshness),
+			ProducedBy:     producedBy,
+			ProducedByPath: producedByPath,
+			ServerID:       serverID,
+			LowConfidence:  low != 0,
 		})
 	}
 	if err := rows.Err(); err != nil {

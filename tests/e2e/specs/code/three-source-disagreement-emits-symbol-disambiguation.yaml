@@ -1,0 +1,86 @@
+# yaml-language-server: $schema=https://github.com/shivamstaq/gotit/raw/main/schema/spec.schema.json
+spec_version: 1
+name: three-source-disagreement-emits-symbol-disambiguation
+description: >
+  When LSP and SCIP report a function with different signatures (because a
+  stale .scip-index/ file is committed alongside source where gopls sees the
+  fresh signature), the unifier records both canonical IDs as separate entities
+  AND emits a code.core.SymbolDisambiguation event whose payload carries every
+  source's claim. Gate criterion 5 (plan §3) and SPEC §6.12 conflict-as-event.
+tags: [code, unification, p1t18, p1t20]
+order: 31
+requires:
+  - cgo
+  - tree-sitter
+  - gopls
+  - scip-go
+  - feature:have-scip-go
+  - feature:p1-multi-language
+  - feature:p1-extractor-wiring
+  # Gated until cross-source disambiguation can actually fire from a
+  # real workspace — the unifier mechanism works (see
+  # internal/code_core/unify_test.go::TestConflictAsEvent) but the
+  # production wiring has three blockers: LSP method filtering, SCIP
+  # missing byte ranges, and SCIP missing signatures. See the
+  # `cross-source-disagreement-emits-event` block in
+  # tests/e2e/features.yaml for the full architectural rationale.
+  - feature:cross-source-disagreement-emits-event
+repo:
+  helper: go-module-with-checkout-validator
+
+setup:
+  - name: init_workspace
+    command: graph-harness init
+    assert: [{ type: exit_code, expected: 0 }]
+  - name: install_overlay
+    command: sh -c "mkdir -p .graph-harness/overlay && cp demo.checkout.gh .graph-harness/overlay/checkout.gh"
+    assert: [{ type: exit_code, expected: 0 }]
+  # First, capture the original signature in a SCIP index. This is the
+  # claim SCIP will replay on subsequent imports.
+  - name: generate_scip_index_against_original_source
+    command: sh -c "mkdir -p .scip-index && scip-go --output .scip-index/index.scip"
+    assert: [{ type: exit_code, expected: 0 }]
+  # Then drift the live source so it disagrees with the SCIP-indexed
+  # signature. LSP (gopls) sees the new signature; SCIP still carries
+  # the old one — that's the divergence the unifier turns into a
+  # SymbolDisambiguation event.
+  - name: drift_signature_from_scip_index
+    command: sh -c "sed -i.bak 's/Validate(cart any)/Validate(cart any, ctx string)/' internal/checkout/validator.go"
+    assert: [{ type: exit_code, expected: 0 }]
+  # The .scip-index/ stays as captured against the original signature.
+  # PreloadSCIP rescans it on every IndexAll, so the stale index claim
+  # collides with the fresh source on the next CLI invocation — no
+  # explicit refresh step needed.
+
+steps:
+  - name: selector_still_resolves
+    # Resolution still finds at least one match — the unifier records
+    # both candidate entities and the resolver picks via the multi-
+    # anchor ladder. The key assertion is on the events stream.
+    command: graph-harness selectors test CheckoutValidator --json
+    env: { GRAPH_HARNESS_ENABLE_LSP: "1" }
+    assert:
+      - { type: exit_code, expected: 0 }
+
+  - name: symbol_disambiguation_event_emitted
+    command: graph-harness code events --kind SymbolDisambiguation --json
+    env: { GRAPH_HARNESS_ENABLE_LSP: "1" }
+    assert:
+      - { type: exit_code, expected: 0 }
+      - { type: contains, value: "\"kind\":\"SymbolDisambiguation\"" }
+      - { type: contains, value: "\"layer\":\"code.core\"" }
+      # Payload must carry every source's claim — gate criterion 5.
+      - { type: contains, value: "\"claims\":[" }
+      - { type: contains, value: "\"source_class\":\"live_lsp\"" }
+      - { type: contains, value: "\"source_class\":\"index_scip\"" }
+
+  - name: both_canonical_ids_persisted
+    # Two distinct canonical IDs for the same logical function: one from
+    # the LSP/treesitter consensus, one from the stale SCIP. Querying
+    # by qualified_name returns one of them; the disambiguation event
+    # carries both IDs in its claims[].
+    command: graph-harness code provenance "checkout.CheckoutValidator.Validate" --json
+    env: { GRAPH_HARNESS_ENABLE_LSP: "1" }
+    assert:
+      - { type: exit_code, expected: 0 }
+      - { type: contains, value: "\"qualified_name\":\"checkout.CheckoutValidator.Validate\"" }

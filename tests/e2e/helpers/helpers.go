@@ -64,7 +64,7 @@ func CheckPyright(_ string) error {
 
 // CheckSCIPGo verifies scip-go is on PATH.
 func CheckSCIPGo(_ string) error {
-	return checkOnPath("scip-go", "go install github.com/sourcegraph/scip-go/cmd/scip-go@latest")("")
+	return checkOnPath("scip-go", "go install github.com/scip-code/scip-go/cmd/scip-go@latest")("")
 }
 
 // CheckSCIPTypeScript verifies scip-typescript is on PATH.
