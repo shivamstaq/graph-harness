@@ -1,0 +1,43 @@
+# yaml-language-server: $schema=https://github.com/shivamstaq/gotit/raw/main/schema/spec.schema.json
+spec_version: 1
+name: precedence-project-local-wins
+description: 'Project-local install locations beat ecosystem-user and PATH. The fixture stages stub binaries at node_modules/.bin (TS), .venv/bin (Py), vendor/bin (Go); doctor must report source=project_local for the matching tools.'
+tags: [doctor, precedence, p1l]
+order: 10
+requires:
+  - cgo
+  - tree-sitter
+  - feature:p1-multi-language
+repo:
+  helper: polyglot-with-detect-stubs
+
+setup:
+  - name: init_workspace
+    command: graph-harness init
+    assert: [{ type: exit_code, expected: 0 }]
+
+steps:
+  - name: ts_lsp_resolves_project_local
+    command: graph-harness doctor --json --verbose --language=typescript
+    assert:
+      - { type: exit_code, expected: 0 }
+      - { type: contains, value: '"name": "typescript-language-server"' }
+      - { type: contains, value: '"status": "available"' }
+      - { type: contains, value: '"source": "project_local"' }
+      - { type: contains, value: 'node_modules/.bin/typescript-language-server' }
+
+  - name: python_lsp_resolves_venv_bin
+    command: graph-harness doctor --json --verbose --language=python
+    assert:
+      - { type: exit_code, expected: 0 }
+      - { type: contains, value: '"name": "pyright-langserver"' }
+      - { type: contains, value: '"source": "project_local"' }
+      - { type: contains, value: '.venv/bin/pyright-langserver' }
+
+  - name: go_lsp_resolves_vendor_bin
+    command: graph-harness doctor --json --verbose --language=go
+    assert:
+      - { type: exit_code, expected: 0 }
+      - { type: contains, value: '"name": "gopls"' }
+      - { type: contains, value: '"source": "project_local"' }
+      - { type: contains, value: 'vendor/bin/gopls' }

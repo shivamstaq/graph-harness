@@ -59,12 +59,27 @@ const (
 //   - Freshness — per-source freshness class at last observation.
 //   - ProducedBy — human-readable producer identifier
 //     ("extractor:lsp:gopls", "extractor:scip", "extractor:treesitter:go").
+//   - ProducedByPath — the resolved binary path that produced the
+//     fact, when known (LSP / SCIP). Empty for embedded extractors
+//     (tree-sitter cgo). Surfaced to consumers so they can audit
+//     which physical install produced the entity (P1.L; SPEC §6.18).
+//   - ServerID — canonical LSP server id ("pyright", "basedpyright",
+//     "vtsls", …) when SourceClass = live_lsp. Lets surfaces
+//     differentiate facts from alternative server choices for the
+//     same language.
+//   - LowConfidence — true when this fact's language has a missing
+//     primary extractor (other source(s) filled in). Sets the entity
+//     into the "degraded coverage" bucket so downstream consumers can
+//     warn / lower-rank these entities (P1.L; SPEC §6.11 amendment).
 type SourceEntry struct {
-	SourceClass SourceClass `json:"source_class"`
-	Confidence  float64     `json:"confidence"`
-	LastSeenSeq uint64      `json:"last_seen_seq"`
-	Freshness   Freshness   `json:"freshness"`
-	ProducedBy  string      `json:"produced_by,omitempty"`
+	SourceClass    SourceClass `json:"source_class"`
+	Confidence     float64     `json:"confidence"`
+	LastSeenSeq    uint64      `json:"last_seen_seq"`
+	Freshness      Freshness   `json:"freshness"`
+	ProducedBy     string      `json:"produced_by,omitempty"`
+	ProducedByPath string      `json:"produced_by_path,omitempty"`
+	ServerID       string      `json:"server_id,omitempty"`
+	LowConfidence  bool        `json:"low_confidence,omitempty"`
 }
 
 // Provenance is the merged provenance record for a single entity — the

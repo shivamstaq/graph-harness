@@ -31,6 +31,9 @@ func TestE2E(t *testing.T) {
 			"polyglot-repo-go-ts-py":                           helpers.PolyglotRepoGoTSPy,
 			"polyglot-colliding-user-save":                     helpers.PolyglotCollidingUserSave,
 			"go-module-with-checkout-validator-and-scip-index": helpers.GoModuleWithCheckoutValidatorAndSCIPIndex,
+			"polyglot-with-detect-stubs":                       helpers.PolyglotWithDetectStubs,
+			"polyglot-missing-extractors":                      helpers.PolyglotMissingExtractors,
+			"python-with-basedpyright-override":                helpers.PythonWithBasedpyrightOverride,
 		},
 		RequirementCheckers: map[string]runner.RequirementChecker{
 			"cgo":             helpers.CheckCGO,

@@ -1,0 +1,35 @@
+# yaml-language-server: $schema=https://github.com/shivamstaq/gotit/raw/main/schema/spec.schema.json
+spec_version: 1
+name: doctor-text-output-shape
+description: '`graph-harness doctor` (text mode) prints the workspace, languages header, a Coverage banner, one card per language, and a Legend / Next steps footer.'
+tags: [doctor, p1l]
+order: 10
+requires:
+  - cgo
+  - tree-sitter
+  - feature:p1-multi-language
+repo:
+  helper: polyglot-with-detect-stubs
+
+setup:
+  - name: init_workspace
+    command: graph-harness init
+    assert: [{ type: exit_code, expected: 0 }]
+
+steps:
+  - name: doctor_text_renders_card_view
+    command: graph-harness doctor
+    assert:
+      - { type: exit_code, expected: 0 }
+      - { type: contains, value: "Workspace:" }
+      - { type: contains, value: "Languages:" }
+      - { type: contains, value: "Coverage" }
+      - { type: contains, value: "go" }
+      - { type: contains, value: "typescript" }
+      - { type: contains, value: "python" }
+      - { type: contains, value: "tree-sitter-go" }
+      - { type: contains, value: "bundled" }
+      - { type: contains, value: "Legend" }
+      - { type: contains, value: "Next steps" }
+      - { type: not_contains, value: "(embed)" }
+      - { type: not_contains, value: "…" }

@@ -186,14 +186,49 @@ by [`tests/smoke/p1/demo.sh`](tests/smoke/p1/demo.sh) (`just smoke`) drives
 the same fixtures through `init` → `selectors test` → `validate-diff`
 → `bench` for each language.
 
-Required toolchains for full fact-source coverage (extractors auto-skip
-when missing):
+Required toolchains for full fact-source coverage. graph-harness is a
+**detector and orchestrator** — it never auto-installs (SPEC §6.18).
+Run `graph-harness doctor` to see what's already on your system and
+where it was found:
+
+```console
+$ graph-harness doctor
+Workspace: ~/code/sample-polyglot   Languages: go, typescript, python
+
+Language       Tool                           Status      Source                        Version
+go             gopls                          ✓           ~/go/bin/gopls (path)         v0.16.1
+go             scip-go                        ✗           install: go install …         —
+typescript     typescript-language-server     ✓           ./node_modules/.bin (proj)    4.3.3
+typescript     scip-typescript                ✓           ~/.local/share/pnpm (user)    0.3.27
+python         pyright-langserver             ✗           install: pipx install pyright —
+
+3 of 9 extractors missing — coverage: tree-sitter-only for python (low confidence).
+```
+
+Probe order is **project-local → ecosystem-user → `$PATH`** so a
+`typescript-language-server` in `node_modules/.bin/` wins over a
+globally-installed copy (matters for version-sensitive LSPs). Other
+flags:
+
+```console
+$ graph-harness doctor --json | jq .              # canonical machine output
+$ graph-harness doctor --print-install            # shell snippet you pipe to bash
+$ graph-harness doctor --print-index-recipe       # SCIP-generation commands per language
+$ graph-harness doctor --strict                   # exit 3 if any in-workspace primary is missing (CI)
+```
 
 | Language | LSP | SCIP indexer | tree-sitter |
 |---|---|---|---|
-| Go | `gopls` | `scip-go` | bundled |
-| TypeScript / JavaScript | `typescript-language-server` | `scip-typescript` | bundled |
-| Python | `pyright` | `scip-python` | bundled |
+| Go | `gopls` | `scip-go` | bundled (cgo) |
+| TypeScript / JavaScript | `typescript-language-server` | `scip-typescript` | bundled (cgo) |
+| Python | `pyright-langserver` | `scip-python` | bundled (cgo) |
+
+Per-workspace LSP override: drop a `.graph-harness/config.toml` like
+`[lsp.python]\nserver = "basedpyright"` to tell graph-harness to prefer
+an alternative server (P1.L; SPEC §6.18). When tools are missing,
+indexing degrades gracefully and emits `code.core.ExtractorUnavailable`
+events you can subscribe to from the TUI's **doctor** panel, the MCP
+`gh://doctor` resource, or the JSON-RPC `health.extractors` method.
 
 ---
 
