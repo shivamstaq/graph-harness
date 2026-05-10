@@ -26,6 +26,7 @@ profile.cov
 
 # Workspace runtime state
 */.graph-harness/
+/.graph-harness/
 !templates/.graph-harness/
 
 # VS Code extension build artifacts
