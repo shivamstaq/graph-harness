@@ -96,12 +96,26 @@ type idGroup struct {
 // any number of files. Returned entity IDs are deduplicated and
 // returned in canonical (sorted) order so callers can compare across
 // runs without an additional sort.
+//
+// For the change-aware variant the watcher → orchestrator path needs
+// (SPEC §6.21 compare-before-emit), see UnifyChanged.
 func (u *Unifier) Unify(ctx context.Context, syms []source_live.Symbol, seq uint64) ([]string, error) {
+	ids, _, err := u.UnifyChanged(ctx, syms, seq)
+	return ids, err
+}
+
+// UnifyChanged is Unify with an explicit state-transition signal.
+// changed=true iff at least one entity or provenance row was either
+// inserted or had its content fingerprint shift; refreshes of
+// last_seen_seq alone do not count as transitions. The daemon's
+// watch loop drives drift-event emission off this signal so re-
+// extracting an unchanged file produces zero kernel events.
+func (u *Unifier) UnifyChanged(ctx context.Context, syms []source_live.Symbol, seq uint64) ([]string, bool, error) {
 	if u.Store == nil {
-		return nil, fmt.Errorf("code_core.Unifier: Store is nil")
+		return nil, false, fmt.Errorf("code_core.Unifier: Store is nil")
 	}
 	if len(syms) == 0 {
-		return nil, nil
+		return nil, false, nil
 	}
 	threshold := u.DisagreementThreshold
 	if threshold <= 0 {
@@ -158,6 +172,7 @@ func (u *Unifier) Unify(ctx context.Context, syms []source_live.Symbol, seq uint
 	})
 
 	var written []string
+	anyChanged := false
 	for _, k := range locKeys {
 		group := loc[k]
 		distinctIDs := make([]string, 0, len(group))
@@ -168,19 +183,21 @@ func (u *Unifier) Unify(ctx context.Context, syms []source_live.Symbol, seq uint
 
 		for _, id := range distinctIDs {
 			g := group[id]
-			if _, err := u.writeEntity(ctx, g.entity, g.sources, seq); err != nil {
-				return nil, err
+			changed, err := u.writeEntity(ctx, g.entity, g.sources, seq)
+			if err != nil {
+				return nil, false, err
 			}
+			anyChanged = anyChanged || changed
 			written = append(written, id)
 		}
 
 		if len(distinctIDs) >= threshold {
 			if err := u.emitDisambiguation(ctx, k.path, k.startByte, k.endByte, group, seq); err != nil {
-				return nil, err
+				return nil, false, err
 			}
 		}
 	}
-	return written, nil
+	return written, anyChanged, nil
 }
 
 // writeEntity persists e and its provenance, returning whether the
