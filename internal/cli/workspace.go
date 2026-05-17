@@ -9,6 +9,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/spf13/cobra"
 	_ "modernc.org/sqlite" // SQLite driver
 
 	"github.com/shivamstaq/graph-harness/internal/code_core"
@@ -146,6 +147,44 @@ func codeCoreEventEmitter(log *facts.EventLog) code_core.EventEmitter {
 		}})
 		return err
 	})
+}
+
+// openIndexedStore is the writable batch-path opener for read
+// commands that still need to run the orchestrator once before
+// answering (`code list --batch`, `selectors test --batch`). It
+// opens the event log + code.core store writable, runs the
+// orchestrator over the workspace once, and returns both handles
+// plus a single close function the caller defers.
+//
+// Strictly speaking the daemon owns the writer-monopoly post-
+// P0.5.T18 — but `--batch` runs without the daemon, so there is no
+// concurrent writer to fight. The pattern works under the SPEC §9.11
+// carve-out: batch mode is daemon-free; the operator opts into
+// running the orchestrator inline.
+func openIndexedStore(
+	ctx context.Context,
+	ws *daemon.Workspace,
+	cmd *cobra.Command,
+) (*facts.EventLog, *sql.DB, *code_core.Store, func(), error) {
+	log, err := facts.OpenEventLog(ws.EventLog)
+	if err != nil {
+		return nil, nil, nil, nil, err
+	}
+	store, db, err := openCodeStore(ws)
+	if err != nil {
+		_ = log.Close()
+		return nil, nil, nil, nil, err
+	}
+	if err := indexWorkspaceCodeWithOptions(ctx, ws, store, log, extractOptionsFromFlags(cmd)); err != nil {
+		_ = db.Close()
+		_ = log.Close()
+		return nil, nil, nil, nil, err
+	}
+	closeAll := func() {
+		_ = db.Close()
+		_ = log.Close()
+	}
+	return log, db, store, closeAll, nil
 }
 
 // loadOverlay reads .graph-harness/overlay/**/*.gh into an Overlay.

@@ -103,6 +103,12 @@ func OpenWithOptions(ctx context.Context, ws *Workspace, opts OpenOptions) (*Res
 		_ = codeDB.Close()
 		return nil, fmt.Errorf("code.core schema: %w", err)
 	}
+	// P0.5.T18 / SPEC §9.1: install the kernel trust policy so
+	// future tokenized writes (Store.PutEntityWithToken) verify
+	// authorities at the storage seam. Strict mode stays off during
+	// the rollout; flipping it to true once every writer is migrated
+	// is the final v1 ship-bar step for the writer-monopoly clause.
+	codeStore.SetTrustPolicy(kernel.NewTrustPolicy())
 
 	queueDSN := ws.EventLog + ".review.queue?_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)"
 	queueDB, err := sql.Open("sqlite", queueDSN)
