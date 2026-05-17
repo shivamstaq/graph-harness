@@ -277,6 +277,192 @@ loop:
 	}
 }
 
+// TestKernelSubscribe_BackpressureEmitsFellBehind exercises SPEC
+// §6.22 backpressure: when the un-acked gap (cursor - ackedSeq)
+// exceeds the per-subscription queue cap, the daemon emits a one-
+// shot `kernel.fellBehind` notification carrying the recovery
+// options. Subsequent acks that move the gap back under cap re-arm
+// the flag.
+func TestKernelSubscribe_BackpressureEmitsFellBehind(t *testing.T) {
+	t.Parallel()
+	srv, log, sockPath := startTestServer(t)
+	defer srv.Stop()
+
+	events := make(chan EventNotification, 64)
+	fellBehinds := make(chan FellBehindNotification, 4)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	raw, err := net.Dial("unix", sockPath)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	stream := jsonrpc2.NewBufferedStream(raw, jsonrpc2.VSCodeObjectCodec{})
+	handler := jsonrpc2.HandlerWithError(func(_ context.Context, _ *jsonrpc2.Conn, req *jsonrpc2.Request) (any, error) {
+		switch req.Method {
+		case "kernel.event":
+			var n EventNotification
+			if req.Params != nil {
+				_ = json.Unmarshal(*req.Params, &n)
+			}
+			select {
+			case events <- n:
+			default:
+			}
+		case "kernel.fellBehind":
+			var n FellBehindNotification
+			if req.Params != nil {
+				_ = json.Unmarshal(*req.Params, &n)
+			}
+			select {
+			case fellBehinds <- n:
+			default:
+			}
+		}
+		return nil, nil
+	})
+	conn := jsonrpc2.NewConn(ctx, stream, handler)
+	defer func() { _ = conn.Close() }()
+
+	// Subscribe with a tiny queue cap so backpressure trips quickly.
+	var subRes SubscribeResult
+	if err := conn.Call(ctx, "kernel.subscribe", SubscribeParams{
+		Filter:   "",
+		QueueCap: 2,
+	}, &subRes); err != nil {
+		t.Fatalf("subscribe: %v", err)
+	}
+
+	// Append 5 events WITHOUT calling kernel.ack. The un-acked gap
+	// will grow past the cap of 2; the daemon must fire one
+	// kernel.fellBehind notification.
+	for i := range 5 {
+		if _, err := log.Append(ctx, []kernel.Event{{
+			Layer:      "code.core",
+			Kind:       "FileChanged",
+			ProducedBy: kernel.SourceLayerInternal,
+			Payload:    json.RawMessage(`{"i":` + string(rune('0'+i)) + `}`),
+		}}); err != nil {
+			t.Fatalf("append %d: %v", i, err)
+		}
+	}
+
+	select {
+	case fb := <-fellBehinds:
+		if fb.SubscriptionID != subRes.SubscriptionID {
+			t.Fatalf("fellBehind subscription_id mismatch: got %q want %q", fb.SubscriptionID, subRes.SubscriptionID)
+		}
+		if fb.QueueCapacity != 2 {
+			t.Fatalf("fellBehind queue_capacity mismatch: got %d want 2", fb.QueueCapacity)
+		}
+		if len(fb.Options) != 3 {
+			t.Fatalf("fellBehind options should list 3 recovery modes, got %v", fb.Options)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatalf("expected kernel.fellBehind notification within deadline")
+	}
+
+	// Verify the FellBehind is one-shot: a second batch without ack
+	// should NOT produce another notification.
+	for i := range 5 {
+		if _, err := log.Append(ctx, []kernel.Event{{
+			Layer:      "code.core",
+			Kind:       "FileChanged",
+			ProducedBy: kernel.SourceLayerInternal,
+			Payload:    json.RawMessage(`{"j":` + string(rune('0'+i)) + `}`),
+		}}); err != nil {
+			t.Fatalf("append #2 %d: %v", i, err)
+		}
+	}
+	select {
+	case fb := <-fellBehinds:
+		t.Fatalf("duplicate fellBehind should be suppressed; got %+v", fb)
+	case <-time.After(300 * time.Millisecond):
+		// Expected — no notification.
+	}
+}
+
+// TestKernelCancel_StopsLongRunningHandler exercises SPEC §6.23
+// per-request cancellation: kernel.cancel({request_id}) aborts an
+// in-flight handler that honors ctx.Done(). We register a test-only
+// "test.sleep" method that blocks on ctx; the client calls it in
+// one goroutine and kernel.cancel in another. The blocked call
+// must return promptly with the cancellation error.
+func TestKernelCancel_StopsLongRunningHandler(t *testing.T) {
+	t.Parallel()
+	srv, _, sockPath := startTestServer(t)
+	defer srv.Stop()
+
+	// Register a long-running test-only method. The handler blocks
+	// until either (a) ctx.Done() fires or (b) the per-call deadline
+	// elapses; on cancel it returns ctx.Err() which the jsonrpc2
+	// dispatch surfaces as a JSON-RPC error to the client.
+	srv.AddCapability("test")
+	Register(srv, "test.sleep", "test", func(ctx context.Context, _ struct{}) (struct{}, error) {
+		select {
+		case <-ctx.Done():
+			return struct{}{}, ctx.Err()
+		case <-time.After(30 * time.Second):
+			return struct{}{}, nil
+		}
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	raw, err := net.Dial("unix", sockPath)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	stream := jsonrpc2.NewBufferedStream(raw, jsonrpc2.VSCodeObjectCodec{})
+	conn := jsonrpc2.NewConn(ctx, stream, nil)
+	defer func() { _ = conn.Close() }()
+
+	// Issue the long-running call asynchronously so we can cancel it.
+	type result struct {
+		err     error
+		elapsed time.Duration
+	}
+	resultC := make(chan result, 1)
+	go func() {
+		t0 := time.Now()
+		// We don't know the jsonrpc2 ID ahead of time, but the
+		// jsonrpc2 client allocates sequential numeric ids starting
+		// at 0 for each conn. The fresh conn we just opened means
+		// the first request gets id=0.
+		err := conn.Call(ctx, "test.sleep", struct{}{}, nil)
+		resultC <- result{err: err, elapsed: time.Since(t0)}
+	}()
+
+	// Give the server a beat to register the in-flight entry.
+	time.Sleep(50 * time.Millisecond)
+
+	// Cancel the in-flight request. JSON-RPC ids are numeric here
+	// (the conn allocates them); the first request gets id=0.
+	var cancelRes CancelResult
+	if err := conn.Call(ctx, "kernel.cancel", CancelParams{RequestID: json.RawMessage("0")}, &cancelRes); err != nil {
+		t.Fatalf("kernel.cancel call: %v", err)
+	}
+	if !cancelRes.Cancelled {
+		// The cancel handler runs as its own request (id=1) so the
+		// test.sleep request *should* still be the one with id=0.
+		// If this assertion trips, the in-flight registry is wrong.
+		t.Fatalf("kernel.cancel reported no match for request_id=0")
+	}
+
+	select {
+	case r := <-resultC:
+		if r.err == nil {
+			t.Fatalf("cancelled call returned nil error; expected ctx-cancellation")
+		}
+		if r.elapsed > 2*time.Second {
+			t.Fatalf("cancellation took too long: %v", r.elapsed)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("cancelled call did not return within deadline")
+	}
+}
+
 // startTestServer spins up a JSON-RPC server bound to a unix socket
 // under a temp dir. Returns the server, the kernel event log (so
 // tests can Append events), and the socket path.

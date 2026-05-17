@@ -29,6 +29,15 @@ type Server struct {
 	// activeConns tracks live jsonrpc2.Conn so Stop() can close them.
 	connMu      sync.Mutex
 	activeConns map[*jsonrpc2.Conn]struct{}
+
+	// inflight tracks the cancel func for every in-flight request
+	// indexed by (conn, request_id). kernel.cancel(id) walks this
+	// table to abort long-running handlers (SPEC §6.23). Mutated
+	// under inflightMu; per-request entries are deleted when the
+	// handler returns. Disconnect cancels every entry tied to the
+	// dying conn.
+	inflightMu sync.Mutex
+	inflight   map[*jsonrpc2.Conn]map[string]context.CancelFunc
 }
 
 // methodEntry pairs a handler with its required capability (empty = always on).
@@ -55,6 +64,7 @@ func NewServer(svc *Service) *Server {
 		methods:     map[string]methodEntry{},
 		caps:        map[string]struct{}{},
 		activeConns: map[*jsonrpc2.Conn]struct{}{},
+		inflight:    map[*jsonrpc2.Conn]map[string]context.CancelFunc{},
 	}
 	// P0 baseline capabilities — every workspace gets these regardless of
 	// which optional layers are installed (kernel + code.core +
@@ -198,6 +208,27 @@ func (s *Server) registerBuiltins() {
 	registerConn(s, "kernel.subscribe", "kernel", svc.Subscribe)
 	Register(s, "kernel.ack", "kernel", svc.Ack)
 	Register(s, "kernel.unsubscribe", "kernel", svc.Unsubscribe)
+	// kernel.cancel needs the Server's in-flight registry so it
+	// targets requests by their JSON-RPC id. Implemented as a
+	// conn-aware Server method (the Service doesn't own request
+	// cancellation; the dispatcher does).
+	registerConn(s, "kernel.cancel", "kernel", s.cancelHandler)
+}
+
+// cancelHandler implements kernel.cancel (SPEC §6.23): looks up the
+// in-flight request by its JSON-RPC id, calls the registered cancel
+// func, and reports whether a match was found. Idempotent: cancelling
+// an already-finished or unknown request reports cancelled=false
+// rather than error so clients can retry safely.
+func (s *Server) cancelHandler(_ context.Context, conn *jsonrpc2.Conn, p CancelParams) (CancelResult, error) {
+	if conn == nil {
+		return CancelResult{}, fmt.Errorf("cancel: nil connection")
+	}
+	key := requestIDKeyFromAny(p.RequestID)
+	if key == "" {
+		return CancelResult{}, fmt.Errorf("cancel: missing or unparseable request_id")
+	}
+	return CancelResult{Cancelled: s.cancelInflight(conn, key)}, nil
 }
 
 func (s *Server) capList() []string {
@@ -240,9 +271,14 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 func (s *Server) serveConn(ctx context.Context, raw net.Conn) {
 	stream := jsonrpc2.NewBufferedStream(raw, jsonrpc2.VSCodeObjectCodec{})
 	var conn *jsonrpc2.Conn
-	handler := jsonrpc2.HandlerWithError(func(ctx context.Context, _ *jsonrpc2.Conn, req *jsonrpc2.Request) (any, error) {
+	// AsyncHandler is required for SPEC §6.23 cancellation: each
+	// request runs in its own goroutine so a long-running call can't
+	// block kernel.cancel (or any other concurrent request) on the
+	// same connection. The wrapper preserves jsonrpc2's per-request
+	// id semantics; only dispatch concurrency changes.
+	handler := jsonrpc2.AsyncHandler(jsonrpc2.HandlerWithError(func(ctx context.Context, _ *jsonrpc2.Conn, req *jsonrpc2.Request) (any, error) {
 		return s.dispatchWithConn(ctx, conn, req)
-	})
+	}))
 	conn = jsonrpc2.NewConn(ctx, stream, handler)
 
 	s.connMu.Lock()
@@ -251,11 +287,13 @@ func (s *Server) serveConn(ctx context.Context, raw net.Conn) {
 
 	<-conn.DisconnectNotify()
 
-	// On disconnect, drop every subscription this connection owned so
-	// the per-connection event-pump goroutines exit and their event-
-	// stream cursors release (SPEC §6.22: subscription state may
-	// persist beyond disconnect for reconnect, but the in-memory
-	// fan-out tied to this concrete conn must terminate).
+	// On disconnect, cancel every in-flight request bound to this
+	// connection (SPEC §6.23) and drop every subscription it owned
+	// (SPEC §6.22: subscription state may persist beyond disconnect
+	// for reconnect, but the in-memory fan-out tied to this concrete
+	// conn must terminate). Order matters — cancel handlers first so
+	// they exit promptly before the subscription pumps are torn down.
+	s.cancelAllInflight(conn)
 	if s.svc != nil {
 		s.svc.subscriptions().DropConn(conn)
 	}
@@ -294,6 +332,35 @@ func (s *Server) dispatchWithConn(ctx context.Context, conn *jsonrpc2.Conn, req 
 	if req.Params != nil {
 		raw = *req.Params
 	}
+
+	// SPEC §6.23: every handler runs under a per-request cancellable
+	// context. kernel.cancel({request_id}) targets the registered
+	// cancel func. Client disconnect cancels every entry tied to the
+	// conn (via cancelAllInflight, called from serveConn).
+	//
+	// Methods without a meaningful "long-running" footprint still
+	// pay the trivial registry cost — the right tradeoff so any
+	// handler authored in the future can be cancelled without
+	// special opt-in.
+	reqCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	requestKey := requestIDKey(req)
+	if conn != nil && requestKey != "" {
+		s.inflightMu.Lock()
+		if s.inflight[conn] == nil {
+			s.inflight[conn] = map[string]context.CancelFunc{}
+		}
+		s.inflight[conn][requestKey] = cancel
+		s.inflightMu.Unlock()
+		defer func() {
+			s.inflightMu.Lock()
+			if m, ok := s.inflight[conn]; ok {
+				delete(m, requestKey)
+			}
+			s.inflightMu.Unlock()
+		}()
+	}
+
 	if m.connHandler != nil {
 		if conn == nil {
 			return nil, &jsonrpc2.Error{
@@ -301,9 +368,69 @@ func (s *Server) dispatchWithConn(ctx context.Context, conn *jsonrpc2.Conn, req 
 				Message: fmt.Sprintf("method %q requires a live JSON-RPC connection", req.Method),
 			}
 		}
-		return m.connHandler(ctx, conn, raw)
+		return m.connHandler(reqCtx, conn, raw)
 	}
-	return m.handler(ctx, raw)
+	return m.handler(reqCtx, raw)
+}
+
+// cancelInflight fires the cancel func registered for (conn, id)
+// if present. Returns true when a matching request was cancelled.
+func (s *Server) cancelInflight(conn *jsonrpc2.Conn, id string) bool {
+	s.inflightMu.Lock()
+	cancel, ok := s.inflight[conn][id]
+	if ok {
+		delete(s.inflight[conn], id)
+	}
+	s.inflightMu.Unlock()
+	if !ok {
+		return false
+	}
+	cancel()
+	return true
+}
+
+// cancelAllInflight cancels every in-flight request tied to conn.
+// Called when the connection closes so handlers exit promptly.
+func (s *Server) cancelAllInflight(conn *jsonrpc2.Conn) {
+	s.inflightMu.Lock()
+	entries := s.inflight[conn]
+	delete(s.inflight, conn)
+	s.inflightMu.Unlock()
+	for _, cancel := range entries {
+		cancel()
+	}
+}
+
+// requestIDKey returns the stable string form of a JSON-RPC
+// request id. JSON-RPC ids are either numbers or strings; the
+// key normalizes both to a comparable string. Empty for
+// notifications (which have no id and can't be cancelled).
+func requestIDKey(req *jsonrpc2.Request) string {
+	if req == nil || req.Notif {
+		return ""
+	}
+	if req.ID.IsString {
+		return "s:" + req.ID.Str
+	}
+	return fmt.Sprintf("n:%d", req.ID.Num)
+}
+
+// requestIDKeyFromAny normalizes a client-supplied request id
+// (either a number or a string) to the same form requestIDKey
+// produces, so kernel.cancel({id: <num|str>}) lookups match.
+func requestIDKeyFromAny(v json.RawMessage) string {
+	if len(v) == 0 {
+		return ""
+	}
+	var s string
+	if err := json.Unmarshal(v, &s); err == nil {
+		return "s:" + s
+	}
+	var n uint64
+	if err := json.Unmarshal(v, &n); err == nil {
+		return fmt.Sprintf("n:%d", n)
+	}
+	return ""
 }
 
 // Stop closes the listener and all active connections.

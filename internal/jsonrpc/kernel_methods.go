@@ -33,6 +33,12 @@ type SubscribeParams struct {
 	// the daemon resumes from cursor+1; when zero, the stream begins
 	// at the current head.
 	Cursor uint64 `json:"cursor,omitempty"`
+	// QueueCap overrides the default per-subscription backpressure
+	// window. Backpressure here is measured as (cursor - ackedSeq):
+	// when the gap exceeds QueueCap, the daemon emits one
+	// `kernel.fellBehind` notification carrying the client's
+	// recovery options. Zero/omitted uses the default (SPEC §6.22).
+	QueueCap int `json:"queue_cap,omitempty"`
 }
 
 // SubscribeResult carries the subscription_id back to the client.
@@ -43,7 +49,7 @@ type SubscribeResult struct {
 
 // Subscribe implements kernel.subscribe (SPEC §6.22 subscribe step).
 func (s *Service) Subscribe(ctx context.Context, conn *jsonrpc2.Conn, p SubscribeParams) (SubscribeResult, error) {
-	id, err := s.subscriptions().Subscribe(ctx, conn, p.Filter, p.Cursor)
+	id, err := s.subscriptions().SubscribeWithOpts(ctx, conn, p.Filter, p.Cursor, p.QueueCap)
 	if err != nil {
 		return SubscribeResult{}, err
 	}
@@ -65,6 +71,22 @@ func (s *Service) Ack(ctx context.Context, p AckParams) (struct{}, error) {
 		return struct{}{}, err
 	}
 	return struct{}{}, nil
+}
+
+// CancelParams is the param shape for kernel.cancel.
+type CancelParams struct {
+	// RequestID is the client's JSON-RPC request id of an in-flight
+	// call this client wants to abort (SPEC §6.23). Accepts either
+	// numeric or string ids — the conn-side dispatcher uses the
+	// same normalization as the in-flight registry.
+	RequestID json.RawMessage `json:"request_id"`
+}
+
+// CancelResult reports whether a matching in-flight request was
+// found + cancelled. Cancelling an already-finished or unknown
+// request is not an error — it just reports cancelled=false.
+type CancelResult struct {
+	Cancelled bool `json:"cancelled"`
 }
 
 // UnsubscribeParams is the param shape for kernel.unsubscribe.
