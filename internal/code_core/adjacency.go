@@ -70,6 +70,23 @@ CREATE TABLE IF NOT EXISTS code_entity_provenance (
     FOREIGN KEY (entity_id) REFERENCES code_entities(id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_provenance_source ON code_entity_provenance(source_class);
+
+-- SPEC §6.21 suppress-at-source: dedup index for SymbolDisambiguation
+-- emissions. A disambiguation at (path, start_byte, end_byte) is
+-- defined to be the *same* event whenever the same set of canonical
+-- IDs claims that location. Re-running the orchestrator over an
+-- unchanged workspace therefore produces zero new disambiguation
+-- events because the prior claims_hash already lives in this table.
+-- A genuinely new disagreement (different IDs, e.g. after a code
+-- change) has a different claims_hash and DOES fire.
+CREATE TABLE IF NOT EXISTS code_core_emitted_disambiguations (
+    path        TEXT NOT NULL,
+    start_byte  INTEGER NOT NULL,
+    end_byte    INTEGER NOT NULL,
+    claims_hash TEXT NOT NULL,
+    emitted_seq INTEGER NOT NULL,
+    PRIMARY KEY (path, start_byte, end_byte, claims_hash)
+);
 `
 	if _, err := s.db.Exec(schema); err != nil {
 		return err
