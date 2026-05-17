@@ -48,23 +48,58 @@ func newCodeListCmd() *cobra.Command {
 				return err
 			}
 			ctx := context.Background()
-			log, err := facts.OpenEventLog(ws.EventLog)
-			if err != nil {
-				return err
-			}
-			defer func() { _ = log.Close() }()
-			store, db, err := openCodeStore(ws)
-			if err != nil {
-				return err
-			}
-			defer func() { _ = db.Close() }()
-			if err := indexWorkspaceCodeWithOptions(ctx, ws, store, log, extractOptionsFromFlags(cmd)); err != nil {
-				return err
-			}
-
+			batch, _ := cmd.Flags().GetBool("batch")
 			qnFilter, _ := cmd.Flags().GetString("qualified-name")
 			langFilter, _ := cmd.Flags().GetString("language")
 			asJSON, _ := cmd.Flags().GetBool("json")
+
+			// Open in the right route. In batch mode we still index
+			// (writable) so the listing reflects current source state,
+			// then list from the same store. In daemon mode we
+			// auto-spawn + dial; if daemon is unreachable we fall
+			// back to the batch flow (read-only carve-out).
+			var store *code_core.Store
+			var closeFn func()
+			if batch {
+				log, db, st, closeAll, err := openIndexedStore(ctx, ws, cmd)
+				if err != nil {
+					return err
+				}
+				_ = log
+				_ = db
+				store = st
+				closeFn = closeAll
+			} else {
+				// Read-only default: if the daemon is running, open
+				// its store read-only (avoids re-indexing inline);
+				// otherwise run the in-process orchestrator and list
+				// from the just-written store.
+				handle, herr := ResolveRoute(ctx, ws, RouteOptions{})
+				if herr != nil || handle.Mode == ModeBatch {
+					if handle != nil {
+						_ = handle.Close()
+					}
+					log, db, st, closeAll, err := openIndexedStore(ctx, ws, cmd)
+					if err != nil {
+						return err
+					}
+					_ = log
+					_ = db
+					store = st
+					closeFn = closeAll
+				} else {
+					// Daemon is running — open its SQLite store read-only.
+					bh, berr := OpenBatch(ctx, ws)
+					_ = handle.Close()
+					if berr != nil {
+						return berr
+					}
+					store = bh.Code
+					closeFn = func() { _ = bh.Close() }
+				}
+			}
+			defer closeFn()
+
 			rows, err := store.ListEntities(ctx, code_core.ListFilter{
 				QualifiedName: qnFilter,
 				LanguageID:    langFilter,
@@ -98,6 +133,7 @@ func newCodeListCmd() *cobra.Command {
 	c.Flags().String("qualified-name", "", "filter by exact qualified_name")
 	c.Flags().String("language", "", "filter by language_id (e.g. go, typescript, python)")
 	c.Flags().Bool("json", false, "emit one EntityView NDJSON line per row")
+	addBatchFlag(c)
 	addExtractorToggleFlags(c)
 	return c
 }
@@ -130,22 +166,53 @@ func newCodeProvenanceCmd() *cobra.Command {
 				return err
 			}
 			ctx := context.Background()
-			log, err := facts.OpenEventLog(ws.EventLog)
-			if err != nil {
-				return err
-			}
-			defer func() { _ = log.Close() }()
-			store, db, err := openCodeStore(ws)
-			if err != nil {
-				return err
-			}
-			defer func() { _ = db.Close() }()
-			if err := indexWorkspaceCodeWithOptions(ctx, ws, store, log, extractOptionsFromFlags(cmd)); err != nil {
-				return err
-			}
-
+			batch, _ := cmd.Flags().GetBool("batch")
 			needle := args[0]
 			lang, _ := cmd.Flags().GetString("language")
+			asJSON, _ := cmd.Flags().GetBool("json")
+
+			// Daemon path: lower through Kernel.Route's
+			// code.core/lookup_entity capability via the JSON-RPC
+			// entity.provenance method (which is the production
+			// surface today). Falls back to batch on daemon failure.
+			if !batch && lang == "" {
+				handle, herr := ResolveRoute(ctx, ws, RouteOptions{})
+				if herr == nil {
+					defer func() { _ = handle.Close() }()
+					if handle.Mode == ModeDaemon {
+						var out struct {
+							View     code_core.EntityView `json:"view"`
+							Resolved uint64               `json:"resolved_at_kernel_seq"`
+						}
+						params := map[string]string{}
+						// Heuristic: arg looks like a sha256 → treat as id;
+						// otherwise as qualified_name. The daemon's
+						// EntityProvenance handler does the actual probe.
+						if looksLikeEntityID(needle) {
+							params["entity_id"] = needle
+						} else {
+							params["qualified_name"] = needle
+						}
+						if err := handle.Client.Call(ctx, "entity.provenance", params, &out); err == nil {
+							if asJSON {
+								return json.NewEncoder(cmd.OutOrStdout()).Encode(out.View)
+							}
+							return renderEntityView(cmd, out.View)
+						}
+					}
+					// fall through to batch on ModeBatch / RPC failure
+				}
+			}
+
+			// Batch path / language-narrowed path: re-uses the
+			// in-process Store + orchestrator.
+			log, db, store, closeAll, err := openIndexedStore(ctx, ws, cmd)
+			if err != nil {
+				return err
+			}
+			_ = log
+			_ = db
+			defer closeAll()
 
 			var view code_core.EntityView
 			// When --language is set we always treat the positional
@@ -189,7 +256,6 @@ func newCodeProvenanceCmd() *cobra.Command {
 				view = v
 			}
 
-			asJSON, _ := cmd.Flags().GetBool("json")
 			if asJSON {
 				// Compact (no SetIndent) — e2e specs use `contains`
 				// assertions against the raw JSON string and expect
@@ -201,8 +267,29 @@ func newCodeProvenanceCmd() *cobra.Command {
 	}
 	c.Flags().Bool("json", false, "emit EntityView as JSON")
 	c.Flags().String("language", "", "narrow lookup to a specific language_id (e.g. go, python) — required when the positional arg is a qualified_name that collides across languages")
+	addBatchFlag(c)
 	addExtractorToggleFlags(c)
 	return c
+}
+
+// looksLikeEntityID heuristically distinguishes a content-addressable
+// entity ID (lowercase hex sha256 prefix) from a qualified name. The
+// daemon's entity.provenance handler does the authoritative probe;
+// this heuristic just chooses which RPC param to populate so the
+// daemon doesn't have to retry.
+func looksLikeEntityID(s string) bool {
+	if len(s) < 16 {
+		return false
+	}
+	for _, r := range s {
+		switch {
+		case r >= '0' && r <= '9':
+		case r >= 'a' && r <= 'f':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 func renderEntityView(cmd *cobra.Command, v code_core.EntityView) error {

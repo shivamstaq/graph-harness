@@ -23,14 +23,28 @@ func newReplCmd() *cobra.Command { return newReplCmdReal() }
 
 func newSelectorsCmd() *cobra.Command {
 	c := &cobra.Command{Use: "selectors", Short: "Selector authoring + resolution tools"}
+	// newSelectorsTestCmd already wires --batch internally.
 	c.AddCommand(newSelectorsTestCmd())
 	return c
 }
 
+// addBatchFlag wires the --batch flag onto a read-side cobra command.
+// Read commands that opt into batch mode (P0.5.T16 / SPEC §9.11) open
+// SQLite read-only, pin to the kernel head, and skip the daemon.
+// Setting GRAPH_HARNESS_BATCH=1 has the same effect at the environment
+// level. The flag is wired here (rather than per command) so the
+// surface stays uniform and the route helper can read it via
+// cmd.Flags().GetBool("batch").
+func addBatchFlag(c *cobra.Command) {
+	c.Flags().Bool("batch", false, "open layer SQLite read-only and skip the daemon (P0.5.T16 / SPEC §9.11; same effect as GRAPH_HARNESS_BATCH=1)")
+}
+
 func newFlowsCmd() *cobra.Command {
 	c := &cobra.Command{Use: "flows", Short: "Manage flow declarations in semantic.overlay"}
+	fl := newFlowsListCmd()
+	addBatchFlag(fl)
 	c.AddCommand(
-		newFlowsListCmd(),
+		fl,
 		&cobra.Command{Use: "create", Short: "Scaffold a new flow", RunE: stub("P0.T27")},
 		&cobra.Command{Use: "edit <name>", Short: "Edit a flow in $EDITOR", Args: cobra.ExactArgs(1), RunE: stub("P0.T27")},
 	)
@@ -43,6 +57,7 @@ func newValidateDiffCmd() *cobra.Command {
 	c.Flags().String("against-plan", "", "validate against an explicit plan.gh")
 	c.Flags().String("finding", "", "re-run validation for a specific finding ID")
 	c.Flags().Bool("json", false, "emit findings as JSON")
+	addBatchFlag(c)
 	addExtractorToggleFlags(c)
 	return c
 }
