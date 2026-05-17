@@ -64,6 +64,11 @@ type Service struct {
 	// that pass nil Log paths working.
 	subsOnce sync.Once
 	subs     *SubscriptionManager
+
+	// trans is the SPEC §6.19 in-memory transient overlay tier.
+	// Same lazy-init pattern as subs.
+	transOnce sync.Once
+	trans     *TransientOverlay
 }
 
 // subscriptions returns the lazily-constructed SubscriptionManager.
@@ -73,6 +78,14 @@ func (s *Service) subscriptions() *SubscriptionManager {
 		s.subs = NewSubscriptionManager(s.Log)
 	})
 	return s.subs
+}
+
+// transient returns the lazily-constructed TransientOverlay.
+func (s *Service) transient() *TransientOverlay {
+	s.transOnce.Do(func() {
+		s.trans = NewTransientOverlay()
+	})
+	return s.trans
 }
 
 // ConflictRecord is one SymbolDisambiguation event surfaced over RPC.
