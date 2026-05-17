@@ -58,6 +58,21 @@ type Service struct {
 	// loop can decide when to exit. Wall-clock monotonic.
 	activityMu sync.Mutex
 	lastActive time.Time
+
+	// subs is the SPEC §6.22 long-lived subscriber bookkeeping. One
+	// per Service; lazily constructed on first access to keep tests
+	// that pass nil Log paths working.
+	subsOnce sync.Once
+	subs     *SubscriptionManager
+}
+
+// subscriptions returns the lazily-constructed SubscriptionManager.
+// Each access after the first returns the same instance.
+func (s *Service) subscriptions() *SubscriptionManager {
+	s.subsOnce.Do(func() {
+		s.subs = NewSubscriptionManager(s.Log)
+	})
+	return s.subs
 }
 
 // ConflictRecord is one SymbolDisambiguation event surfaced over RPC.
