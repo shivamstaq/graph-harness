@@ -325,6 +325,18 @@ func (o *Orchestrator) IndexAll(ctx context.Context, seq uint64) error {
 // intentionally doesn't materialize Files itself — this is the only
 // place File entities enter code.core.
 func (o *Orchestrator) IndexFile(ctx context.Context, rel string, seq uint64) error {
+	_, err := o.IndexFileChanged(ctx, rel, seq)
+	return err
+}
+
+// IndexFileChanged is IndexFile with an explicit state-transition
+// signal. changed=true iff materializing the symbols for rel caused
+// at least one entity or provenance row to actually change. The
+// daemon's watch loop drives drift-event emission off this signal:
+// re-extracting an unchanged file produces zero kernel events, per
+// SPEC §6.21. Callers that only need the side effect can call
+// IndexFile.
+func (o *Orchestrator) IndexFileChanged(ctx context.Context, rel string, seq uint64) (bool, error) {
 	abs := filepath.Join(o.root, rel)
 	data, _ := os.ReadFile(abs) //nolint:gosec // rel is workspace-relative under controlled root; missing file is OK for SCIP-only ingestion
 
@@ -381,6 +393,8 @@ func (o *Orchestrator) IndexFile(ctx context.Context, rel string, seq uint64) er
 		}
 	}
 
+	anyChanged := false
+
 	// File entity (only when at least one source observed the file).
 	if language != "" {
 		fileEnt := code_core.Entity{
@@ -390,21 +404,25 @@ func (o *Orchestrator) IndexFile(ctx context.Context, rel string, seq uint64) er
 			QualifiedName: rel,
 			Path:          rel,
 		}
-		if err := o.store.PutEntity(ctx, fileEnt, seq); err != nil {
-			return fmt.Errorf("put file entity: %w", err)
+		entChanged, err := o.store.PutEntityIfChanged(ctx, fileEnt, seq)
+		if err != nil {
+			return false, fmt.Errorf("put file entity: %w", err)
 		}
-		if err := o.store.UpsertProvenance(ctx, fileEnt.ID, fileEntryFor(o, seq)); err != nil {
-			return fmt.Errorf("provenance file entity: %w", err)
+		provChanged, err := o.store.UpsertProvenanceIfChanged(ctx, fileEnt.ID, fileEntryFor(o, seq))
+		if err != nil {
+			return false, fmt.Errorf("provenance file entity: %w", err)
 		}
+		anyChanged = anyChanged || entChanged || provChanged
 	}
 
 	if len(syms) == 0 {
-		return nil
+		return anyChanged, nil
 	}
-	if _, err := o.unifier.Unify(ctx, syms, seq); err != nil {
-		return fmt.Errorf("unify %s: %w", rel, err)
+	_, symsChanged, err := o.unifier.UnifyChanged(ctx, syms, seq)
+	if err != nil {
+		return false, fmt.Errorf("unify %s: %w", rel, err)
 	}
-	return nil
+	return anyChanged || symsChanged, nil
 }
 
 // filterOutFunctions returns syms with all Function and Method kinds

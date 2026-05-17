@@ -13,6 +13,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/shivamstaq/graph-harness/internal/daemon"
+	"github.com/shivamstaq/graph-harness/internal/extract"
 	"github.com/shivamstaq/graph-harness/internal/jsonrpc"
 )
 
@@ -168,7 +169,21 @@ func newDaemonServeCmd() *cobra.Command {
 				cancel()
 			}()
 
-			res, err := daemon.Open(ctx, ws)
+			// Daemon mode: open with the always-on watcher loop enabled
+			// (SPEC §6.20). The orchestrator stays resident; fsnotify
+			// events route through it for the daemon's lifetime.
+			res, err := daemon.OpenWithOptions(ctx, ws, daemon.OpenOptions{
+				EnableWatcher: true,
+				ExtractOptions: extract.Options{
+					DisableLSP:  lspDisabledFromEnv(),
+					DisableSCIP: false,
+				},
+				ErrLog: func(format string, args ...any) {
+					// Daemon logs ride the cobra root's stderr writer so
+					// `daemon start --foreground` surfaces watcher hiccups.
+					fmt.Fprintf(cmd.ErrOrStderr(), "[watch] "+format+"\n", args...)
+				},
+			})
 			if err != nil {
 				return fmt.Errorf("open resources: %w", err)
 			}
