@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
@@ -152,6 +153,88 @@ loop:
 	// we just assert presence + non-empty.
 	if got.BodyHash == "" {
 		t.Fatalf("Foo body_hash empty post-edit; orchestrator did not re-extract")
+	}
+}
+
+// TestWatchLoop_CoalescesBurstWrites exercises the SPEC §6.21
+// watermark-coalescing contract: a burst of fsnotify Write events
+// for the same path within the coalesce window collapses to a
+// single re-extract. We write the same file ten times in rapid
+// succession; the WatchLoop must invoke IndexFileChanged at most
+// twice (once for the initial settle, once for the final state)
+// rather than ten times.
+func TestWatchLoop_CoalescesBurstWrites(t *testing.T) {
+	t.Parallel()
+	ws := newTestWorkspace(t)
+	src := filepath.Join(ws.Root, "burst.go")
+	if err := os.WriteFile(src, []byte("package burst\n"), 0o600); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	observed := make(chan observation, 64)
+	res, err := OpenWithOptions(ctx, ws, OpenOptions{
+		EnableWatcher: true,
+		ExtractOptions: extract.Options{
+			DisableLSP:  true,
+			DisableSCIP: true,
+		},
+	})
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer func() { _ = res.Close() }()
+	// Use a deliberately-wide coalesce window so the burst-collapse
+	// behavior is robust against scheduler jitter on slow CI.
+	res.Watch.SetCoalesceWindow(200 * time.Millisecond)
+	res.Watch.SetOnChange(func(rel string, changed bool) {
+		select {
+		case observed <- observation{Rel: rel, Changed: changed}:
+		case <-ctx.Done():
+		}
+	})
+
+	// Fire 10 writes in rapid succession (each with mildly different
+	// content to ensure the orchestrator actually re-parses every
+	// time coalescing fails — we want a count-based regression
+	// signal, not just a fingerprint-equality fallback).
+	for i := range 10 {
+		content := fmt.Appendf(nil, "package burst\n\n// burst %d\n", i)
+		if err := os.WriteFile(src, content, 0o600); err != nil {
+			t.Fatalf("burst write %d: %v", i, err)
+		}
+		// 5ms between writes — well inside the 200ms coalesce window
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	// Wait for the coalesce window to fire (200ms) plus a margin.
+	// Drain observations during a 1-second window after the burst.
+	time.Sleep(600 * time.Millisecond)
+
+	// Count observations attributed to burst.go. Without coalescing
+	// we'd see ~10 (or ~20 with truncate+finalize each); with the
+	// 200ms window we should see at most 2-3.
+	count := 0
+loop:
+	for {
+		select {
+		case obs := <-observed:
+			if obs.Rel == "burst.go" {
+				count++
+			}
+		case <-time.After(50 * time.Millisecond):
+			break loop
+		case <-ctx.Done():
+			break loop
+		}
+	}
+	if count == 0 {
+		t.Fatalf("watcher observed zero re-extracts for burst.go (loop didn't run at all)")
+	}
+	if count > 3 {
+		t.Fatalf("coalescing failed: expected ≤ 3 re-extracts after 10 rapid writes, got %d", count)
 	}
 }
 
