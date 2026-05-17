@@ -336,9 +336,34 @@ func (o *Orchestrator) IndexFile(ctx context.Context, rel string, seq uint64) er
 // re-extracting an unchanged file produces zero kernel events, per
 // SPEC §6.21. Callers that only need the side effect can call
 // IndexFile.
+//
+// SPEC §6.20 cold-start drift scan: when the on-disk content hash
+// matches the stored File entity's content_hash, IndexFileChanged
+// skips the full parse + unify path and returns (false, nil). This
+// is the cheap path that makes cold-start hydration O(stat) rather
+// than O(re-extract everything). The fast-path only applies when
+// SCIP is disabled — SCIP-only ingestion is content-independent of
+// the local file (cross-repo references, vendored sources).
 func (o *Orchestrator) IndexFileChanged(ctx context.Context, rel string, seq uint64) (bool, error) {
 	abs := filepath.Join(o.root, rel)
 	data, _ := os.ReadFile(abs) //nolint:gosec // rel is workspace-relative under controlled root; missing file is OK for SCIP-only ingestion
+
+	// Cold-start drift-scan fast-path: when SCIP isn't contributing
+	// to this file (no scipSyms registered for rel) AND we have a
+	// stored content hash that equals the current disk content, the
+	// re-extract is provably a no-op. Skip the parse + unify cost.
+	if len(data) > 0 {
+		o.scipMu.RLock()
+		hasSCIP := len(o.scipMap[rel]) > 0
+		o.scipMu.RUnlock()
+		if !hasSCIP {
+			currentHash := code_core.FileContentHash(data)
+			stored, present, err := o.store.GetFileContentHash(ctx, rel)
+			if err == nil && present && stored == currentHash {
+				return false, nil
+			}
+		}
+	}
 
 	var (
 		syms     []source_live.Symbol
@@ -415,14 +440,28 @@ func (o *Orchestrator) IndexFileChanged(ctx context.Context, rel string, seq uin
 		anyChanged = anyChanged || entChanged || provChanged
 	}
 
-	if len(syms) == 0 {
-		return anyChanged, nil
+	if len(syms) > 0 {
+		_, symsChanged, err := o.unifier.UnifyChanged(ctx, syms, seq)
+		if err != nil {
+			return false, fmt.Errorf("unify %s: %w", rel, err)
+		}
+		anyChanged = anyChanged || symsChanged
 	}
-	_, symsChanged, err := o.unifier.UnifyChanged(ctx, syms, seq)
-	if err != nil {
-		return false, fmt.Errorf("unify %s: %w", rel, err)
+
+	// Record the new content hash on the File entity so the next
+	// cold-start drift scan can skip this path when its disk content
+	// matches. Only relevant when we actually have file content;
+	// SCIP-only paths (no on-disk file) keep their stored hash as-is.
+	if len(data) > 0 && language != "" {
+		if err := o.store.SetFileContentHash(ctx, rel, code_core.FileContentHash(data)); err != nil {
+			// Non-fatal: the drift scan degrades to "always re-extract"
+			// when SetFileContentHash fails, which is annoying but
+			// correct.
+			return anyChanged, fmt.Errorf("set content hash %s: %w", rel, err)
+		}
 	}
-	return anyChanged || symsChanged, nil
+
+	return anyChanged, nil
 }
 
 // filterOutFunctions returns syms with all Function and Method kinds
