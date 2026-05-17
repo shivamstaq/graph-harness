@@ -33,8 +33,17 @@ type Server struct {
 
 // methodEntry pairs a handler with its required capability (empty = always on).
 type methodEntry struct {
-	cap     string
+	cap string
+	// handler is the standard request-response shape used by every
+	// method that does not need the underlying jsonrpc2.Conn.
 	handler func(ctx context.Context, raw json.RawMessage) (any, error)
+	// connHandler is the conn-aware variant used by the subscription
+	// surface (kernel.subscribe / kernel.unsubscribe / kernel.identify
+	// per SPEC §6.22). When non-nil it takes priority over handler.
+	// The conn is needed so server-initiated notifications can be
+	// pushed back to *this* client; capability gating still runs the
+	// same way as for plain handlers.
+	connHandler func(ctx context.Context, conn *jsonrpc2.Conn, raw json.RawMessage) (any, error)
 }
 
 // NewServer constructs a Server bound to the given Service. Default
@@ -56,6 +65,8 @@ func NewServer(svc *Service) *Server {
 		"review", "overlay",
 		// P1 additions
 		"mcp", "conflicts",
+		// P0.5 additions — subscription substrate (SPEC §6.22).
+		"kernel",
 	} {
 		s.AddCapability(c)
 	}
@@ -177,6 +188,16 @@ func (s *Server) registerBuiltins() {
 
 	RegisterVoid(s, "conflicts.list", "conflicts", svc.ConflictsList)
 	RegisterVoid(s, "health.extractors", "doctor", svc.DoctorReport)
+
+	// SPEC §6.22 long-lived subscriber contract: kernel.identify /
+	// subscribe / ack / unsubscribe. The subscribe + identify
+	// methods need the underlying jsonrpc2.Conn so server-initiated
+	// notifications push back to *this* client — registered via
+	// registerConn rather than plain Register.
+	registerConn(s, "kernel.identify", "kernel", svc.Identify)
+	registerConn(s, "kernel.subscribe", "kernel", svc.Subscribe)
+	Register(s, "kernel.ack", "kernel", svc.Ack)
+	Register(s, "kernel.unsubscribe", "kernel", svc.Unsubscribe)
 }
 
 func (s *Server) capList() []string {
@@ -218,10 +239,11 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 // the client disconnects.
 func (s *Server) serveConn(ctx context.Context, raw net.Conn) {
 	stream := jsonrpc2.NewBufferedStream(raw, jsonrpc2.VSCodeObjectCodec{})
+	var conn *jsonrpc2.Conn
 	handler := jsonrpc2.HandlerWithError(func(ctx context.Context, _ *jsonrpc2.Conn, req *jsonrpc2.Request) (any, error) {
-		return s.dispatch(ctx, req)
+		return s.dispatchWithConn(ctx, conn, req)
 	})
-	conn := jsonrpc2.NewConn(ctx, stream, handler)
+	conn = jsonrpc2.NewConn(ctx, stream, handler)
 
 	s.connMu.Lock()
 	s.activeConns[conn] = struct{}{}
@@ -229,14 +251,29 @@ func (s *Server) serveConn(ctx context.Context, raw net.Conn) {
 
 	<-conn.DisconnectNotify()
 
+	// On disconnect, drop every subscription this connection owned so
+	// the per-connection event-pump goroutines exit and their event-
+	// stream cursors release (SPEC §6.22: subscription state may
+	// persist beyond disconnect for reconnect, but the in-memory
+	// fan-out tied to this concrete conn must terminate).
+	if s.svc != nil {
+		s.svc.subscriptions().DropConn(conn)
+	}
+
 	s.connMu.Lock()
 	delete(s.activeConns, conn)
 	s.connMu.Unlock()
 }
 
 // dispatch resolves the method, enforces capability gating, and invokes
-// the handler.
+// the standard request-response handler. Subscription methods need
+// access to the underlying jsonrpc2.Conn so server-initiated
+// notifications can be pushed back; for those, see dispatchWithConn.
 func (s *Server) dispatch(ctx context.Context, req *jsonrpc2.Request) (any, error) {
+	return s.dispatchWithConn(ctx, nil, req)
+}
+
+func (s *Server) dispatchWithConn(ctx context.Context, conn *jsonrpc2.Conn, req *jsonrpc2.Request) (any, error) {
 	s.svc.Touch()
 
 	s.mu.Lock()
@@ -256,6 +293,15 @@ func (s *Server) dispatch(ctx context.Context, req *jsonrpc2.Request) (any, erro
 	var raw json.RawMessage
 	if req.Params != nil {
 		raw = *req.Params
+	}
+	if m.connHandler != nil {
+		if conn == nil {
+			return nil, &jsonrpc2.Error{
+				Code:    -32603,
+				Message: fmt.Sprintf("method %q requires a live JSON-RPC connection", req.Method),
+			}
+		}
+		return m.connHandler(ctx, conn, raw)
 	}
 	return m.handler(ctx, raw)
 }
