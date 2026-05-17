@@ -60,11 +60,10 @@ type activeSub struct {
 	// cursor is updated atomically every time an event is pushed; ack
 	// reads it for persistence. ackedSeq lags the head until the
 	// client confirms; that gap is the backpressure window.
-	cursor    atomic.Uint64
-	ackedSeq  atomic.Uint64
-	startSeq  uint64
-	queueCap  int
-	queueLen  atomic.Int32
+	cursor     atomic.Uint64
+	ackedSeq   atomic.Uint64
+	startSeq   uint64
+	queueCap   int
 	fellBehind atomic.Bool
 
 	cancel context.CancelFunc
@@ -109,13 +108,23 @@ func (m *SubscriptionManager) SubscriberIDFor(conn *jsonrpc2.Conn) string {
 	return id
 }
 
-// Subscribe registers a subscription and spawns the event-pump
-// goroutine. filterExpr is a Participle filter expression (SPEC
-// §6.16) — empty string matches every event. cursor is optional:
-// when zero, the stream starts at the current head; otherwise from
-// cursor+1. Returns the subscription_id the client uses to ack /
-// unsubscribe.
+// Subscribe registers a subscription with the default queue cap.
+// Use SubscribeWithOpts to override the cap.
 func (m *SubscriptionManager) Subscribe(ctx context.Context, conn *jsonrpc2.Conn, filterExpr string, cursor uint64) (string, error) {
+	return m.SubscribeWithOpts(ctx, conn, filterExpr, cursor, 0)
+}
+
+// SubscribeWithOpts is Subscribe with an explicit per-subscription
+// queue cap. queueCap <= 0 falls back to defaultQueueDepth.
+// Returns the subscription_id the client uses to ack / unsubscribe.
+//
+// The pump goroutine runs under a context derived from
+// context.Background(), NOT the caller's ctx — the caller's ctx is
+// the per-request ctx and gets cancelled when kernel.subscribe
+// returns, which would tear down the pump immediately. Lifetime is
+// instead bound to the connection: DropConn cancels the pump on
+// disconnect, or Unsubscribe cancels it explicitly.
+func (m *SubscriptionManager) SubscribeWithOpts(ctx context.Context, conn *jsonrpc2.Conn, filterExpr string, cursor uint64, queueCap int) (string, error) {
 	if conn == nil {
 		return "", fmt.Errorf("subscribe: nil connection")
 	}
@@ -132,8 +141,17 @@ func (m *SubscriptionManager) Subscribe(ctx context.Context, conn *jsonrpc2.Conn
 	subID := "sub-" + randomID()
 	stream := m.log.SubscribeWithFilter(filter)
 	subscriberID := m.SubscriberIDFor(conn)
-	subCtx, cancel := context.WithCancel(ctx)
+	// Decouple the pump from the caller's per-request ctx. The pump
+	// lives as long as the subscription does — either Unsubscribe()
+	// or DropConn() invokes cancel(); the request-bound ctx going
+	// away (which happens immediately after kernel.subscribe
+	// returns) MUST NOT tear it down.
+	subCtx, cancel := context.WithCancel(context.Background())
+	_ = ctx
 
+	if queueCap <= 0 {
+		queueCap = defaultQueueDepth
+	}
 	as := &activeSub{
 		id:           subID,
 		subscriberID: subscriberID,
@@ -141,7 +159,7 @@ func (m *SubscriptionManager) Subscribe(ctx context.Context, conn *jsonrpc2.Conn
 		conn:         conn,
 		stream:       stream,
 		startSeq:     cursor,
-		queueCap:     defaultQueueDepth,
+		queueCap:     queueCap,
 		cancel:       cancel,
 		done:         make(chan struct{}),
 	}
@@ -182,7 +200,9 @@ func (m *SubscriptionManager) Unsubscribe(subID string) {
 }
 
 // Ack advances the cursor for subID up to seq. Reconnect after ack
-// resumes from seq+1.
+// resumes from seq+1. When the un-acked gap shrinks back under the
+// queue cap, the fellBehind one-shot flag clears so subsequent
+// overflows can fire a fresh notification.
 func (m *SubscriptionManager) Ack(subID string, seq uint64) error {
 	m.mu.Lock()
 	as, ok := m.subs[subID]
@@ -196,6 +216,9 @@ func (m *SubscriptionManager) Ack(subID string, seq uint64) error {
 		return fmt.Errorf("ack: seq %d is behind acked %d", seq, prev)
 	}
 	as.ackedSeq.Store(seq)
+	if int(as.cursor.Load()-as.ackedSeq.Load()) < as.queueCap {
+		as.fellBehind.Store(false)
+	}
 	return nil
 }
 
@@ -233,20 +256,22 @@ func (m *SubscriptionManager) pump(ctx context.Context, as *activeSub) {
 			if as.startSeq > 0 && ev.Seq <= as.startSeq {
 				continue
 			}
-			// Backpressure: queueLen tracks in-flight notifications
-			// pushed but not yet ack'd. When it exceeds queueCap, we
-			// fire a one-shot kernel.fellBehind notification then
-			// keep delivering — the client decides how to recover.
-			depth := int(as.queueLen.Load())
-			if depth >= as.queueCap && !as.fellBehind.Swap(true) {
+			// Backpressure (SPEC §6.22): the un-acked gap is
+			// (cursor - ackedSeq). When it crosses queueCap the
+			// client is behind: fire a one-shot kernel.fellBehind
+			// notification with the recovery options. Subsequent
+			// overflow on the same subscription is suppressed until
+			// an ack moves the gap back under cap (handled by Ack
+			// clearing the fellBehind flag).
+			gap := int(as.cursor.Load() - as.ackedSeq.Load())
+			if gap >= as.queueCap && !as.fellBehind.Swap(true) {
 				_ = as.conn.Notify(ctx, "kernel.fellBehind", FellBehindNotification{
 					SubscriptionID: as.id,
-					QueueDepth:     depth,
+					QueueDepth:     gap,
 					QueueCapacity:  as.queueCap,
 					Options:        []string{"rebuild_from_snapshot", "skip_ahead_with_loss", "pause_for_catchup"},
 				})
 			}
-			as.queueLen.Add(1)
 			n := EventNotification{
 				SubscriptionID: as.id,
 				SubscriberID:   as.subscriberID,
@@ -257,11 +282,9 @@ func (m *SubscriptionManager) pump(ctx context.Context, as *activeSub) {
 			}
 			if err := as.conn.Notify(ctx, "kernel.event", n); err != nil {
 				// Connection died mid-push — stop pumping.
-				as.queueLen.Add(-1)
 				return
 			}
 			as.cursor.Store(ev.Seq)
-			as.queueLen.Add(-1)
 		}
 	}
 }
