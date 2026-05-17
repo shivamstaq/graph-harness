@@ -213,6 +213,11 @@ func (s *Server) registerBuiltins() {
 	// conn-aware Server method (the Service doesn't own request
 	// cancellation; the dispatcher does).
 	registerConn(s, "kernel.cancel", "kernel", s.cancelHandler)
+	// SPEC §6.19 transient overlay tier surface: publish / drop are
+	// conn-aware (subscriber_id binding); get is plain-request.
+	registerConn(s, "kernel.publishTransient", "kernel", svc.PublishTransient)
+	registerConn(s, "kernel.dropTransient", "kernel", svc.DropTransient)
+	Register(s, "kernel.getTransient", "kernel", svc.GetTransient)
 }
 
 // cancelHandler implements kernel.cancel (SPEC §6.23): looks up the
@@ -287,14 +292,18 @@ func (s *Server) serveConn(ctx context.Context, raw net.Conn) {
 
 	<-conn.DisconnectNotify()
 
-	// On disconnect, cancel every in-flight request bound to this
-	// connection (SPEC §6.23) and drop every subscription it owned
-	// (SPEC §6.22: subscription state may persist beyond disconnect
-	// for reconnect, but the in-memory fan-out tied to this concrete
-	// conn must terminate). Order matters — cancel handlers first so
-	// they exit promptly before the subscription pumps are torn down.
+	// On disconnect: (1) cancel every in-flight request bound to this
+	// connection (SPEC §6.23), (2) drop the transient overlay entries
+	// the conn published (SPEC §6.19 scope-to-session), (3) drop every
+	// subscription it owned (SPEC §6.22: subscription state may
+	// persist beyond disconnect for reconnect, but the in-memory
+	// fan-out tied to this concrete conn must terminate). Order
+	// matters — cancel handlers first so they exit promptly before
+	// any tier teardown.
 	s.cancelAllInflight(conn)
 	if s.svc != nil {
+		subID := s.svc.subscriptions().SubscriberIDFor(conn)
+		s.svc.transient().DropSubscriber(subID)
 		s.svc.subscriptions().DropConn(conn)
 	}
 
