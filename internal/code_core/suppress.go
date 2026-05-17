@@ -216,3 +216,64 @@ func DisambiguationClaimsHash(canonicalIDs []string) string {
 	return hex.EncodeToString(h[:])
 }
 
+// FileContentHash returns the sha256 hex of the given file bytes.
+// Used by the cold-start drift scan (SPEC §6.20) to decide whether
+// to skip a file whose disk content matches the last-extracted hash.
+func FileContentHash(content []byte) string {
+	h := sha256.Sum256(content)
+	return hex.EncodeToString(h[:])
+}
+
+// GetFileContentHash returns the stored content_hash for the File
+// entity at path, or ("", false, nil) when no File entity exists at
+// that path. The cold-start drift scan compares this against the
+// current disk hash to decide whether re-extract is needed.
+func (s *Store) GetFileContentHash(ctx context.Context, path string) (string, bool, error) {
+	fileID := FileID(path)
+	row := s.db.QueryRowContext(ctx,
+		`SELECT content_hash FROM code_entities WHERE id = ? AND kind = ? LIMIT 1`,
+		fileID, string(KindFile))
+	var hash string
+	if err := row.Scan(&hash); err != nil {
+		if err == sql.ErrNoRows {
+			return "", false, nil
+		}
+		return "", false, err
+	}
+	return hash, true, nil
+}
+
+// SetFileContentHash records the content_hash on the File entity at
+// path. Called by the orchestrator after a successful re-extract so
+// the next cold-start drift scan can skip the file when unchanged.
+// Idempotent: re-setting the same hash is a no-op write.
+func (s *Store) SetFileContentHash(ctx context.Context, path, hash string) error {
+	fileID := FileID(path)
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE code_entities SET content_hash = ? WHERE id = ? AND kind = ?`,
+		hash, fileID, string(KindFile))
+	return err
+}
+
+// ListFilePaths returns every File entity's path, sorted. The cold-
+// start drift scan uses this to detect deletions: stored paths not
+// present on disk are removed (emitting code.core.FileRemoved).
+func (s *Store) ListFilePaths(ctx context.Context) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT path FROM code_entities WHERE kind = ? ORDER BY path`,
+		string(KindFile))
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var out []string
+	for rows.Next() {
+		var p string
+		if err := rows.Scan(&p); err != nil {
+			return nil, err
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+

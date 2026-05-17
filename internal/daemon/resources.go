@@ -178,6 +178,15 @@ func OpenWithOptions(ctx context.Context, ws *Workspace, opts OpenOptions) (*Res
 			_ = r.Close()
 			return nil, fmt.Errorf("orchestrator cold sweep: %w", err)
 		}
+		// SPEC §6.20: cold-start drift scan detects files that
+		// disappeared since the last shutdown. Re-extract handled
+		// the on-disk side; this pass handles the disappeared side
+		// — every stored File whose path no longer exists emits
+		// FileRemoved on the kernel bus and drops from code.core.
+		if err := r.sweepDeletions(ctx); err != nil {
+			_ = r.Close()
+			return nil, fmt.Errorf("sweep deletions: %w", err)
+		}
 		watch, err := NewWatchLoop(ws.Root, orch, log, opts.ErrLog)
 		if err != nil {
 			_ = r.Close()
@@ -200,6 +209,52 @@ func OpenWithOptions(ctx context.Context, ws *Workspace, opts OpenOptions) (*Res
 	}
 
 	return r, nil
+}
+
+// sweepDeletions walks every stored File entity and removes the row
+// (plus emits code.core.FileRemoved on the kernel bus) for any path
+// whose disk file no longer exists. Called once on cold-start so the
+// daemon's materialized state matches the workspace's actual file
+// set at startup (SPEC §6.20 deletion half of hydration parity).
+//
+// Idempotent: re-running on a workspace whose stored Files all still
+// exist emits zero events.
+func (r *Resources) sweepDeletions(ctx context.Context) error {
+	if r.Code == nil {
+		return nil
+	}
+	paths, err := r.Code.ListFilePaths(ctx)
+	if err != nil {
+		return fmt.Errorf("list file paths: %w", err)
+	}
+	for _, rel := range paths {
+		abs := filepath.Join(r.Workspace.Root, rel)
+		if _, err := os.Stat(abs); err == nil {
+			continue // still on disk
+		} else if !os.IsNotExist(err) {
+			// Permission or I/O error — keep the entry; the next
+			// cold sweep retries.
+			continue
+		}
+		// File is gone. Drop the entity and emit the event.
+		fileID := code_core.FileID(rel)
+		if err := r.Code.DeleteEntity(ctx, fileID); err != nil {
+			return fmt.Errorf("delete entity %s: %w", rel, err)
+		}
+		if r.Log == nil {
+			continue
+		}
+		payload, _ := json.Marshal(FileRemovedPayload{Path: rel})
+		if _, err := r.Log.Append(ctx, []kernel.Event{{
+			Layer:      "code.core",
+			Kind:       "FileRemoved",
+			Payload:    json.RawMessage(payload),
+			ProducedBy: kernel.SourceClass("layer:code.core"),
+		}}); err != nil {
+			return fmt.Errorf("emit FileRemoved %s: %w", rel, err)
+		}
+	}
+	return nil
 }
 
 // codeCoreEmitter mirrors cli.codeCoreEventEmitter — a thin adapter

@@ -101,6 +101,11 @@ CREATE TABLE IF NOT EXISTS code_core_emitted_disambiguations (
 	_, _ = s.db.Exec(`ALTER TABLE code_entity_provenance ADD COLUMN produced_by_path TEXT NOT NULL DEFAULT ''`)
 	_, _ = s.db.Exec(`ALTER TABLE code_entity_provenance ADD COLUMN server_id TEXT NOT NULL DEFAULT ''`)
 	_, _ = s.db.Exec(`ALTER TABLE code_entity_provenance ADD COLUMN low_confidence INTEGER NOT NULL DEFAULT 0`)
+	// P0.5.T10: content_hash on File entities drives the cold-start
+	// drift scan (SPEC §6.20). Populated for kind=File rows when a
+	// file is ingested; the orchestrator's per-file fast-path skips
+	// re-extract when the stored hash equals the current disk hash.
+	_, _ = s.db.Exec(`ALTER TABLE code_entities ADD COLUMN content_hash TEXT NOT NULL DEFAULT ''`)
 	return s.migrateP0Provenance()
 }
 
