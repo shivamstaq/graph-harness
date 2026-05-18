@@ -103,12 +103,20 @@ func OpenWithOptions(ctx context.Context, ws *Workspace, opts OpenOptions) (*Res
 		_ = codeDB.Close()
 		return nil, fmt.Errorf("code.core schema: %w", err)
 	}
-	// P0.5.T18 / SPEC §9.1: install the kernel trust policy so
-	// future tokenized writes (Store.PutEntityWithToken) verify
-	// authorities at the storage seam. Strict mode stays off during
-	// the rollout; flipping it to true once every writer is migrated
-	// is the final v1 ship-bar step for the writer-monopoly clause.
-	codeStore.SetTrustPolicy(kernel.NewTrustPolicy())
+	// P0.5.T18 + P1.5.T07 / SPEC §9.1: install the kernel trust
+	// policy and the matching in-process token issuer so every
+	// daemon-side write seam (Unifier, Orchestrator, IngestParsedFile)
+	// can auto-mint a daemon-authority WriteToken without threading
+	// the policy through every signature. Strict mode is flipped on
+	// — the migration completed in P1.5.T07, every write seam routes
+	// through Store.PutEntity / UpsertProvenance / AddRelation which
+	// now consult the policy via authorizeImplicitWrite. External
+	// callers (non-daemon CLI tools writing directly to SQLite) lack
+	// the issuer, so the strict-mode rejection seam fires for them.
+	trustPolicy := kernel.NewTrustPolicy()
+	codeStore.SetTrustPolicy(trustPolicy)
+	codeStore.SetTokenIssuer(code_core.TokenIssuerFunc(trustPolicy.IssueWriteToken))
+	trustPolicy.SetStrict(true)
 
 	queueDSN := ws.EventLog + ".review.queue?_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)"
 	queueDB, err := sql.Open("sqlite", queueDSN)
@@ -129,6 +137,24 @@ func OpenWithOptions(ctx context.Context, ws *Workspace, opts OpenOptions) (*Res
 		_ = codeDB.Close()
 		_ = queueDB.Close()
 		return nil, fmt.Errorf("review.queue schema: %w", err)
+	}
+	// Load per-proposal-kind evidence requirements from every embedded
+	// layer manifest so daemon-routed review.submit / review.addEvidence
+	// (P1.5.T06) see the same `needs_evidence` rules the standalone CLI
+	// path picks up via openReviewQueue. Without this load the daemon
+	// would auto-promote every proposal to pending_review regardless of
+	// declared evidence requirements.
+	if loadErr := kernel.WalkEmbeddedManifests(func(name string, data []byte) error {
+		if err := queue.LoadRequirements(data); err != nil {
+			return fmt.Errorf("load evidence requirements from %s: %w",
+				strings.TrimSuffix(name, ".yaml"), err)
+		}
+		return nil
+	}); loadErr != nil {
+		_ = log.Close()
+		_ = codeDB.Close()
+		_ = queueDB.Close()
+		return nil, fmt.Errorf("review.queue requirements: %w", loadErr)
 	}
 
 	overlay := semantic_overlay.NewOverlay()
@@ -176,6 +202,41 @@ func OpenWithOptions(ctx context.Context, ws *Workspace, opts OpenOptions) (*Res
 			return nil, fmt.Errorf("orchestrator: %w", err)
 		}
 		r.Orch = orch
+		// P1.5.T02 + F3: LSP push-back drives a re-extract of the
+		// affected file. We do NOT emit a synthetic LSPNotification
+		// event kind — per plan/answers/02 + /06, the canonical
+		// kernel-layer drift taxonomy is the four typed kinds
+		// (SymbolMoved/SymbolRenamed/SignatureChanged/SymbolDeleted)
+		// + FileChanged/FileRemoved. The re-extract goes through
+		// Unifier.UnifyChanged, where compare-before-emit fires the
+		// typed events automatically when state transitions.
+		//
+		// Filter: only textDocument/publishDiagnostics is a real
+		// server-initiated notification today (documentSymbol is
+		// request/response in standard LSP). $/progress and
+		// $/cancelRequest are noise the kernel bus should not see.
+		orch.SetLSPNotificationHandler(func(languageID, method string, params json.RawMessage) {
+			if method != "textDocument/publishDiagnostics" {
+				return
+			}
+			rel := relPathFromDiagnosticParams(params, ws.Root)
+			if rel == "" {
+				return
+			}
+			seq := uint64(0)
+			if log != nil {
+				seq = log.LastSeq()
+			}
+			// Drive a single-file re-extract. UnifyChanged inside
+			// IndexFileChanged emits typed drift events only when
+			// content actually transitioned; an unchanged file
+			// produces zero events (suppress-at-source).
+			_, err := orch.IndexFileChanged(context.Background(), rel, seq)
+			if err != nil && opts.ErrLog != nil {
+				opts.ErrLog("lsp push re-extract %s: %v", rel, err)
+			}
+			_ = languageID // reserved for future per-language routing decisions
+		})
 		coldSeq := uint64(0)
 		if log != nil {
 			coldSeq = log.LastSeq()
@@ -197,6 +258,37 @@ func OpenWithOptions(ctx context.Context, ws *Workspace, opts OpenOptions) (*Res
 		if err != nil {
 			_ = r.Close()
 			return nil, fmt.Errorf("watch loop: %w", err)
+		}
+		// F7: thread the code.core store into the watcher so removed
+		// files emit the SymbolDeleted cascade in addition to FileRemoved.
+		watch.SetCodeStore(codeStore)
+		// F9 / P1.T11: kick off the SCIP refresher hot-reload pipeline
+		// so a new .scip-index/*.scip drop produces drift events
+		// without requiring an explicit re-index command. Errors are
+		// logged but non-fatal — workspaces without .scip-index/
+		// degrade gracefully (Refresher.Start returns nil there).
+		// The hook emits `code.core.SCIPRefreshed` per imported index
+		// so subscribers can observe hot-reload activity end-to-end
+		// (the underlying provenance writes don't themselves hit the
+		// kernel bus — they're SQLite-only).
+		scipHook := func(indexPath, languageID string, symbolCount int) {
+			if log == nil {
+				return
+			}
+			payload, _ := json.Marshal(map[string]any{
+				"index_path":   indexPath,
+				"language_id":  languageID,
+				"symbol_count": symbolCount,
+			})
+			_, _ = log.Append(context.Background(), []kernel.Event{{
+				Layer:      "code.core",
+				Kind:       "SCIPRefreshed",
+				Payload:    json.RawMessage(payload),
+				ProducedBy: kernel.SourceClass("extractor:scip:hot-reload"),
+			}})
+		}
+		if err := orch.StartSCIPRefresh(ctx, log.LastSeq, opts.ErrLog, scipHook); err != nil && opts.ErrLog != nil {
+			opts.ErrLog("scip refresh start: %v", err)
 		}
 		if err := watch.Start(ctx); err != nil {
 			_ = r.Close()
@@ -242,8 +334,15 @@ func (r *Resources) sweepDeletions(ctx context.Context) error {
 			// cold sweep retries.
 			continue
 		}
-		// File is gone. Drop the entity and emit the event.
+		// File is gone. Per F7 / SPEC §6.20: emit a `SymbolDeleted`
+		// event for each child entity BEFORE dropping the File row
+		// (FK cascade removes the children, so we must enumerate
+		// them while they still exist). Then emit `FileRemoved` for
+		// the File entity itself.
 		fileID := code_core.FileID(rel)
+		if err := emitSymbolDeletedCascade(ctx, r.Code, r.Log, rel, fileID); err != nil {
+			return err
+		}
 		if err := r.Code.DeleteEntity(ctx, fileID); err != nil {
 			return fmt.Errorf("delete entity %s: %w", rel, err)
 		}
@@ -261,6 +360,88 @@ func (r *Resources) sweepDeletions(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+// SymbolDeletedPayload is the kernel-bus payload emitted for each
+// child entity that disappears with its parent File (F7 / SPEC §6.20
+// cascading drift). Subscribers (selector cache invalidation,
+// change.process pipeline, IDE code lens) decode this to invalidate
+// per-symbol matches without re-querying the full File extent.
+type SymbolDeletedPayload struct {
+	EntityID      string `json:"entity_id"`
+	QualifiedName string `json:"qualified_name,omitempty"`
+	Kind          string `json:"kind"`
+	Path          string `json:"path"`
+}
+
+// emitSymbolDeletedCascade walks the child entities of fileID and
+// emits one `code.core.SymbolDeleted` event per child. Returns nil
+// when log or code store are missing (test setups).
+//
+// Order: children are emitted in stable id-ascending order so
+// subscribers observing the stream see a deterministic sequence.
+// FileRemoved is emitted by the caller AFTER this returns, so the
+// kernel-bus order is `SymbolDeleted*…FileRemoved`. Consumers that
+// want the inverse should use causation links on the events.
+func emitSymbolDeletedCascade(ctx context.Context, code *code_core.Store, log *facts.EventLog, rel, fileID string) error {
+	if code == nil || log == nil {
+		return nil
+	}
+	children, err := code.ListEntitiesByPath(ctx, rel)
+	if err != nil {
+		return fmt.Errorf("list children for %s: %w", rel, err)
+	}
+	for _, c := range children {
+		if c.ID == fileID || c.Kind == code_core.KindFile {
+			continue
+		}
+		payload, _ := json.Marshal(SymbolDeletedPayload{
+			EntityID:      c.ID,
+			QualifiedName: c.QualifiedName,
+			Kind:          string(c.Kind),
+			Path:          c.Path,
+		})
+		if _, err := log.Append(ctx, []kernel.Event{{
+			Layer:      "code.core",
+			Kind:       "SymbolDeleted",
+			Payload:    json.RawMessage(payload),
+			ProducedBy: kernel.SourceClass("layer:code.core"),
+		}}); err != nil {
+			return fmt.Errorf("emit SymbolDeleted %s: %w", c.ID, err)
+		}
+	}
+	return nil
+}
+
+// relPathFromDiagnosticParams parses an LSP publishDiagnostics
+// params payload and returns the workspace-relative path of the
+// affected document, or "" if the params don't carry a file URI
+// inside the workspace. F3.
+//
+// Params shape per the LSP spec:
+//
+//	{ "uri": "file:///abs/path.go", "diagnostics": [ ... ] }
+func relPathFromDiagnosticParams(params json.RawMessage, root string) string {
+	if len(params) == 0 {
+		return ""
+	}
+	var probe struct {
+		URI string `json:"uri"`
+	}
+	if err := json.Unmarshal(params, &probe); err != nil {
+		return ""
+	}
+	if probe.URI == "" || !strings.HasPrefix(probe.URI, "file://") {
+		return ""
+	}
+	abs := strings.TrimPrefix(probe.URI, "file://")
+	// On Linux/macOS file:// URIs carry a leading slash; on Windows
+	// they may be `file:///C:/...` — both forms strip cleanly here.
+	rel, err := filepath.Rel(root, abs)
+	if err != nil || strings.HasPrefix(rel, "..") {
+		return ""
+	}
+	return filepath.ToSlash(rel)
 }
 
 // codeCoreEmitter mirrors cli.codeCoreEventEmitter — a thin adapter

@@ -362,6 +362,8 @@ func entityFromSymbol(s source_live.Symbol) (Entity, bool) {
 			Path:                s.Path,
 			BodyHash:            s.BodyHash,
 			NormalizedSignature: ns,
+			SymbolFingerprint:   s.SymbolFingerprint,
+			ASTHash:             s.ASTHash,
 		}, true
 	case source_live.SymbolKindMethod:
 		ns := normalize.ForLanguage(s.LanguageID, s.Signature)
@@ -375,6 +377,8 @@ func entityFromSymbol(s source_live.Symbol) (Entity, bool) {
 			Path:                s.Path,
 			BodyHash:            s.BodyHash,
 			NormalizedSignature: ns,
+			SymbolFingerprint:   s.SymbolFingerprint,
+			ASTHash:             s.ASTHash,
 		}, true
 	case source_live.SymbolKindTypeDecl:
 		id := TypeDeclID(s.LanguageID, s.QualifiedName)

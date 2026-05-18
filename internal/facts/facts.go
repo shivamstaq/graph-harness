@@ -27,6 +27,13 @@ type Facts interface {
 	Subscribe(ctx context.Context, filter kernel.EventFilter) (EventStream, error)
 }
 
+// LegacySubscriberID is the implicit subscription_name passed by callers
+// that have not been updated to the per-subscription cursor model from
+// SPEC §6.16 (F8 / P0.5.T02). Defaulting to the empty string preserves
+// pre-migration behavior where a subscriber had at most one persisted
+// cursor per identity.
+const LegacySubscriberID = ""
+
 // EventStream is the subscription handle returned by Facts.Subscribe.
 type EventStream interface {
 	Events() <-chan kernel.Event
@@ -180,11 +187,15 @@ func (e *EventLog) ReadAsOf(ctx context.Context, maxSeq uint64) ([]kernel.Event,
 	return scanEvents(rows)
 }
 
-// CursorOf returns the last_processed_seq stored for the named subscriber
-// (zero if none).
-func (e *EventLog) CursorOf(ctx context.Context, subID string) (uint64, error) {
+// CursorOf returns the last_processed_seq stored for (subID, subName)
+// (zero if none). Per SPEC §6.16 + F8: cursors are scoped per
+// subscription_name, so a single subscriber can multiplex many
+// subscriptions across reconnects. Pass LegacySubscriberID ("") for
+// the pre-migration single-cursor-per-subscriber behavior.
+func (e *EventLog) CursorOf(ctx context.Context, subID, subName string) (uint64, error) {
 	row := e.db.QueryRowContext(ctx,
-		`SELECT last_processed_seq FROM layer_state WHERE subscriber_id = ?`, subID)
+		`SELECT last_processed_seq FROM layer_state WHERE subscriber_id = ? AND subscription_name = ?`,
+		subID, subName)
 	var v sql.NullInt64
 	if err := row.Scan(&v); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -200,12 +211,14 @@ func (e *EventLog) CursorOf(ctx context.Context, subID string) (uint64, error) {
 
 // AdvanceCursor stores the subscriber's last_processed_seq in the kernel-owned
 // layer_state table — transactionally, per SPEC §6.16: do NOT emit events for
-// cursor advancement (DESIGN §8).
-func (e *EventLog) AdvanceCursor(ctx context.Context, subID string, seq uint64) error {
+// cursor advancement (DESIGN §8). Per F8 / P0.5.T02 the cursor is keyed by
+// (subscriber_id, subscription_name) so one subscriber can persist
+// independent cursors across multiplexed subscriptions.
+func (e *EventLog) AdvanceCursor(ctx context.Context, subID, subName string, seq uint64) error {
 	_, err := e.db.ExecContext(ctx, `
-		INSERT INTO layer_state (subscriber_id, last_processed_seq) VALUES (?, ?)
-		ON CONFLICT (subscriber_id) DO UPDATE SET last_processed_seq = excluded.last_processed_seq
-	`, subID, seq)
+		INSERT INTO layer_state (subscriber_id, subscription_name, last_processed_seq) VALUES (?, ?, ?)
+		ON CONFLICT (subscriber_id, subscription_name) DO UPDATE SET last_processed_seq = excluded.last_processed_seq
+	`, subID, subName, seq)
 	return err
 }
 
@@ -228,9 +241,14 @@ CREATE INDEX IF NOT EXISTS idx_events_layer_kind ON kernel_events(layer, kind);
 CREATE INDEX IF NOT EXISTS idx_events_tx ON kernel_events(tx) WHERE tx IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_events_subject ON kernel_events(subject_layer, subject_kind, subject_id);
 
+-- F8 / P0.5.T02: compound PK on (subscriber_id, subscription_name).
+-- Pre-F8 deployments had PK on subscriber_id alone; migrateLayerState
+-- below walks the rename dance for upgrades.
 CREATE TABLE IF NOT EXISTS layer_state (
-    subscriber_id      TEXT PRIMARY KEY,
-    last_processed_seq INTEGER NOT NULL DEFAULT 0
+    subscriber_id      TEXT NOT NULL,
+    subscription_name  TEXT NOT NULL DEFAULT '',
+    last_processed_seq INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (subscriber_id, subscription_name)
 );
 
 CREATE TABLE IF NOT EXISTS layer_manifests (
@@ -248,8 +266,69 @@ CREATE TABLE IF NOT EXISTS kernel_snapshots (
     created_at TEXT NOT NULL
 );
 `
-	_, err := db.Exec(schema)
-	return err
+	if _, err := db.Exec(schema); err != nil {
+		return err
+	}
+	return migrateLayerState(db)
+}
+
+// migrateLayerState upgrades pre-F8 layer_state rows (PK on subscriber_id
+// alone) to the post-F8 compound PK shape. Idempotent: a fresh CREATE
+// already has the new schema; an upgrade detects the legacy shape by
+// looking for the subscription_name column and runs the SQLite-canonical
+// rename dance.
+func migrateLayerState(db *sql.DB) error {
+	// Check whether subscription_name column already exists.
+	rows, err := db.Query(`PRAGMA table_info(layer_state)`)
+	if err != nil {
+		return fmt.Errorf("table_info layer_state: %w", err)
+	}
+	hasSubName := false
+	for rows.Next() {
+		var (
+			cid     int
+			name    string
+			ctype   string
+			notnull int
+			dflt    sql.NullString
+			pk      int
+		)
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		if name == "subscription_name" {
+			hasSubName = true
+		}
+	}
+	_ = rows.Close()
+	if hasSubName {
+		return nil
+	}
+	// Rename dance: SQLite can't ALTER PRIMARY KEY in place.
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	stmts := []string{
+		`ALTER TABLE layer_state RENAME TO layer_state_legacy`,
+		`CREATE TABLE layer_state (
+		    subscriber_id      TEXT NOT NULL,
+		    subscription_name  TEXT NOT NULL DEFAULT '',
+		    last_processed_seq INTEGER NOT NULL DEFAULT 0,
+		    PRIMARY KEY (subscriber_id, subscription_name)
+		)`,
+		`INSERT INTO layer_state (subscriber_id, subscription_name, last_processed_seq)
+		 SELECT subscriber_id, '', last_processed_seq FROM layer_state_legacy`,
+		`DROP TABLE layer_state_legacy`,
+	}
+	for _, s := range stmts {
+		if _, err := tx.Exec(s); err != nil {
+			return fmt.Errorf("migrate layer_state: %w (stmt=%q)", err, s)
+		}
+	}
+	return tx.Commit()
 }
 
 func readMaxSeq(db *sql.DB) (uint64, error) {

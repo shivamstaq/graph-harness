@@ -188,6 +188,19 @@ func (s *Server) registerBuiltins() {
 	Register(s, "review.get", "review", svc.ReviewGet)
 	Register(s, "review.accept", "review", svc.ReviewAccept)
 	Register(s, "review.reject", "review", svc.ReviewReject)
+	Register(s, "review.submit", "review", svc.ReviewSubmit)
+	Register(s, "review.addEvidence", "review", svc.ReviewAddEvidence)
+
+	// F12 / P0.T11 snapshot create/list/restore. Capability tag
+	// "snapshot" — register the cap so methods become reachable.
+	s.AddCapability("snapshot")
+	Register(s, "kernel.snapshot", "snapshot", svc.SnapshotCreate)
+	Register(s, "kernel.listSnapshots", "snapshot", svc.SnapshotList)
+	Register(s, "kernel.restoreSnapshot", "snapshot", svc.SnapshotRestore)
+
+	// F16 / P1.5.T07 audit CLI — daemon.auditUntagged surfaces every
+	// row in code.core that lacks a kernel-issued kernel_seq_tag.
+	RegisterVoid(s, "daemon.auditUntagged", "daemon", svc.AuditUntagged)
 
 	Register(s, "overlay.save", "overlay", svc.OverlaySave)
 
@@ -213,6 +226,12 @@ func (s *Server) registerBuiltins() {
 	// answers with {pong: true}; round-trip failure is the
 	// disconnect signal.
 	RegisterVoid(s, "kernel.ping", "kernel", svc.KernelPing)
+	// SPEC §6.22 backpressure recovery: kernel.rebuildFromSnapshot is
+	// the actionable half of the fellBehind contract. Clients that
+	// receive a kernel.fellBehind notification can call this method
+	// to capture a fresh snapshot and resume from its head, rather
+	// than replaying the un-acked backlog. P1.5.T08.
+	Register(s, "kernel.rebuildFromSnapshot", "kernel", svc.RebuildFromSnapshot)
 	// kernel.cancel needs the Server's in-flight registry so it
 	// targets requests by their JSON-RPC id. Implemented as a
 	// conn-aware Server method (the Service doesn't own request

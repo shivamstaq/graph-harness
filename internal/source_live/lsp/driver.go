@@ -2,9 +2,17 @@ package lsp
 
 import (
 	"context"
+	"encoding/json"
 
 	"github.com/shivamstaq/graph-harness/internal/source_live"
 )
+
+// NotificationHandler receives server-initiated LSP notifications
+// (textDocument/publishDiagnostics, $/progress, documentSymbol push
+// variants where the server supports them). Handlers run on the
+// driver's read goroutine, so heavy work must be dispatched to a
+// separate goroutine to avoid blocking the LSP transport. P1.5.T02.
+type NotificationHandler func(languageID, method string, params json.RawMessage)
 
 // Location is a workspace-relative path + range, returned by Definition
 // and References. We keep the LSP wire types internal and project them
@@ -56,4 +64,13 @@ type Driver interface {
 	// Shutdown sends `shutdown` + `exit` and reaps the subprocess.
 	// Idempotent; safe to call from a deferred context.
 	Shutdown(ctx context.Context) error
+
+	// SetNotificationHandler installs a callback that receives every
+	// server-initiated LSP notification (publishDiagnostics, $/progress,
+	// documentSymbol push). Must be called before Initialize or its
+	// effect is delayed until the next Initialize. Idempotent: passing
+	// nil clears the handler. P1.5.T02 — the daemon installs a handler
+	// that forwards into the kernel bus so push-back from gopls /
+	// tsserver / pyright surfaces as code.core drift events.
+	SetNotificationHandler(h NotificationHandler)
 }

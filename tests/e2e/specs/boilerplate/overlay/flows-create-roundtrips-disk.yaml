@@ -1,0 +1,66 @@
+# yaml-language-server: $schema=https://github.com/shivamstaq/gotit/raw/main/schema/spec.schema.json
+spec_version: 1
+name: flows-create-roundtrips-disk
+description: >
+  F12 / P0.T27: `graph-harness flows create` writes a parseable
+  `.gh` file under `.graph-harness/overlay/flows/<name>.gh`. The
+  file round-trips: `graph-harness flows list --json` enumerates
+  the freshly-created flow.
+tags: [overlay, flows, p0t27, f12]
+order: 30
+requires:
+  - feature:p1-multi-language
+repo:
+  helper: go-module-empty
+
+setup:
+  - name: init_workspace
+    command: graph-harness init
+    assert: [{ type: exit_code, expected: 0 }]
+
+steps:
+  - name: create_flow_writes_gh_file
+    command: |
+      sh -c '
+      graph-harness flows create \
+        --name PaymentAuth \
+        --description "payment authorization flow" \
+        --scope PaymentAuthorize \
+        --step PaymentAuthorize \
+        --step AuditLog > $HOME/create.out 2>&1
+      cat $HOME/create.out
+      grep -q "PaymentAuth.gh" $HOME/create.out
+      test -f .graph-harness/overlay/flows/PaymentAuth.gh
+      cat .graph-harness/overlay/flows/PaymentAuth.gh
+      grep -q "flow PaymentAuth" .graph-harness/overlay/flows/PaymentAuth.gh
+      grep -q "scope PaymentAuthorize" .graph-harness/overlay/flows/PaymentAuth.gh
+      echo "PASS: flow created and round-trips"
+      '
+    assert:
+      - { type: exit_code, expected: 0 }
+      - { type: contains, value: "PASS: flow created and round-trips" }
+      - { type: contains, value: "PaymentAuth.gh" }
+
+  - name: flows_list_enumerates_created_flow
+    command: graph-harness flows list --json
+    assert:
+      - { type: exit_code, expected: 0 }
+      - { type: contains, value: "PaymentAuth" }
+
+  - name: create_invalid_flow_rejected_at_parse_time
+    command: |
+      sh -c '
+      # An empty --name is rejected; this is the "parse-validate
+      # before write" half of the F12 contract.
+      graph-harness flows create > $HOME/invalid.out 2>&1
+      EXIT=$?
+      cat $HOME/invalid.out
+      if [ "$EXIT" -eq 0 ]; then
+        echo "FAIL: empty --name should fail" >&2
+        exit 1
+      fi
+      echo "PASS: invalid flow rejected"
+      '
+    assert:
+      - { type: exit_code, expected: 0 }
+      - { type: contains, value: "PASS: invalid flow rejected" }

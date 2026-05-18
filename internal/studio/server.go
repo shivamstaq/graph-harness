@@ -32,16 +32,19 @@ var spaFS embed.FS
 //   - Origin (when present) must be loopback (http://127.0.0.1:* or
 //     http://localhost:*).
 //
-// All graph operations are forwarded to the daemon via the in-process
-// jsonrpc.Service handle; Studio never touches the SQLite stores directly.
+// All graph operations are forwarded to the daemon via the
+// jsonrpc.Consumer interface. Concrete shape may be either the
+// in-process *jsonrpc.Service (no daemon running) or a
+// *jsonrpc.ClientService (daemon running and Studio dials it
+// over JSON-RPC). Studio never touches the SQLite stores directly.
 type Server struct {
-	svc   *jsonrpc.Service
+	svc   jsonrpc.Consumer
 	token string
 	mux   *http.ServeMux
 }
 
 // NewServer wires the routes and generates a one-shot token.
-func NewServer(svc *jsonrpc.Service) (*Server, error) {
+func NewServer(svc jsonrpc.Consumer) (*Server, error) {
 	if svc == nil {
 		return nil, errors.New("nil service")
 	}

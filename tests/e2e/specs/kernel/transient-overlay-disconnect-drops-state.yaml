@@ -1,0 +1,106 @@
+# yaml-language-server: $schema=https://github.com/shivamstaq/gotit/raw/main/schema/spec.schema.json
+spec_version: 1
+name: transient-overlay-disconnect-drops-state
+description: >
+  SPEC §6.19 + P1.5.T09 transient overlay round-trip: a publisher
+  process calls `kernel.publishTransient` over JSON-RPC; a separate
+  reader process reads it via `kernel.getTransient`; the publisher
+  disconnects (SIGTERM); the reader confirms the entry is now absent
+  because the in-memory tier scopes every claim to its publishing
+  conn. End-to-end exercise of the CLI surfaces
+  `graph-harness daemon publish-transient` and
+  `graph-harness daemon get-transient`.
+
+  The P0.5.T12 transient infrastructure already has Go-test coverage
+  (internal/jsonrpc/transient_test.go); this spec covers the user-
+  facing CLI seam future consumers (VS Code editor-state, Studio in-
+  flight forms, MCP agent drafts) will use.
+tags: [kernel, transient, p1.5t09]
+order: 220
+requires:
+  - feature:p1.5-transient-overlay-cli
+  - feature:p0.5-transient-tier
+repo:
+  helper: go-module-with-checkout-validator
+
+setup:
+  - name: init_workspace
+    command: graph-harness init
+    assert: [{ type: exit_code, expected: 0 }]
+
+daemons:
+  - name: gh-daemon
+    command: sh -c 'GRAPH_HARNESS_DISABLE_LSP=1 graph-harness daemon serve --workspace .'
+    phase: post_setup
+    start_timeout: 15s
+    ready:
+      log_contains: "daemon serving on"
+      timeout: 10s
+    stop:
+      signal: TERM
+      grace: 5s
+      expected_exit: 0
+    log_assert:
+      - { type: not_contains, value: "PANIC" }
+
+steps:
+  - name: publish_transient_in_background_holds_connection
+    # The publish-transient command issues kernel.publishTransient
+    # and then blocks on signal so the conn stays open — transient
+    # entries are scoped to the conn and disappear when it closes.
+    background: true
+    command: |
+      sh -c '
+      graph-harness daemon publish-transient \
+        --source-class editor \
+        --target-id ent-editor-buffer-42 \
+        --payload "{\"line\":17,\"text\":\"draft body\"}" \
+        --subscriber-id pub-session-1 \
+        --hold 30s > $HOME/pub.out 2>&1
+      '
+    ready:
+      # The publisher prints transient.published once kernel.publishTransient returns.
+      command: sh -c 'grep -q transient.published $HOME/pub.out 2>/dev/null'
+      timeout: 6s
+    stop:
+      signal: TERM
+      grace: 3s
+
+  - name: get_transient_returns_entry_while_publisher_connected
+    command: |
+      sh -c '
+      graph-harness daemon get-transient --target-id ent-editor-buffer-42 > $HOME/get.out 2>&1
+      cat $HOME/get.out
+      grep -q "\"found\":true" $HOME/get.out
+      '
+    assert:
+      - { type: exit_code, expected: 0 }
+      - { type: contains, value: "\"found\":true" }
+      - { type: contains, value: "ent-editor-buffer-42" }
+      - { type: contains, value: "editor" }
+
+  - name: stop_publisher_then_assert_entry_dropped
+    # Send SIGTERM to the background publisher — it will close its
+    # conn cleanly, the daemon DropSubscriber path runs, and the
+    # entry vanishes from the in-memory tier.
+    command: |
+      sh -c '
+      pkill -TERM -f "publish-transient.*ent-editor-buffer-42" || true
+      # Give the daemon time to process the DisconnectNotify path.
+      for i in 1 2 3 4 5 6 7 8 9 10; do
+        sleep 0.3
+        if ! graph-harness daemon get-transient --target-id ent-editor-buffer-42 > $HOME/get2.out 2>&1; then
+          if grep -q "no transient entry" $HOME/get2.out; then
+            echo "PASS: transient entry dropped on publisher disconnect"
+            cat $HOME/get2.out
+            exit 0
+          fi
+        fi
+      done
+      echo "FAIL: transient entry still present after publisher disconnect" >&2
+      cat $HOME/get2.out >&2 || true
+      exit 1
+      '
+    assert:
+      - { type: exit_code, expected: 0 }
+      - { type: contains, value: "PASS: transient entry dropped" }

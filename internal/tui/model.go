@@ -14,8 +14,15 @@ import (
 )
 
 // Model is the bubbletea model for the cockpit.
+//
+// Per F2 / plan/answers/04 §5, the TUI consumes the daemon via the
+// JSON-RPC Consumer interface — concrete shape may be either the
+// in-process *jsonrpc.Service (when no daemon is running) or a
+// *jsonrpc.ClientService wrapping a connected client (when the daemon
+// owns the workspace). Both satisfy the same surface; the cockpit
+// doesn't care which.
 type Model struct {
-	svc *jsonrpc.Service
+	svc jsonrpc.Consumer
 
 	view   int // 0 status, 1 findings, 2 conflicts, 3 doctor
 	width  int
@@ -29,10 +36,10 @@ type Model struct {
 	tick   time.Time
 }
 
-// NewModel constructs the model bound to the given service. svc may be nil
-// for an offline/dry-run TUI invocation that just renders the chrome and
-// exits — useful in CI specs.
-func NewModel(svc *jsonrpc.Service) *Model {
+// NewModel constructs the model bound to the given Consumer. svc may
+// be nil for an offline/dry-run TUI invocation that just renders the
+// chrome and exits — useful in CI specs.
+func NewModel(svc jsonrpc.Consumer) *Model {
 	return &Model{svc: svc, tick: time.Now()}
 }
 

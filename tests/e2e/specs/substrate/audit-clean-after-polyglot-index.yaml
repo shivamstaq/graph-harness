@@ -1,0 +1,57 @@
+# yaml-language-server: $schema=https://github.com/shivamstaq/gotit/raw/main/schema/spec.schema.json
+spec_version: 1
+name: audit-clean-after-polyglot-index
+description: >
+  F16 / P1.5.T07 gate 9: after the daemon indexes a polyglot
+  workspace, `graph-harness daemon audit-untagged` MUST return 0/0/0
+  — no entity, provenance, or relation row in code.core lacks the
+  kernel-issued kernel_seq_tag. The writer-monopoly invariant
+  (SPEC §9.1) is observable end-to-end.
+tags: [substrate, trust, audit, p1.5t07, f16]
+order: 240
+requires:
+  - feature:p1.5-trust-strict
+  - feature:p0.5-trust-enforced
+repo:
+  helper: polyglot-repo-go-ts-py
+
+setup:
+  - name: init_workspace
+    command: graph-harness init
+    assert: [{ type: exit_code, expected: 0 }]
+
+  - name: install_overlay
+    command: sh -c "mkdir -p .graph-harness/overlay && cp demo.checkout.gh .graph-harness/overlay/checkout.gh"
+    assert: [{ type: exit_code, expected: 0 }]
+
+daemons:
+  - name: gh-daemon
+    command: sh -c 'GRAPH_HARNESS_DISABLE_LSP=1 graph-harness daemon serve --workspace .'
+    phase: post_setup
+    start_timeout: 15s
+    ready:
+      log_contains: "daemon serving on"
+      timeout: 10s
+    stop:
+      signal: TERM
+      grace: 5s
+      expected_exit: 0
+    log_assert:
+      - { type: not_contains, value: "PANIC" }
+
+steps:
+  - name: drive_indexing_then_audit
+    command: |
+      sh -c '
+      # Trigger indexing across the polyglot fixture.
+      graph-harness selectors test CheckoutValidator --json > /dev/null || true
+      # Audit. Exit code 0 means clean; non-zero means offenders exist.
+      graph-harness daemon audit-untagged --json > $HOME/audit.json 2>&1
+      cat $HOME/audit.json
+      grep -q "\"total_count\":0" $HOME/audit.json
+      echo "PASS: writer-monopoly holds (0/0/0)"
+      '
+    assert:
+      - { type: exit_code, expected: 0 }
+      - { type: contains, value: "PASS: writer-monopoly holds" }
+      - { type: contains, value: "\"total_count\":0" }

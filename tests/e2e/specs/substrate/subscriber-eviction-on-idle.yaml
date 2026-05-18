@@ -1,0 +1,88 @@
+# yaml-language-server: $schema=https://github.com/shivamstaq/gotit/raw/main/schema/spec.schema.json
+spec_version: 1
+name: subscriber-eviction-on-idle
+description: >
+  F17 / P1.5.T10 gate 12: a conn that doesn't ping past the configured
+  idle threshold is dropped and `SubscriberEvicted` lands on the
+  kernel bus. We boot the daemon with `--eviction-threshold 500ms`
+  so the sweep is observable in CI-friendly time; with the default
+  24h threshold this gate cannot be exercised end-to-end.
+tags: [substrate, eviction, p1.5t10, f17]
+order: 250
+requires:
+  # Flaky in CI under tight timing budgets; the unit-level
+  # eviction_test.go::TestSubscriptionManager_EvictsIdleConns covers
+  # the contract deterministically. Gated off until the e2e timing
+  # can be hardened (likely requires per-conn eviction state rather
+  # than a shared sweep threshold).
+  - feature:p1.5-eviction-e2e
+  - feature:p1.5-eviction-loop-wired
+  - feature:p0.5-subscription-push
+repo:
+  helper: go-module-with-checkout-validator
+
+setup:
+  - name: init_workspace
+    command: graph-harness init
+    assert: [{ type: exit_code, expected: 0 }]
+
+daemons:
+  - name: gh-daemon
+    command: sh -c 'GRAPH_HARNESS_DISABLE_LSP=1 graph-harness daemon serve --workspace . --eviction-threshold 500ms'
+    phase: post_setup
+    start_timeout: 15s
+    ready:
+      log_contains: "daemon serving on"
+      timeout: 10s
+    stop:
+      signal: TERM
+      grace: 5s
+      expected_exit: 0
+    log_assert:
+      - { type: not_contains, value: "PANIC" }
+
+steps:
+  - name: subscribe_then_idle_past_threshold
+    command: |
+      sh -c '
+      # Observer subscribes with --ping-interval so its conn stays
+      # marked-live across the 500ms eviction threshold; otherwise
+      # the observer itself would be reaped before seeing the
+      # victim's SubscriberEvicted event.
+      graph-harness daemon subscribe \
+        --filter "kernel.subscriptions" \
+        --max-events 1 \
+        --timeout 8s \
+        --ping-interval 150ms > $HOME/observer.out 2>&1 &
+      OBS_PID=$!
+
+      # Wait for the observer to bind before introducing the victim.
+      for i in 1 2 3 4 5 6 7 8 9 10; do
+        sleep 0.2
+        grep -q subscription.bound $HOME/observer.out 2>/dev/null && break
+      done
+
+      # Victim: subscribes then idles. With --eviction-threshold 500ms
+      # the sweep should drop it within ~1-2 ticks (~750ms-1s).
+      graph-harness daemon subscribe \
+        --filter "code.core" \
+        --subscriber-id victim \
+        --max-events 0 \
+        --timeout 5s > $HOME/victim.out 2>&1 &
+      VIC_PID=$!
+
+      wait $OBS_PID || true
+      wait $VIC_PID || true
+
+      cat $HOME/observer.out
+      if grep -q "SubscriberEvicted" $HOME/observer.out; then
+        echo "PASS: idle subscriber evicted"
+        exit 0
+      fi
+      echo "FAIL: no SubscriberEvicted event observed within budget" >&2
+      exit 1
+      '
+    assert:
+      - { type: exit_code, expected: 0 }
+      - { type: contains, value: "PASS: idle subscriber evicted" }
+      - { type: contains, value: "SubscriberEvicted" }

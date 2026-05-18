@@ -1,0 +1,106 @@
+# yaml-language-server: $schema=https://github.com/shivamstaq/gotit/raw/main/schema/spec.schema.json
+spec_version: 1
+name: lsp-children-publish-drift-events
+description: >
+  F3 / P1.5.T02 (corrected): when gopls (or tsserver / pyright) emits
+  `textDocument/publishDiagnostics` for a source file, the daemon
+  forwards the URI through `Orchestrator.IndexFileChanged`. The
+  re-extract runs through `Unifier.UnifyChanged`, which emits typed
+  drift events on the kernel bus when state actually transitioned
+  (FileChanged + per-symbol kinds via compare-before-emit). No
+  synthetic `code.core.LSPNotification` event kind is introduced —
+  per plan/answers/02 + /06 the canonical event taxonomy is the four
+  typed drift kinds plus FileChanged/FileRemoved.
+
+  Test shape: spawn daemon with LSP enabled, subscribe to code.core
+  events, edit a Go file in a way that triggers a gopls diagnostic
+  (introduce an undefined identifier reference), assert at least one
+  code.core event lands within the deadline. fsnotify could also
+  drive the re-extract — what we verify is the end-to-end "edit a
+  file under LSP supervision → code.core event on the bus" pipeline.
+tags: [substrate, multi-language, lsp, p1.5t02, f3]
+order: 230
+requires:
+  - gopls
+  - feature:have-gopls
+  - feature:p1.5-lsp-pushback
+  - feature:p1.5-multi-lang-watcher
+  - feature:p0.5-subscription-push
+repo:
+  helper: go-module-with-checkout-validator
+
+setup:
+  - name: init_workspace
+    command: graph-harness init
+    assert: [{ type: exit_code, expected: 0 }]
+
+daemons:
+  - name: gh-daemon
+    # LSP intentionally NOT disabled here — F3 contract requires gopls
+    # to spawn and emit publishDiagnostics.
+    command: sh -c 'graph-harness daemon serve --workspace .'
+    phase: post_setup
+    start_timeout: 30s
+    ready:
+      log_contains: "daemon serving on"
+      timeout: 15s
+    stop:
+      signal: TERM
+      grace: 10s
+      expected_exit: 0
+    log_assert:
+      - { type: not_contains, value: "PANIC" }
+
+steps:
+  - name: subscribe_in_background_then_edit_to_trigger_diagnostic
+    command: |
+      sh -c '
+      # Background subscriber to code.core events.
+      graph-harness daemon subscribe --filter "code.core" --max-events 1 --timeout 20s > $HOME/sub.out 2>&1 &
+      SUB_PID=$!
+      # Wait for the subscribe bind.
+      for i in 1 2 3 4 5 6 7 8 9 10; do
+        sleep 0.5
+        grep -q subscription.bound $HOME/sub.out 2>/dev/null && break
+      done
+
+      # Edit a Go file to introduce an undefined identifier reference.
+      # gopls will (a) emit publishDiagnostics, and (b) the daemon
+      # also sees the fsnotify event. Both paths converge on
+      # Orchestrator.IndexFileChanged then Unifier.UnifyChanged.
+      printf "\nfunc F3Probe() { _ = UndefinedIdentifierForceDiagnostic }\n" >> internal/checkout/validator.go
+
+      # Wait for subscriber to receive an event (or timeout).
+      wait $SUB_PID || true
+      cat $HOME/sub.out
+
+      if grep -q "kernel.event" $HOME/sub.out; then
+        echo "PASS: code.core event emitted post-edit (driven by LSP push and/or fsnotify)"
+        exit 0
+      fi
+      echo "FAIL: no code.core event observed within deadline" >&2
+      exit 1
+      '
+    assert:
+      - { type: exit_code, expected: 0 }
+      - { type: contains, value: "PASS: code.core event emitted post-edit" }
+      - { type: contains, value: "subscription.bound" }
+      - { type: contains, value: "kernel.event" }
+
+  - name: assert_no_synthetic_lsp_notification_event_kind
+    # F3 / plan/answers/06 corrected design: no `code.core.LSPNotification`
+    # kind. We grep the captured subscriber output for that string and
+    # fail if it appears — protects against regression into the prior
+    # opaque-event-kind design.
+    command: |
+      sh -c '
+      if grep -q "LSPNotification" $HOME/sub.out; then
+        echo "FAIL: synthetic LSPNotification event kind emitted (F3 regression)" >&2
+        cat $HOME/sub.out >&2
+        exit 1
+      fi
+      echo "PASS: no synthetic LSPNotification event kind on the bus"
+      '
+    assert:
+      - { type: exit_code, expected: 0 }
+      - { type: contains, value: "PASS: no synthetic LSPNotification" }

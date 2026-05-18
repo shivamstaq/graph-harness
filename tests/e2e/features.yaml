@@ -43,6 +43,22 @@ enabled:
   p0.5-trust-enforced:       true   # P0.5.T18 WriteToken + kernel_seq_tag column
   p0.5-daemon-canonical-cli: true   # P0.5.T15 interactive CLI lowers through daemon
 
+  # ---- Phase 1.5 (multi-language substrate closure, plan/01.5-multi-language-substrate-closure.md) ----
+  # Multi-language fan-out of P0.5 substrate. F3 (PR phase-0-thru-1.5-closure)
+  # corrected T02 — publishDiagnostics drives a re-extract through the existing
+  # typed-drift pipeline; no synthetic LSPNotification event kind. Per
+  # plan/answers/02 + /06 the canonical event taxonomy is the four typed
+  # drift kinds + FileChanged/FileRemoved.
+  p1.5-multi-lang-watcher:        true   # P1.5.T01 watcher routes Go/TS/Py through daemon orchestrator
+  p1.5-lsp-pushback:              true   # P1.5.T02 (F3) LSP publishDiagnostics drives re-extract via Unifier
+  p1.5-multi-source-suppress:     true   # P1.5.T03 multi-source compare-before-emit zero-event re-extract
+  p1.5-cli-breadth:               true   # P1.5.T06 remaining interactive commands route through daemon
+  p1.5-trust-strict:              true   # P1.5.T07 TrustPolicy.SetStrict(true) at daemon boot
+  p1.5-rebuild-from-snapshot:     true   # P1.5.T08 kernel.rebuildFromSnapshot recovery path
+  p1.5-transient-overlay-cli:     true   # P1.5.T09 daemon publish-transient / get-transient CLI
+  p1.5-eviction-loop-wired:       true   # P1.5.T10 SubscriptionManager.StartEvictionLoop at serve boot
+  p1.5-eviction-e2e:              false  # F17 e2e variant; gated off due to CI timing flakiness, unit test eviction_test.go covers contract
+
   # ---- Tooling availability flags (workaround for gotit ≤0.2.1) ----
   # The gotit TUI pre-flight (cmd/gotit/tui_cmd.go::runTUI) only
   # short-circuits to StateSkipped for `feature:` and `git` requires —

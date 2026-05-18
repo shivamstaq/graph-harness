@@ -1,0 +1,85 @@
+# yaml-language-server: $schema=https://github.com/shivamstaq/gotit/raw/main/schema/spec.schema.json
+spec_version: 1
+name: crash-recovery-replay-consistent
+description: >
+  F4 / plan/00 §3 gate 8: kill the daemon mid-write; replay
+  produces consistent state. We drive the daemon to commit a known
+  number of events, capture the head seq, SIGKILL the daemon,
+  restart it, and assert the post-recovery head matches the
+  pre-crash head — no torn rows from a truncated WAL.
+
+  The Go test internal/facts/crash_recovery_test.go exercises the
+  same invariant at 10 deterministic crash points (different write
+  prefixes); this spec covers the operator-visible recovery path
+  through the JSON-RPC daemon binary.
+tags: [kernel, crash-recovery, p0gate8, f4]
+order: 80
+requires:
+  - feature:p0.5-watcher-wired
+repo:
+  helper: go-module-with-checkout-validator
+
+setup:
+  - name: init_workspace
+    command: graph-harness init
+    assert: [{ type: exit_code, expected: 0 }]
+
+  - name: install_overlay
+    command: sh -c "mkdir -p .graph-harness/overlay && cp demo.checkout.gh .graph-harness/overlay/checkout.gh"
+    assert: [{ type: exit_code, expected: 0 }]
+
+steps:
+  - name: start_daemon_drive_writes_then_kill
+    command: |
+      sh -c '
+      # Start daemon in background; capture pid via daemon status.
+      GRAPH_HARNESS_DISABLE_LSP=1 graph-harness daemon start
+      sleep 0.5
+      graph-harness daemon status > $HOME/pre.txt
+      cat $HOME/pre.txt
+      PID=$(grep -oE "pid=[0-9]+" $HOME/pre.txt | head -1 | cut -d= -f2)
+      if [ -z "$PID" ]; then
+        echo "FAIL: could not parse daemon pid" >&2
+        exit 1
+      fi
+      echo "daemon pid=$PID"
+
+      # Drive several writes — each file edit triggers a watcher
+      # event and a code.core append.
+      for i in 1 2 3 4 5; do
+        printf "\nfunc CrashProbe%s() {}\n" "$i" >> internal/checkout/validator.go
+        sleep 0.3
+      done
+      sleep 1
+      BEFORE=$(graph-harness status | awk "/Last seq:/ {print \$NF}")
+      echo "pre-crash Last seq=$BEFORE"
+
+      # SIGKILL the daemon — simulate a crash.
+      kill -9 $PID 2>/dev/null || true
+      # Give the OS a moment to reap.
+      sleep 0.5
+
+      # Restart the daemon. The SQLite WAL recovery should resume
+      # cleanly; LastSeq matches the pre-crash value (no torn rows).
+      graph-harness daemon start
+      sleep 1.0
+      AFTER=$(graph-harness status | awk "/Last seq:/ {print \$NF}")
+      echo "post-recovery Last seq=$AFTER"
+
+      if [ -z "$BEFORE" ] || [ -z "$AFTER" ]; then
+        echo "FAIL: could not read Last seq" >&2
+        exit 1
+      fi
+      if [ "$AFTER" -lt "$BEFORE" ]; then
+        echo "FAIL: post-recovery seq $AFTER < pre-crash $BEFORE (data loss)" >&2
+        exit 1
+      fi
+      echo "PASS: crash recovery preserved seq (before=$BEFORE after=$AFTER)"
+      '
+    assert:
+      - { type: exit_code, expected: 0 }
+      - { type: contains, value: "PASS: crash recovery preserved seq" }
+
+  - name: cleanup_stop_daemon
+    command: graph-harness daemon stop
+    assert: [{ type: exit_code, expected: 0 }]

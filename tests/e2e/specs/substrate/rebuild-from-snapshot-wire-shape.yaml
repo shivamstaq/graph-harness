@@ -1,0 +1,83 @@
+# yaml-language-server: $schema=https://github.com/shivamstaq/gotit/raw/main/schema/spec.schema.json
+spec_version: 1
+name: rebuild-from-snapshot-wire-shape
+description: >
+  F1 / plan/answers/04 §5 + /06 §Y: `kernel.rebuildFromSnapshot`
+  returns the F1-corrected wire shape — CheckpointID, CheckpointSeq,
+  NewCursor, RecoveryHint='requery_via_route' — plus deprecated
+  SnapshotID/SnapshotSeq aliases for back-compat. Semantically this
+  is a cursor advance, NOT a state capture; the e2e verifies the
+  RecoveryHint documents the next move (re-query via Kernel.Route).
+tags: [substrate, backpressure, p1.5t08, f1]
+order: 295
+requires:
+  - feature:p1.5-rebuild-from-snapshot
+  - feature:p0.5-subscription-push
+repo:
+  helper: go-module-with-checkout-validator
+
+setup:
+  - name: init_workspace
+    command: graph-harness init
+    assert: [{ type: exit_code, expected: 0 }]
+
+daemons:
+  - name: gh-daemon
+    command: sh -c 'GRAPH_HARNESS_DISABLE_LSP=1 graph-harness daemon serve --workspace .'
+    phase: post_setup
+    start_timeout: 15s
+    ready:
+      log_contains: "daemon serving on"
+      timeout: 10s
+    stop:
+      signal: TERM
+      grace: 5s
+      expected_exit: 0
+
+steps:
+  - name: subscribe_then_capture_subscription_id
+    # We need a live subscription_id to call rebuildFromSnapshot
+    # against. daemon subscribe --max-events 1 binds; the
+    # `subscription.bound` line carries the id we need.
+    background: true
+    command: sh -c 'graph-harness daemon subscribe --filter code.core --max-events 1 --timeout 8s > $HOME/sub.out 2>&1'
+    ready:
+      command: sh -c 'grep -q subscription.bound $HOME/sub.out 2>/dev/null'
+      timeout: 6s
+    stop:
+      signal: TERM
+      grace: 3s
+
+  - name: rebuild_returns_corrected_wire_shape
+    command: |
+      sh -c '
+      # Extract subscription_id from the subscribe banner.
+      SUB_ID=$(grep subscription.bound $HOME/sub.out | grep -oE "\"subscription_id\":\"[^\"]+\"" | head -1 | sed "s/.*\"subscription_id\":\"//; s/\"//")
+      if [ -z "$SUB_ID" ]; then
+        echo "FAIL: could not parse subscription_id from $HOME/sub.out" >&2
+        cat $HOME/sub.out >&2
+        exit 1
+      fi
+      echo "subscription_id=$SUB_ID"
+      graph-harness daemon rebuild-from-snapshot --subscription-id "$SUB_ID" > $HOME/rebuild.json 2>&1
+      cat $HOME/rebuild.json
+
+      # Assert all four corrected fields are present.
+      grep -q "checkpoint_id" $HOME/rebuild.json
+      grep -q "checkpoint_seq" $HOME/rebuild.json
+      grep -q "new_cursor" $HOME/rebuild.json
+      grep -q "requery_via_route" $HOME/rebuild.json
+
+      # Deprecated aliases must still surface for back-compat.
+      grep -q "snapshot_id" $HOME/rebuild.json
+      grep -q "snapshot_seq" $HOME/rebuild.json
+
+      echo "PASS: rebuildFromSnapshot wire shape matches F1 + back-compat aliases"
+      '
+    assert:
+      - { type: exit_code, expected: 0 }
+      - { type: contains, value: "PASS: rebuildFromSnapshot wire shape matches F1" }
+      - { type: contains, value: "checkpoint_id" }
+      - { type: contains, value: "checkpoint_seq" }
+      - { type: contains, value: "requery_via_route" }
+      - { type: contains, value: "snapshot_id" }

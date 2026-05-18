@@ -13,8 +13,15 @@ import (
 
 // newStudioCmdReal implements `graph-harness studio`. Loopback-only HTTP
 // server with per-session token + strict Origin check (SPEC §9.6 — these
-// protections are non-negotiable). Backed by the in-process Service so it
-// shares the workspace's code.core / overlay handles.
+// protections are non-negotiable). Per F2 / plan/answers/04 §5, Studio
+// consumes the daemon via the jsonrpc.Consumer interface: when a
+// daemon is running it dials over JSON-RPC; otherwise it falls back
+// to opening local Resources.
+//
+// `--check` is a non-interactive smoke surface: resolves the consumer
+// (auto-spawning the daemon if necessary), prints `studio: ok` + the
+// consumer mode, then exits 0. Useful for the daemon-pid-stability
+// e2e check.
 func newStudioCmdReal() *cobra.Command {
 	return &cobra.Command{
 		Use:   "studio",
@@ -26,17 +33,38 @@ func newStudioCmdReal() *cobra.Command {
 			}
 			port, _ := cmd.Flags().GetInt("port")
 			oneshot, _ := cmd.Flags().GetBool("oneshot")
+			check, _ := cmd.Flags().GetBool("check")
 
 			ctx, cancel := context.WithCancel(cmd.Context())
 			defer cancel()
 
-			res, err := daemon.Open(ctx, ws)
+			handle, err := ResolveRoute(ctx, ws, RouteOptions{})
 			if err != nil {
 				return err
 			}
-			defer func() { _ = res.Close() }()
+			defer func() { _ = handle.Close() }()
 
-			svc := jsonrpc.NewService(ws, res.Log, res.Code, res.Queue, res.Registry, res.Overlay)
+			var svc jsonrpc.Consumer
+			if handle.Mode == ModeDaemon {
+				svc = jsonrpc.NewClientService(handle.Client)
+			} else {
+				res, err := daemon.Open(ctx, ws)
+				if err != nil {
+					return err
+				}
+				defer func() { _ = res.Close() }()
+				svc = jsonrpc.NewService(ws, res.Log, res.Code, res.Queue, res.Registry, res.Overlay)
+			}
+
+			if check {
+				mode := "batch"
+				if handle.Mode == ModeDaemon {
+					mode = "daemon"
+				}
+				_, _ = fmt.Fprintf(cmd.OutOrStdout(), "studio: ok (consumer=%s)\n", mode)
+				return nil
+			}
+
 			srv, err := studio.NewServer(svc)
 			if err != nil {
 				return err

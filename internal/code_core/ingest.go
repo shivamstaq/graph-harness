@@ -2,11 +2,38 @@ package code_core
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 
 	"github.com/shivamstaq/graph-harness/internal/code_core/normalize"
 	"github.com/shivamstaq/graph-harness/internal/source_live"
 )
+
+// computeSymbolFingerprintLocal mirrors the helper in extract/treesitter_symbols.go.
+// We define it locally here so the code_core batch ingestion path
+// doesn't depend on internal/extract (which depends on code_core —
+// the inverse would create an import cycle). F11.
+func computeSymbolFingerprintLocal(language, qname, receiver, signature string) string {
+	ns := normalize.ForLanguage(language, signature)
+	h := sha256.New()
+	for _, s := range []string{language, qname, receiver, ns} {
+		_, _ = h.Write([]byte(s))
+		_, _ = h.Write([]byte{0})
+	}
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+// computeASTHashLocal mirrors extract/treesitter_symbols.go::computeASTHash.
+func computeASTHashLocal(language, receiver, signature, bodyHash string) string {
+	ns := normalize.ForLanguage(language, signature)
+	h := sha256.New()
+	for _, s := range []string{language, receiver, ns, bodyHash} {
+		_, _ = h.Write([]byte(s))
+		_, _ = h.Write([]byte{0})
+	}
+	return hex.EncodeToString(h.Sum(nil))
+}
 
 // IngestParsedFile turns a [source_live.ParsedFile] into code.core
 // entities + provenance. It is the tree-sitter-only ingestion path:
@@ -59,6 +86,12 @@ func (s *Store) IngestParsedFileWithChange(ctx context.Context, pf *source_live.
 
 	for _, fn := range pf.Functions {
 		ns := normalize.ForLanguage(pf.Language, fn.Signature)
+		// F11: SymbolFingerprint + ASTHash mirror what the watcher
+		// path computes via extract.ParsedFileToSymbols. Defining
+		// them locally here so the batch ingestion path doesn't
+		// depend on the extract package (would invert the layering).
+		fp := computeSymbolFingerprintLocal(pf.Language, fn.QualifiedName, fn.Receiver, fn.Signature)
+		ah := computeASTHashLocal(pf.Language, fn.Receiver, fn.Signature, fn.BodyHash)
 		var ent Entity
 		if fn.Receiver == "" {
 			ent = Entity{
@@ -69,6 +102,8 @@ func (s *Store) IngestParsedFileWithChange(ctx context.Context, pf *source_live.
 				Path:                pf.Path,
 				BodyHash:            fn.BodyHash,
 				NormalizedSignature: ns,
+				SymbolFingerprint:   fp,
+				ASTHash:             ah,
 			}
 		} else {
 			ent = Entity{
@@ -80,6 +115,8 @@ func (s *Store) IngestParsedFileWithChange(ctx context.Context, pf *source_live.
 				Path:                pf.Path,
 				BodyHash:            fn.BodyHash,
 				NormalizedSignature: ns,
+				SymbolFingerprint:   fp,
+				ASTHash:             ah,
 			}
 		}
 		entChanged, err := s.PutEntityIfChanged(ctx, ent, createdSeq)

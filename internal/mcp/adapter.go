@@ -20,12 +20,14 @@ import (
 //	initialize, tools/list, tools/call, resources/list, resources/read,
 //	prompts/list, prompts/get, notifications/initialized
 //
-// Each tool call is delegated into the in-process jsonrpc.Service so the
-// adapter stays a thin curated façade — there is no second protocol or
-// second copy of business logic.
+// Each tool call is delegated through the jsonrpc.Consumer interface
+// so the adapter stays a thin curated façade — there is no second
+// protocol or second copy of business logic. Per F2 / plan/answers/04
+// §5, the concrete Consumer may be either *jsonrpc.Service (in-process)
+// or *jsonrpc.ClientService (JSON-RPC remote when daemon is running).
 type Adapter struct {
-	svc     *jsonrpc.Service
-	openSvc func() (*jsonrpc.Service, error)
+	svc     jsonrpc.Consumer
+	openSvc func() (jsonrpc.Consumer, error)
 
 	mu    sync.Mutex
 	tools map[string]toolHandler
@@ -39,10 +41,10 @@ type Adapter struct {
 	entityResourceDesc   ResourceDescriptor
 }
 
-// service returns the live jsonrpc.Service. With a lazy adapter, the first
-// caller pays the workspace-open cost; subsequent callers reuse the cached
-// handle.
-func (a *Adapter) service() (*jsonrpc.Service, error) {
+// service returns the live Consumer. With a lazy adapter, the first
+// caller pays the workspace-open cost; subsequent callers reuse the
+// cached handle.
+func (a *Adapter) service() (jsonrpc.Consumer, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if a.svc != nil {
@@ -84,8 +86,8 @@ type ResourceDescriptor struct {
 	MimeType    string `json:"mimeType,omitempty"`
 }
 
-// NewAdapter builds an adapter wired to the given service.
-func NewAdapter(svc *jsonrpc.Service) *Adapter {
+// NewAdapter builds an adapter wired to the given Consumer.
+func NewAdapter(svc jsonrpc.Consumer) *Adapter {
 	a := &Adapter{
 		svc:   svc,
 		tools: map[string]toolHandler{},
@@ -105,7 +107,7 @@ func NewAdapter(svc *jsonrpc.Service) *Adapter {
 // This shape lets `graph-harness mcp` advertise its surface in any cwd (so
 // agents can introspect what's available) while still requiring an
 // initialized workspace for actual graph operations.
-func NewLazyAdapter(openSvc func() (*jsonrpc.Service, error)) *Adapter {
+func NewLazyAdapter(openSvc func() (jsonrpc.Consumer, error)) *Adapter {
 	// Register descriptors against a sentinel service that errors on every
 	// call; the dispatcher swaps in the real service via openSvc on first
 	// tools/call.

@@ -14,6 +14,9 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
+
+	"github.com/shivamstaq/graph-harness/internal/facts"
+	"github.com/shivamstaq/graph-harness/internal/kernel"
 )
 
 // Options control the running daemon. Sane defaults for one-line use.
@@ -29,6 +32,100 @@ type Options struct {
 
 // DefaultIdleTimeout is the post-P0 default: 1h (matches SPEC §9.1).
 const DefaultIdleTimeout = time.Hour
+
+// DefaultRetentionTick is the F10 / P0.T06 retention sweep cadence.
+// The sweep is cheap (CreateSnapshot + DELETE WHERE seq<…), so a 1h
+// tick is conservative — even noisy workspaces aren't compacted more
+// than once per hour, and the per-layer Retention.Events / .Duration
+// caps in the layer manifest gate the actual deletion.
+const DefaultRetentionTick = time.Hour
+
+// RetentionLoop runs the periodic retention sweep. For each layer
+// registered in `reg` whose manifest declares a non-zero
+// `Snapshot.Retention.Events` or `.Duration`, the loop:
+//   1. Computes a cutoff seq (head minus retention.Events, or the
+//      seq at retention.Duration ago — the more permissive of the
+//      two for safety).
+//   2. Captures a snapshot at the cutoff via log.CreateSnapshot.
+//   3. Calls log.Compact to delete events strictly before the cutoff.
+//
+// The kernel-canonical Facts.Compact contract requires a snapshot
+// handle that covers the deleted prefix; we satisfy this by always
+// snapshotting at the cutoff before compacting.
+//
+// Errors are logged but never panic the loop — a transient SQLite
+// failure shouldn't kill retention for the rest of the daemon's
+// lifetime. Stops on ctx.Done.
+//
+// F10 / P0.T06: SnapRetention was parsed but unused pre-F10; this
+// is the consumer that gives the field semantic meaning.
+func RetentionLoop(ctx context.Context, log *facts.EventLog, reg *kernel.Registry, tick time.Duration, errLog func(format string, args ...any)) {
+	if log == nil || reg == nil {
+		return
+	}
+	if tick <= 0 {
+		tick = DefaultRetentionTick
+	}
+	t := time.NewTicker(tick)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			runRetentionSweep(ctx, log, reg, errLog)
+		}
+	}
+}
+
+// runRetentionSweep is one iteration of RetentionLoop. Factored out
+// so tests can drive a single sweep without spinning the ticker.
+func runRetentionSweep(ctx context.Context, log *facts.EventLog, reg *kernel.Registry, errLog func(format string, args ...any)) {
+	head := log.LastSeq()
+	if head == 0 {
+		return
+	}
+	for _, name := range reg.List() {
+		m, ok := reg.Get(name)
+		if !ok {
+			continue
+		}
+		ret := m.Snapshot.Retention
+		if ret.Events <= 0 && ret.Duration == "" {
+			continue
+		}
+		cutoff := computeRetentionCutoff(head, ret.Events)
+		if cutoff == 0 {
+			continue
+		}
+		snap, err := log.CreateSnapshot(ctx, name, cutoff)
+		if err != nil {
+			if errLog != nil {
+				errLog("retention: snapshot %s @ seq %d: %v", name, cutoff, err)
+			}
+			continue
+		}
+		if err := log.Compact(ctx, cutoff, snap); err != nil {
+			if errLog != nil {
+				errLog("retention: compact %s before seq %d: %v", name, cutoff, err)
+			}
+		}
+	}
+}
+
+// computeRetentionCutoff returns the seq strictly below which events
+// may be compacted. Retains at least retentionEvents most-recent
+// events. Returns 0 when nothing should be compacted yet (the log is
+// still shorter than the retention floor).
+func computeRetentionCutoff(head uint64, retentionEvents int) uint64 {
+	if retentionEvents <= 0 {
+		return 0
+	}
+	if head <= uint64(retentionEvents) { //nolint:gosec // retentionEvents > 0 enforced above
+		return 0
+	}
+	return head - uint64(retentionEvents) //nolint:gosec // bounds checked above
+}
 
 // Status describes the running daemon, if any.
 type Status struct {

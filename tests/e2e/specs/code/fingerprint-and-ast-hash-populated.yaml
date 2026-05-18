@@ -1,0 +1,60 @@
+# yaml-language-server: $schema=https://github.com/shivamstaq/gotit/raw/main/schema/spec.schema.json
+spec_version: 1
+name: fingerprint-and-ast-hash-populated
+description: >
+  F11 / P1.T25: code.core Function and Method entities carry non-
+  empty `symbol_fingerprint` and `ast_hash` columns so the resolver's
+  symbol_fingerprint and ast_hash anchor evaluators have data to
+  match against. Pre-F11 the columns existed but were never
+  populated, leaving two anchor rungs unreachable.
+
+  This spec verifies the end-to-end path: extract Go entities,
+  query via `code list --json`, assert the JSON-shaped entities
+  carry non-empty fingerprint hashes.
+tags: [code, identity, fingerprint, p1t25, f11]
+order: 70
+requires:
+  - cgo
+  - tree-sitter
+  - feature:p1-multi-language
+  - feature:p1-extractor-wiring
+repo:
+  helper: go-module-with-checkout-validator
+
+setup:
+  - name: init_workspace
+    command: graph-harness init
+    assert: [{ type: exit_code, expected: 0 }]
+
+  - name: install_overlay
+    command: sh -c "mkdir -p .graph-harness/overlay && cp demo.checkout.gh .graph-harness/overlay/checkout.gh"
+    assert: [{ type: exit_code, expected: 0 }]
+
+  - name: drive_extract
+    command: graph-harness selectors test CheckoutValidator --batch --no-lsp --no-scip --json
+    assert: [{ type: exit_code, expected: 0 }]
+
+steps:
+  - name: code_list_emits_populated_fingerprint_and_ast_hash
+    command: |
+      sh -c '
+      graph-harness code list --json > $HOME/entities.ndjson 2>&1
+      cat $HOME/entities.ndjson | head -3
+
+      # Find at least one Function or Method entity with both
+      # symbol_fingerprint and ast_hash populated (non-empty).
+      MATCHES=$(grep -E "\"kind\":\"(Function|Method)\"" $HOME/entities.ndjson | \
+        grep "symbol_fingerprint" | \
+        grep "ast_hash" | wc -l)
+      echo "matches=$MATCHES"
+      if [ "$MATCHES" -lt 1 ]; then
+        echo "FAIL: no Function/Method entity carries both symbol_fingerprint and ast_hash" >&2
+        exit 1
+      fi
+      echo "PASS: $MATCHES Function/Method entities carry populated F11 hashes"
+      '
+    assert:
+      - { type: exit_code, expected: 0 }
+      - { type: contains, value: "PASS:" }
+      - { type: contains, value: "symbol_fingerprint" }
+      - { type: contains, value: "ast_hash" }

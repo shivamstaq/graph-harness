@@ -1,0 +1,66 @@
+# yaml-language-server: $schema=https://github.com/shivamstaq/gotit/raw/main/schema/spec.schema.json
+spec_version: 1
+name: snapshot-create-restore-roundtrip
+description: >
+  F12 / P0.T11 + plan/00 §7: a snapshot captured at the current
+  head replays cleanly back into the live log; ListSnapshots
+  surfaces the captured handle.
+tags: [kernel, snapshot, p0t11, f12]
+order: 60
+requires:
+  - feature:p0.5-watcher-wired
+repo:
+  helper: go-module-with-checkout-validator
+
+setup:
+  - name: init_workspace
+    command: graph-harness init
+    assert: [{ type: exit_code, expected: 0 }]
+
+daemons:
+  - name: gh-daemon
+    command: sh -c 'GRAPH_HARNESS_DISABLE_LSP=1 graph-harness daemon serve --workspace .'
+    phase: post_setup
+    start_timeout: 15s
+    ready:
+      log_contains: "daemon serving on"
+      timeout: 10s
+    stop:
+      signal: TERM
+      grace: 5s
+      expected_exit: 0
+    log_assert:
+      - { type: not_contains, value: "PANIC" }
+
+steps:
+  - name: drive_indexing_then_create_snapshot
+    command: |
+      sh -c '
+      graph-harness selectors test CheckoutValidator --json > /dev/null || true
+      graph-harness snapshot create --layer code.core > $HOME/snap.json 2>&1
+      cat $HOME/snap.json
+      grep -q "\"id\"" $HOME/snap.json
+      '
+    assert:
+      - { type: exit_code, expected: 0 }
+      - { type: contains, value: "\"id\"" }
+      - { type: contains, value: "\"seq\"" }
+      - { type: contains, value: "code.core" }
+
+  - name: list_snapshots_returns_the_capture
+    command: graph-harness snapshot list --layer code.core --json
+    assert:
+      - { type: exit_code, expected: 0 }
+      - { type: contains, value: "code.core" }
+
+  - name: restore_snapshot_replays_events
+    command: |
+      sh -c '
+      SNAP_ID=$(grep -oE "\"id\":\"[^\"]+\"" $HOME/snap.json | head -1 | sed "s/.*\"id\":\"//; s/\"//")
+      graph-harness snapshot restore "$SNAP_ID" > $HOME/restore.out 2>&1
+      cat $HOME/restore.out
+      grep -q "restored.*events" $HOME/restore.out
+      '
+    assert:
+      - { type: exit_code, expected: 0 }
+      - { type: contains, value: "restored" }

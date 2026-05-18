@@ -1,0 +1,79 @@
+# yaml-language-server: $schema=https://github.com/shivamstaq/gotit/raw/main/schema/spec.schema.json
+spec_version: 1
+name: cancellation-via-kernel-cancel-stops-work
+description: >
+  F14 / SPEC §6.23 cancellation e2e: a long-running RPC honors
+  ctx.Done() when the client disconnects (cancellation propagates
+  through context.Context). The Go test
+  internal/jsonrpc/subscriptions_test.go::TestKernelCancel_*
+  covers the in-process kernel.cancel path; this spec validates the
+  CLI-level "client SIGTERMs mid-stream → daemon's serving
+  goroutine notices and exits cleanly" pipeline.
+tags: [substrate, cancellation, p0.5t14, f14]
+order: 280
+requires:
+  - feature:p0.5-cancellation
+  - feature:p0.5-subscription-push
+repo:
+  helper: go-module-with-checkout-validator
+
+setup:
+  - name: init_workspace
+    command: graph-harness init
+    assert: [{ type: exit_code, expected: 0 }]
+
+daemons:
+  - name: gh-daemon
+    command: sh -c 'GRAPH_HARNESS_DISABLE_LSP=1 graph-harness daemon serve --workspace .'
+    phase: post_setup
+    start_timeout: 15s
+    ready:
+      log_contains: "daemon serving on"
+      timeout: 10s
+    stop:
+      signal: TERM
+      grace: 5s
+      expected_exit: 0
+    log_assert:
+      - { type: not_contains, value: "PANIC" }
+      - { type: not_contains, value: "leaked" }
+
+steps:
+  - name: long_running_subscribe_then_signal
+    # SIGTERM mid-subscribe: the CLI prints subscription.bound, then
+    # sits idle. We TERM it after 1.5s; it must exit 0 (clean) within
+    # the grace window — the daemon's serve goroutine receives the
+    # disconnect, cancels in-flight handlers, drops subscriptions.
+    command: |
+      sh -c '
+      graph-harness daemon subscribe \
+        --filter "code.core" \
+        --max-events 0 \
+        --timeout 10s > $HOME/sub.out 2>&1 &
+      SUB_PID=$!
+      sleep 1.5
+      kill -TERM $SUB_PID 2>/dev/null || true
+      # Cleanup must complete within a couple seconds.
+      WAIT_START=$(date +%s)
+      wait $SUB_PID 2>/dev/null || true
+      WAIT_END=$(date +%s)
+      ELAPSED=$((WAIT_END - WAIT_START))
+      cat $HOME/sub.out
+
+      if [ "$ELAPSED" -gt 5 ]; then
+        echo "FAIL: subscriber took $ELAPSED s to exit after SIGTERM (want ≤ 5s)" >&2
+        exit 1
+      fi
+      echo "PASS: subscriber exited cleanly within ${ELAPSED}s of SIGTERM"
+      '
+    assert:
+      - { type: exit_code, expected: 0 }
+      - { type: contains, value: "PASS: subscriber exited cleanly" }
+
+  - name: daemon_still_responsive_after_cancellation
+    # After the client signals, the daemon's serve goroutine should
+    # have torn down its bookkeeping cleanly — subsequent RPCs work.
+    command: graph-harness daemon status
+    assert:
+      - { type: exit_code, expected: 0 }
+      - { type: contains, value: "running" }

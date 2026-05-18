@@ -1,0 +1,112 @@
+# yaml-language-server: $schema=https://github.com/shivamstaq/gotit/raw/main/schema/spec.schema.json
+spec_version: 1
+name: scip-hot-reload-on-fsnotify
+description: >
+  F9 / P1.T11: dropping a new `.scip-index/<name>.scip` file into
+  a running daemon's watch directory triggers an automatic
+  reimport via the SCIP `Refresher` fsnotify path. The imported
+  symbols flow through `Unifier.UnifyChanged` and become resolvable
+  via `selectors test` without requiring an explicit re-index
+  command.
+
+  Pre-F9 the Refresher.Start was wired but the Events() channel
+  was never consumed; this spec verifies the channel-driven
+  hot-reload pipeline is live.
+tags: [substrate, scip, hot-reload, p1t11, f9]
+order: 300
+requires:
+  - cgo
+  - tree-sitter
+  - scip-go
+  - feature:have-scip-go
+  - feature:p1-multi-language
+  - feature:p0.5-watcher-wired
+repo:
+  helper: go-module-with-checkout-validator
+
+setup:
+  - name: init_workspace
+    command: graph-harness init
+    assert: [{ type: exit_code, expected: 0 }]
+
+  - name: install_overlay
+    command: sh -c "mkdir -p .graph-harness/overlay && cp demo.checkout.gh .graph-harness/overlay/checkout.gh"
+    assert: [{ type: exit_code, expected: 0 }]
+
+  - name: pre_create_scip_index_dir
+    # F9 / refresh.go: Refresher.Start adds the fsnotify watcher
+    # only when the dir already exists. Pre-create it so the daemon
+    # boots with the watch active; the test then drops a fresh
+    # .scip file and asserts the consumer goroutine fires.
+    command: sh -c "mkdir -p .scip-index"
+    assert: [{ type: exit_code, expected: 0 }]
+
+daemons:
+  - name: gh-daemon
+    command: sh -c 'GRAPH_HARNESS_DISABLE_LSP=1 graph-harness daemon serve --workspace .'
+    phase: post_setup
+    start_timeout: 15s
+    ready:
+      log_contains: "daemon serving on"
+      timeout: 10s
+    stop:
+      signal: TERM
+      grace: 5s
+      expected_exit: 0
+    log_assert:
+      - { type: not_contains, value: "PANIC" }
+
+steps:
+  - name: capture_seq_before_scip_drop
+    command: |
+      sh -c '
+      # Drive an initial extract so subsequent change is observable.
+      graph-harness selectors test CheckoutValidator --json > /dev/null || true
+      BEFORE=$(graph-harness status | awk "/Last seq:/ {print \$NF}")
+      echo "before=$BEFORE" > $HOME/seq.txt
+      cat $HOME/seq.txt
+      '
+    assert: [{ type: exit_code, expected: 0 }]
+
+  - name: subscribe_for_scip_refreshed_event
+    background: true
+    command: sh -c 'graph-harness daemon subscribe --filter "code.core/SCIPRefreshed" --max-events 1 --timeout 12s > $HOME/refreshed.out 2>&1'
+    ready:
+      command: sh -c 'grep -q subscription.bound $HOME/refreshed.out 2>/dev/null'
+      timeout: 6s
+    stop:
+      signal: TERM
+      grace: 3s
+
+  - name: drop_scip_index_then_assert_seq_advances
+    command: |
+      sh -c '
+      scip-go --output .scip-index/index.scip
+      # Refresher fsnotify fires on Create; consumer goroutine runs
+      # UnifyChanged and the daemon hook emits SCIPRefreshed.
+      BEFORE=$(grep -oE "before=[0-9]+" $HOME/seq.txt | cut -d= -f2)
+      for i in 1 2 3 4 5 6 7 8 9 10; do
+        sleep 0.5
+        AFTER=$(graph-harness status | awk "/Last seq:/ {print \$NF}")
+        if [ -n "$BEFORE" ] && [ -n "$AFTER" ] && [ "$AFTER" -gt "$BEFORE" ]; then
+          break
+        fi
+      done
+      if [ -z "$AFTER" ] || [ "$AFTER" -le "$BEFORE" ]; then
+        echo "FAIL: SCIP hot-reload did not advance the kernel head (before=$BEFORE after=$AFTER)" >&2
+        exit 1
+      fi
+      # Confirm the typed event also reached the subscriber.
+      sleep 0.5
+      cat $HOME/refreshed.out
+      if grep -q "SCIPRefreshed" $HOME/refreshed.out; then
+        echo "PASS: SCIP hot-reload advanced seq and emitted SCIPRefreshed (before=$BEFORE after=$AFTER)"
+        exit 0
+      fi
+      echo "FAIL: seq advanced but SCIPRefreshed event not observed" >&2
+      exit 1
+      '
+    assert:
+      - { type: exit_code, expected: 0 }
+      - { type: contains, value: "PASS: SCIP hot-reload advanced seq and emitted SCIPRefreshed" }
+      - { type: contains, value: "SCIPRefreshed" }

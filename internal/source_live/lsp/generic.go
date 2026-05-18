@@ -33,6 +33,18 @@ type genericDriver struct {
 	cancel context.CancelFunc
 	root   string
 	ready  bool
+
+	// notifHandler is the P1.5.T02 server-push callback. Installed
+	// before Initialize so the read loop has it from the first message.
+	notifHandler NotificationHandler
+}
+
+// SetNotificationHandler installs the LSP push-back callback. Must be
+// called before Initialize. Passing nil clears the handler.
+func (d *genericDriver) SetNotificationHandler(h NotificationHandler) {
+	d.mu.Lock()
+	d.notifHandler = h
+	d.mu.Unlock()
 }
 
 // driverConf carries the language-specific knobs.
@@ -123,7 +135,22 @@ func (d *genericDriver) Initialize(ctx context.Context, root string) error {
 		return fmt.Errorf("start %s: %w", d.conf.executable, err)
 	}
 
-	conn := newJSONRPC(stdin, stdout, nil)
+	// P1.5.T02: install the JSON-RPC notification bridge BEFORE serve
+	// starts. Any server-initiated notification (publishDiagnostics,
+	// $/progress) routes through the installed NotificationHandler if
+	// the daemon set one before Initialize. Without a handler the
+	// notifications are dropped — matching pre-P1.5 behavior.
+	d.mu.Lock()
+	handler := d.notifHandler
+	languageID := d.conf.languageID
+	d.mu.Unlock()
+	var notifFn func(method string, params json.RawMessage)
+	if handler != nil {
+		notifFn = func(method string, params json.RawMessage) {
+			handler(languageID, method, params)
+		}
+	}
+	conn := newJSONRPC(stdin, stdout, notifFn)
 	go conn.serve(runCtx)
 	go drainStderr(stderr)
 

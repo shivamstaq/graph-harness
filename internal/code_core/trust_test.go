@@ -66,15 +66,26 @@ func TestPutEntityWithToken_AcceptsKernelToken(t *testing.T) {
 // TestAuditUntaggedRows_FindsLegacyWrites confirms the audit helper
 // flags any row that bypassed the tokenized write path. Used by
 // post-migration smoke tests to gate flipping strict mode on.
+//
+// Post-P1.5.T07 every PutEntity call stamps kernel_seq_tag automatically
+// (the column comes from createdSeq when no policy is installed). The
+// audit's role shifted from "find PutEntity callers" to "find rows
+// inserted by a writer that bypassed the Store API entirely" — i.e. a
+// rogue process writing direct SQL. We simulate that with an explicit
+// direct INSERT and assert the audit catches it.
 func TestAuditUntaggedRows_FindsLegacyWrites(t *testing.T) {
 	t.Parallel()
 	store := newTrustStore(t)
-	// Write without a token — simulates the legacy code path that
-	// has not yet been migrated.
-	if err := store.PutEntity(context.Background(),
-		Entity{ID: "untagged", Kind: KindFunction, QualifiedName: "Untagged"},
-		99); err != nil {
-		t.Fatalf("PutEntity: %v", err)
+	// Direct INSERT — bypasses Store.PutEntity entirely. Pre-P1.5.T07
+	// this was the shape every untoken'd PutEntity call took
+	// (kernel_seq_tag = 0 by default). Modeled here so the audit
+	// retains a regression signal against a future writer that
+	// bypasses the Store API.
+	if _, err := store.db.ExecContext(context.Background(),
+		`INSERT INTO code_entities (id, kind, language_id, qualified_name, created_seq)
+		 VALUES (?, ?, '', ?, ?)`,
+		"untagged", string(KindFunction), "Untagged", 99); err != nil {
+		t.Fatalf("direct INSERT: %v", err)
 	}
 	rows, err := store.AuditUntaggedRows(context.Background(), 0)
 	if err != nil {
@@ -88,6 +99,53 @@ func TestAuditUntaggedRows_FindsLegacyWrites(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("audit failed to flag untagged row; got %v", rows)
+	}
+}
+
+// TestStrictMode_RejectsWriteWithoutIssuer asserts that flipping
+// Strict(true) without installing a TokenIssuer makes the auto-mint
+// path on PutEntity fail with ErrMissingKernelSeqTag. The daemon
+// installs both at boot; if either is missing the writer-monopoly
+// invariant cannot hold and we want a loud failure.
+func TestStrictMode_RejectsWriteWithoutIssuer(t *testing.T) {
+	t.Parallel()
+	store := newTrustStore(t)
+	policy := kernel.NewTrustPolicy()
+	policy.SetStrict(true)
+	store.SetTrustPolicy(policy)
+	// Deliberately do NOT install a TokenIssuer.
+	err := store.PutEntity(context.Background(),
+		Entity{ID: "rejected", Kind: KindFunction, QualifiedName: "Rejected"},
+		77)
+	if !errors.Is(err, kernel.ErrMissingKernelSeqTag) {
+		t.Fatalf("strict + no issuer should reject; got %v", err)
+	}
+}
+
+// TestStrictMode_AcceptsWriteWithDaemonIssuer asserts the production
+// path: daemon installs policy + issuer + strict, every PutEntity
+// auto-mints a daemon-authority token and stamps kernel_seq_tag.
+func TestStrictMode_AcceptsWriteWithDaemonIssuer(t *testing.T) {
+	t.Parallel()
+	store := newTrustStore(t)
+	policy := kernel.NewTrustPolicy()
+	policy.SetStrict(true)
+	store.SetTrustPolicy(policy)
+	store.SetTokenIssuer(TokenIssuerFunc(policy.IssueWriteToken))
+
+	if err := store.PutEntity(context.Background(),
+		Entity{ID: "accepted", Kind: KindFunction, QualifiedName: "Accepted"},
+		88); err != nil {
+		t.Fatalf("strict + issuer should accept; got %v", err)
+	}
+	rows, err := store.AuditUntaggedRows(context.Background(), 0)
+	if err != nil {
+		t.Fatalf("audit: %v", err)
+	}
+	for _, id := range rows {
+		if id == "accepted" {
+			t.Fatalf("auto-minted write missing tag; audit returned %v", rows)
+		}
 	}
 }
 
