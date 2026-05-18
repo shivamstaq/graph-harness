@@ -27,6 +27,22 @@ enabled:
   p6-publish:              false
   p6-hidden-corpus:        false
 
+  # ---- Phase 0.5 (always-on substrate, plan/00.5-always-on-substrate.md) ----
+  # All landed in impl/phase0.5 commits e0be993..40f4347. Specs under
+  # tests/e2e/specs/substrate/ exercise the user-visible substrate
+  # contracts via the CLI surface (`daemon subscribe`, `--batch`,
+  # `validate-diff`, `selectors test` round-trips).
+  p0.5-watcher-wired:        true   # P0.5.T07 daemon owns fsnotify → orchestrator
+  p0.5-subscription-push:    true   # P0.5.T01-T06 kernel.subscribe + lifecycle + multiplex
+  p0.5-batch-mode:           true   # P0.5.T16 --batch flag opens SQLite read-only
+  p0.5-transient-tier:       true   # P0.5.T12 TransientOverlay (subscriber-scoped)
+  p0.5-router:               true   # P0.5.T13 Kernel.Route as single read seam
+  p0.5-cancellation:         true   # P0.5.T14 kernel.cancel + per-request ctx
+  p0.5-hydration-parity:     true   # P0.5.T10/T11 cold-restart equals live observation
+  p0.5-suppress-at-source:   true   # P0.5.T09 zero-event no-op re-extract
+  p0.5-trust-enforced:       true   # P0.5.T18 WriteToken + kernel_seq_tag column
+  p0.5-daemon-canonical-cli: true   # P0.5.T15 interactive CLI lowers through daemon
+
   # ---- Tooling availability flags (workaround for gotit ≤0.2.1) ----
   # The gotit TUI pre-flight (cmd/gotit/tui_cmd.go::runTUI) only
   # short-circuits to StateSkipped for `feature:` and `git` requires —

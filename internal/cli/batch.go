@@ -88,12 +88,11 @@ func OpenBatch(_ context.Context, ws *daemon.Workspace) (*BatchHandle, error) {
 		_ = log.Close()
 		return nil, fmt.Errorf("ping code.core (ro): %w", err)
 	}
-	store, err := code_core.NewStore(codeDB)
-	if err != nil {
-		_ = codeDB.Close()
-		_ = log.Close()
-		return nil, fmt.Errorf("init code.core store: %w", err)
-	}
+	// Read-only opens skip the initSchema migrations — the schema
+	// must already be current on disk (typically created by a prior
+	// daemon-write or batch-write pass). This is the SPEC §9.11
+	// "batch readers don't take the writer lock" path.
+	store := code_core.NewStoreReadOnly(codeDB)
 
 	// semantic.overlay is filesystem-backed (.gh files under
 	// .graph-harness/overlay/). Load in-memory; the snapshot is

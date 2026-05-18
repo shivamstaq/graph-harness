@@ -1,0 +1,54 @@
+# yaml-language-server: $schema=https://github.com/shivamstaq/gotit/raw/main/schema/spec.schema.json
+spec_version: 1
+name: noop-reextract-emits-zero-events
+description: >
+  SPEC §6.21 suppress-at-source: re-running the orchestrator over an
+  unchanged workspace MUST emit zero new kernel events. The kernel
+  head seq before and after a second `selectors test` invocation is
+  byte-identical when no source has changed since the first run.
+
+  This idempotency invariant is what lets the daemon re-scan freely
+  on watcher events — a save-then-revert cycle does not pollute the
+  log. Capability landed via the compare-before-emit contract on
+  every code.core emission path.
+tags: [extract, suppress-at-source, idempotent]
+order: 100
+requires:
+  - feature:p0.5-suppress-at-source
+repo:
+  helper: go-module-with-checkout-validator
+
+setup:
+  - name: init_workspace
+    command: graph-harness init
+    assert: [{ type: exit_code, expected: 0 }]
+
+  - name: install_overlay
+    command: sh -c "mkdir -p .graph-harness/overlay && cp demo.checkout.gh .graph-harness/overlay/checkout.gh"
+    assert: [{ type: exit_code, expected: 0 }]
+
+  - name: warm_state_with_first_index
+    # First invocation drives a full extract — populates code.core
+    # via tree-sitter (no LSP / SCIP dependency).
+    command: graph-harness selectors test CheckoutValidator --batch --no-lsp --no-scip --json
+    assert: [{ type: exit_code, expected: 0 }]
+
+steps:
+  - name: rerun_orchestrator_and_compare_kernel_head
+    # Capture head before + after a second extract pass and assert
+    # they match. Exit non-zero on mismatch surfaces the regression.
+    command: |
+      bash -c '
+      before=$(graph-harness status | awk "/Last seq:/ {print \$NF}")
+      graph-harness selectors test CheckoutValidator --batch --no-lsp --no-scip --json >/dev/null
+      after=$(graph-harness status | awk "/Last seq:/ {print \$NF}")
+      echo "head_before=$before head_after=$after"
+      if [ "$before" != "$after" ]; then
+        echo "FAIL: kernel head advanced on no-op re-extract" >&2
+        exit 1
+      fi
+      echo "PASS: kernel head unchanged after idempotent re-extract"
+      '
+    assert:
+      - { type: exit_code, expected: 0 }
+      - { type: contains, value: "PASS: kernel head unchanged" }

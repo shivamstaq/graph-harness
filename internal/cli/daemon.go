@@ -34,7 +34,142 @@ func newDaemonCmdReal() *cobra.Command {
 		newDaemonStatusCmd(),
 		newDaemonLogsCmd(),
 		newDaemonServeCmd(),
+		newDaemonSubscribeCmd(),
 	)
+	return c
+}
+
+// newDaemonSubscribeCmd implements `graph-harness daemon subscribe
+// --filter <expr>`. Establishes a long-lived JSON-RPC connection to
+// the daemon, calls kernel.identify (binding a stable subscriber_id
+// when --subscriber-id is set) + kernel.subscribe, then prints every
+// pushed notification to stdout as a single NDJSON line.
+//
+// Demo/test surface for the P0.5 substrate contract (SPEC §6.22).
+// The TUI / Studio / IDE long-lived consumers in P3+ use the same
+// `kernel.subscribe` method via their own RPC clients.
+//
+// Exits on:
+//   - --max-events N notifications received
+//   - --timeout elapsed
+//   - SIGINT / SIGTERM
+//   - daemon disconnect
+func newDaemonSubscribeCmd() *cobra.Command {
+	c := &cobra.Command{
+		Use:   "subscribe",
+		Short: "Stream kernel events from the daemon over JSON-RPC (SPEC §6.22)",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			ws, err := activeWorkspace()
+			if err != nil {
+				return err
+			}
+			filter, _ := cmd.Flags().GetString("filter")
+			subID, _ := cmd.Flags().GetString("subscriber-id")
+			cursor, _ := cmd.Flags().GetUint64("cursor")
+			maxEvents, _ := cmd.Flags().GetInt("max-events")
+			timeout, _ := cmd.Flags().GetDuration("timeout")
+			queueCap, _ := cmd.Flags().GetInt("queue-cap")
+
+			ctx, cancel := context.WithCancel(cmd.Context())
+			defer cancel()
+			if timeout > 0 {
+				ctx, cancel = context.WithTimeout(ctx, timeout)
+				defer cancel()
+			}
+
+			if err := daemon.EnsureRunning(ctx, ws); err != nil {
+				return err
+			}
+
+			out := cmd.OutOrStdout()
+			autoAck, _ := cmd.Flags().GetBool("auto-ack")
+			type seqEvent struct {
+				Seq            uint64 `json:"seq"`
+				SubscriptionID string `json:"subscription_id"`
+			}
+			eventC := make(chan seqEvent, maxEvents+8)
+			handler := func(method string, params json.RawMessage) {
+				row := map[string]any{"method": method}
+				if len(params) > 0 {
+					row["params"] = params
+				}
+				buf, _ := json.Marshal(row)
+				_, _ = fmt.Fprintln(out, string(buf))
+				if method == "kernel.event" {
+					var e seqEvent
+					_ = json.Unmarshal(params, &e)
+					eventC <- e
+				}
+			}
+			client, err := jsonrpc.DialWithHandler(ctx, ws.SocketPath, handler)
+			if err != nil {
+				return err
+			}
+			defer func() { _ = client.Close() }()
+
+			if subID != "" {
+				var id jsonrpc.IdentifyResult
+				if err := client.Call(ctx, "kernel.identify",
+					jsonrpc.IdentifyParams{SubscriberID: subID}, &id); err != nil {
+					return fmt.Errorf("identify: %w", err)
+				}
+			}
+			var subscribed jsonrpc.SubscribeResult
+			if err := client.Call(ctx, "kernel.subscribe",
+				jsonrpc.SubscribeParams{Filter: filter, Cursor: cursor, QueueCap: queueCap},
+				&subscribed); err != nil {
+				return fmt.Errorf("subscribe: %w", err)
+			}
+			meta, _ := json.Marshal(map[string]any{
+				"method": "subscription.bound",
+				"params": subscribed,
+			})
+			_, _ = fmt.Fprintln(out, string(meta))
+
+			// Block until max-events received, timeout, or signal.
+			sig := make(chan os.Signal, 1)
+			signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
+			defer signal.Stop(sig)
+			seen := 0
+			for {
+				if maxEvents > 0 && seen >= maxEvents {
+					return nil
+				}
+				select {
+				case ev := <-eventC:
+					seen++
+					// SPEC §6.22 + P0.5.T02/T03 cross-restart
+					// persistence: each received event is ack'd
+					// when --auto-ack is set. The daemon's Ack
+					// handler persists last_processed_seq into
+					// layer_state via EventLog.AdvanceCursor so a
+					// subsequent reconnect with the same
+					// subscriber_id resumes from seq+1 instead of
+					// head. Without --auto-ack the cursor stays
+					// in-process only and is dropped on disconnect.
+					if autoAck && ev.SubscriptionID != "" {
+						_ = client.Call(ctx, "kernel.ack",
+							jsonrpc.AckParams{SubscriptionID: ev.SubscriptionID, Seq: ev.Seq},
+							nil)
+					}
+				case <-sig:
+					return nil
+				case <-ctx.Done():
+					if ctx.Err() == context.DeadlineExceeded {
+						return nil
+					}
+					return ctx.Err()
+				}
+			}
+		},
+	}
+	c.Flags().String("filter", "", "Participle event filter (e.g. 'code.core' or 'code.core/FileChanged')")
+	c.Flags().String("subscriber-id", "", "stable subscriber identifier; persists cursors across reconnect")
+	c.Flags().Uint64("cursor", 0, "resume from cursor+1; zero starts at current head")
+	c.Flags().Int("max-events", 1, "exit after receiving N kernel.event notifications (0 = run forever)")
+	c.Flags().Duration("timeout", 5*time.Second, "exit after this duration; zero means no timeout")
+	c.Flags().Int("queue-cap", 0, "override per-subscription queue depth (default 10000)")
+	c.Flags().Bool("auto-ack", false, "send kernel.ack for each received event (persists the cursor in layer_state)")
 	return c
 }
 
