@@ -208,6 +208,11 @@ func (s *Server) registerBuiltins() {
 	registerConn(s, "kernel.subscribe", "kernel", svc.Subscribe)
 	Register(s, "kernel.ack", "kernel", svc.Ack)
 	Register(s, "kernel.unsubscribe", "kernel", svc.Unsubscribe)
+	// SPEC §6.22 heartbeat: kernel.ping is the wire-level liveness
+	// probe long-lived consumers issue on an idle timer. The daemon
+	// answers with {pong: true}; round-trip failure is the
+	// disconnect signal.
+	RegisterVoid(s, "kernel.ping", "kernel", svc.KernelPing)
 	// kernel.cancel needs the Server's in-flight registry so it
 	// targets requests by their JSON-RPC id. Implemented as a
 	// conn-aware Server method (the Service doesn't own request

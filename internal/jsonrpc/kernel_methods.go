@@ -103,6 +103,25 @@ func (s *Service) Unsubscribe(ctx context.Context, p UnsubscribeParams) (struct{
 	return struct{}{}, nil
 }
 
+// PingResult mirrors daemon.ping but is specific to the kernel
+// namespace so monitoring callers can distinguish RPC liveness from
+// subscriber liveness. SPEC §6.22 heartbeat clause.
+type KernelPingResult struct {
+	Pong bool `json:"pong"`
+}
+
+// KernelPing implements kernel.ping (SPEC §6.22 heartbeat).
+// Returning {pong: true} is the wire signal that the subscriber's
+// connection is alive — callers that issue ping on an idle timer
+// can use the round-trip as a liveness probe and trigger
+// reconnection on failure. The daemon-side eviction path uses the
+// last-seen time of every conn (touched on every RPC) to evict
+// silent subscribers after the configured threshold; eviction
+// emits SubscriberEvicted on the kernel bus.
+func (s *Service) KernelPing(_ context.Context) (KernelPingResult, error) {
+	return KernelPingResult{Pong: true}, nil
+}
+
 // registerConn binds method to a connection-aware handler. Mirrors
 // Register but threads the conn into the handler so notification
 // pushes know which client to address.
