@@ -327,6 +327,12 @@ func (s *Server) dispatch(ctx context.Context, req *jsonrpc2.Request) (any, erro
 
 func (s *Server) dispatchWithConn(ctx context.Context, conn *jsonrpc2.Conn, req *jsonrpc2.Request) (any, error) {
 	s.svc.Touch()
+	// SPEC §6.22 heartbeat: every RPC is per-conn activity. The
+	// eviction sweep reads lastSeen to drop silent subscribers;
+	// kernel.ping lets idle long-lived consumers stay marked-live.
+	if conn != nil {
+		s.svc.subscriptions().Touch(conn)
+	}
 
 	s.mu.Lock()
 	m, ok := s.methods[req.Method]
