@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/sourcegraph/jsonrpc2"
 
@@ -47,6 +48,14 @@ type SubscriptionManager struct {
 	subs    map[string]*activeSub
 	byConn  map[*jsonrpc2.Conn]map[string]struct{}
 	clients map[*jsonrpc2.Conn]string // conn → subscriber_id (identified or ephemeral)
+
+	// lastSeen tracks per-conn last-activity timestamp. Touched on
+	// every RPC; the eviction sweep reads it to drop silent
+	// subscribers after the idle threshold (SPEC §6.22 heartbeat).
+	lastSeen map[*jsonrpc2.Conn]time.Time
+	// idleThreshold is the eviction window; zero disables eviction.
+	// Default 24h per SPEC §6.22.
+	idleThreshold time.Duration
 }
 
 // activeSub is the internal bookkeeping for a single live subscription.
@@ -73,10 +82,125 @@ type activeSub struct {
 // NewSubscriptionManager builds a manager bound to the given event log.
 func NewSubscriptionManager(log *facts.EventLog) *SubscriptionManager {
 	return &SubscriptionManager{
-		log:     log,
-		subs:    map[string]*activeSub{},
-		byConn:  map[*jsonrpc2.Conn]map[string]struct{}{},
-		clients: map[*jsonrpc2.Conn]string{},
+		log:           log,
+		subs:          map[string]*activeSub{},
+		byConn:        map[*jsonrpc2.Conn]map[string]struct{}{},
+		clients:       map[*jsonrpc2.Conn]string{},
+		lastSeen:      map[*jsonrpc2.Conn]time.Time{},
+		idleThreshold: defaultIdleEviction,
+	}
+}
+
+// defaultIdleEviction is the SPEC §6.22 default (24h). High enough
+// that long-lived editor sessions don't trip it, low enough that
+// pidfile-only zombies clear eventually.
+const defaultIdleEviction = 24 * time.Hour
+
+// SetIdleThreshold overrides the eviction window. Zero disables it
+// (tests use 0 to keep subscriptions alive across sleeps).
+func (m *SubscriptionManager) SetIdleThreshold(d time.Duration) {
+	m.mu.Lock()
+	m.idleThreshold = d
+	m.mu.Unlock()
+}
+
+// Touch records activity for conn. Called by the dispatcher on every
+// RPC so the eviction sweep sees recent liveness. kernel.ping exists
+// specifically so idle long-lived subscribers can stay marked-live
+// without issuing functional RPCs.
+func (m *SubscriptionManager) Touch(conn *jsonrpc2.Conn) {
+	if conn == nil {
+		return
+	}
+	m.mu.Lock()
+	m.lastSeen[conn] = time.Now()
+	m.mu.Unlock()
+}
+
+// StartEvictionLoop runs the periodic sweep until ctx is cancelled.
+// Tick defaults to idleThreshold/4 with a 1s floor.
+func (m *SubscriptionManager) StartEvictionLoop(ctx context.Context, tickInterval time.Duration) {
+	m.mu.Lock()
+	threshold := m.idleThreshold
+	m.mu.Unlock()
+	if threshold <= 0 {
+		return
+	}
+	if tickInterval <= 0 {
+		tickInterval = threshold / 4
+	}
+	if tickInterval < time.Second {
+		tickInterval = time.Second
+	}
+	go func() {
+		t := time.NewTicker(tickInterval)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				m.evictIdleConns()
+			}
+		}
+	}()
+}
+
+// evictIdleConns is one sweep. Drops conns whose lastSeen exceeds
+// the threshold, tears down their subscriptions (cursors persist
+// via the Ack path), closes the conn, and emits SubscriberEvicted
+// on the kernel bus so monitoring consumers (TUI / Studio) surface
+// the loss.
+func (m *SubscriptionManager) evictIdleConns() {
+	m.mu.Lock()
+	threshold := m.idleThreshold
+	if threshold <= 0 {
+		m.mu.Unlock()
+		return
+	}
+	now := time.Now()
+	type victim struct {
+		conn         *jsonrpc2.Conn
+		subscriberID string
+		subIDs       []string
+	}
+	var victims []victim
+	for conn, last := range m.lastSeen {
+		if now.Sub(last) < threshold {
+			continue
+		}
+		v := victim{conn: conn, subscriberID: m.clients[conn]}
+		for subID := range m.byConn[conn] {
+			v.subIDs = append(v.subIDs, subID)
+		}
+		victims = append(victims, v)
+	}
+	m.mu.Unlock()
+	for _, v := range victims {
+		for _, subID := range v.subIDs {
+			m.Unsubscribe(subID)
+		}
+		if v.conn != nil {
+			_ = v.conn.Close()
+		}
+		m.mu.Lock()
+		delete(m.lastSeen, v.conn)
+		delete(m.clients, v.conn)
+		delete(m.byConn, v.conn)
+		m.mu.Unlock()
+		if m.log != nil {
+			payload, _ := json.Marshal(map[string]any{
+				"subscriber_id":   v.subscriberID,
+				"subscription_id": v.subIDs,
+				"reason":          "idle_timeout",
+			})
+			_, _ = m.log.Append(context.Background(), []kernel.Event{{
+				Layer:      "kernel.subscriptions",
+				Kind:       "SubscriberEvicted",
+				Payload:    payload,
+				ProducedBy: kernel.SourceLayerInternal,
+			}})
+		}
 	}
 }
 
