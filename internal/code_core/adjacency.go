@@ -29,12 +29,31 @@ type Store struct {
 }
 
 // NewStore wraps an opened *sql.DB and ensures the schema exists.
+//
+// initSchema runs CREATE-IF-NOT-EXISTS + ALTER TABLE additive
+// migrations. The ALTERs fail on a read-only DB connection
+// (`mode=ro` or `_pragma=query_only(1)`), so read-only callers
+// must use NewStoreReadOnly, which skips migrations entirely and
+// assumes the schema is already current.
 func NewStore(db *sql.DB) (*Store, error) {
 	s := &Store{db: db}
 	if err := s.initSchema(); err != nil {
 		return nil, err
 	}
 	return s, nil
+}
+
+// NewStoreReadOnly wraps a read-only *sql.DB. Skips the initSchema
+// migrations because they would fail on a query_only connection.
+// The caller is responsible for ensuring the schema is already
+// current — typically by opening the same DB read-write at least
+// once via NewStore before any read-only consumer runs.
+//
+// Used by batch-mode CLI (P0.5.T16 / SPEC §9.11) and daemon-routed
+// read commands that open the daemon's SQLite store with `mode=ro`
+// to avoid blocking the writer.
+func NewStoreReadOnly(db *sql.DB) *Store {
+	return &Store{db: db}
 }
 
 // SetTrustPolicy installs the kernel-issued trust policy on the

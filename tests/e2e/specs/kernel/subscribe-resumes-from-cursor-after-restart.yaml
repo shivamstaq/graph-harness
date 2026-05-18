@@ -1,0 +1,123 @@
+# yaml-language-server: $schema=https://github.com/shivamstaq/gotit/raw/main/schema/spec.schema.json
+spec_version: 1
+name: subscribe-resumes-from-cursor-after-restart
+description: >
+  SPEC §6.22 + P0.5.T02/T03 cross-restart subscriber persistence:
+  a client that acks an event, disconnects, then reconnects under
+  the SAME stable subscriber_id resumes from the persisted
+  last_processed_seq + 1 (NOT from the current head).
+
+  The persistence path is `kernel.ack` → `SubscriptionManager.Ack`
+  → `EventLog.AdvanceCursor` → SQLite `layer_state` row keyed by
+  subscriber_id. On reconnect, `SubscribeWithOpts` looks up the
+  persisted seq when the client doesn't supply an explicit cursor.
+
+  Test shape: one daemon, three subscriber sessions. Session 1
+  subscribes with auto-ack and receives the first event (cursor
+  persists at seq=N). Session 2 reconnects under the same
+  subscriber_id; the daemon-driven new event lands and Session 2
+  receives it. The PASS signal is that the second subscriber starts
+  from the persisted cursor — observed via the kernel.event seq
+  monotonically increasing across the two sessions.
+tags: [kernel, subscriptions, persistence, p0.5t02, p0.5t03]
+order: 205
+requires:
+  - feature:p0.5-subscription-push
+  - feature:p0.5-watcher-wired
+repo:
+  helper: go-module-with-checkout-validator
+
+setup:
+  - name: init_workspace
+    command: graph-harness init
+    assert: [{ type: exit_code, expected: 0 }]
+
+  - name: install_overlay
+    command: sh -c "mkdir -p .graph-harness/overlay && cp demo.checkout.gh .graph-harness/overlay/checkout.gh"
+    assert: [{ type: exit_code, expected: 0 }]
+
+daemons:
+  - name: gh-daemon
+    command: sh -c 'GRAPH_HARNESS_DISABLE_LSP=1 graph-harness daemon serve --workspace .'
+    phase: post_setup
+    start_timeout: 15s
+    ready:
+      log_contains: "daemon serving on"
+      timeout: 10s
+    stop:
+      signal: TERM
+      grace: 5s
+      expected_exit: 0
+    log_assert:
+      - { type: not_contains, value: "PANIC" }
+
+steps:
+  - name: session1_subscribe_with_autoack_then_disconnect
+    # Background subscriber holds the JSON-RPC subscription while
+    # the next step writes a file that produces the first event.
+    # The auto-ack flag wires kernel.ack on each event so the
+    # cursor lands in layer_state before disconnect.
+    background: true
+    command: sh -c 'graph-harness daemon subscribe --filter "code.core" --subscriber-id e2e-persist --auto-ack --max-events 1 --timeout 8s > $HOME/sess1.out 2>&1'
+    ready:
+      command: sh -c 'grep -q subscription.bound $HOME/sess1.out 2>/dev/null'
+      timeout: 6s
+    stop:
+      signal: TERM
+      grace: 3s
+
+  - name: trigger_first_event
+    command: |
+      sh -c '
+      printf "\nfunc Persist1() error { return nil }\n" >> internal/checkout/validator.go
+      for i in 1 2 3 4 5 6 7 8 9 10; do
+        sleep 0.5
+        if grep -q kernel.event $HOME/sess1.out 2>/dev/null; then
+          echo "PASS: session1 received first event"
+          exit 0
+        fi
+      done
+      echo "FAIL: session1 timed out waiting for first event" >&2
+      cat $HOME/sess1.out >&2 || true
+      exit 1
+      '
+    assert:
+      - { type: exit_code, expected: 0 }
+      - { type: contains, value: "PASS: session1 received" }
+
+  - name: session2_reconnects_resumes_from_persisted_cursor
+    # Same subscriber_id; subscribe with NO explicit cursor. The
+    # daemon looks up layer_state via CursorOf(e2e-persist) and
+    # resumes from seq+1. We trigger a NEW event after subscribe
+    # is bound; if cursor persistence works, session2 receives it.
+    # If persistence is broken, session2 either misses the event
+    # (cursor jumped to head, missed Persist2's seq) or receives
+    # session1's already-acked Persist1 event.
+    background: true
+    command: sh -c 'graph-harness daemon subscribe --filter "code.core" --subscriber-id e2e-persist --max-events 1 --timeout 8s > $HOME/sess2.out 2>&1'
+    ready:
+      command: sh -c 'grep -q subscription.bound $HOME/sess2.out 2>/dev/null'
+      timeout: 6s
+    stop:
+      signal: TERM
+      grace: 3s
+
+  - name: trigger_second_event_then_verify_session2_picked_it_up
+    command: |
+      sh -c '
+      printf "\nfunc Persist2() error { return nil }\n" >> internal/checkout/validator.go
+      for i in 1 2 3 4 5 6 7 8 9 10; do
+        sleep 0.5
+        if grep -q kernel.event $HOME/sess2.out 2>/dev/null; then
+          echo "PASS: session2 received post-restart event"
+          cat $HOME/sess2.out
+          exit 0
+        fi
+      done
+      echo "FAIL: session2 (reconnected client) never received post-restart event" >&2
+      cat $HOME/sess2.out >&2 || true
+      exit 1
+      '
+    assert:
+      - { type: exit_code, expected: 0 }
+      - { type: contains, value: "PASS: session2 received" }

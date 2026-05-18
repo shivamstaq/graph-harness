@@ -1,0 +1,78 @@
+# yaml-language-server: $schema=https://github.com/shivamstaq/gotit/raw/main/schema/spec.schema.json
+spec_version: 1
+name: batch-and-daemon-byte-identical
+description: >
+  SPEC §9.11 + P0.5.T17: `validate-diff --diff <file>` produces
+  byte-identical JSON output via the batch path (--batch, daemon
+  offline) and the daemon-routed path (daemon running, JSON-RPC
+  validate.diff). The invariant is the property gate that makes
+  batch mode a drop-in for CI — deterministic, parity with the
+  long-lived daemon read.
+
+  The Go-native counterpart at
+  `internal/cli/batch_equiv_test.go::TestValidateDiff_BatchAndDaemonProduceIdenticalOutput`
+  asserts the same property at the Service-handler level. This
+  e2e spec walks the user-visible CLI surface so a regression at
+  either seam (CLI parsing, daemon RPC framing, batch index path)
+  surfaces here too.
+tags: [validate-diff, batch, daemon, byte-identical, p0.5t17]
+order: 90
+requires:
+  - feature:p0.5-batch-mode
+repo:
+  helper: go-module-with-checkout-validator
+
+setup:
+  - name: init_workspace
+    command: graph-harness init
+    assert: [{ type: exit_code, expected: 0 }]
+
+  - name: install_overlay
+    command: sh -c "mkdir -p .graph-harness/overlay && cp demo.checkout.gh .graph-harness/overlay/checkout.gh"
+    assert: [{ type: exit_code, expected: 0 }]
+
+  - name: stage_diff_input
+    command: |
+      bash -c '
+      cat > /tmp/equiv.diff << "DIFFEOF"
+      --- a/internal/checkout/validator.go
+      +++ b/internal/checkout/validator.go
+      @@ -3,5 +3,7 @@ package checkout
+       type CheckoutValidator struct{}
+
+      -func (v *CheckoutValidator) Validate(cart any) error {
+      +// Validate runs the cart validation pipeline (now with extra logging).
+      +func (v *CheckoutValidator) Validate(cart any) error {
+      +	_ = cart
+       	return nil
+       }
+      DIFFEOF
+      '
+    assert: [{ type: exit_code, expected: 0 }]
+
+  - name: prime_index_once
+    # Both paths need the index warm before the comparison so neither
+    # side races a fresh extract.
+    command: graph-harness selectors test CheckoutValidator --batch --no-lsp --no-scip --json
+    assert: [{ type: exit_code, expected: 0 }]
+
+steps:
+  - name: batch_and_daemon_paths_produce_identical_json
+    # Path A: --batch path. Path B: daemon-routed (daemon-start first
+    # so the second invocation goes through JSON-RPC validate.diff
+    # rather than degrading to batch).
+    command: |
+      bash -c '
+      graph-harness validate-diff --batch --diff /tmp/equiv.diff --json --no-lsp --no-scip > /tmp/equiv-batch.json
+      graph-harness daemon start >/dev/null
+      graph-harness validate-diff --diff /tmp/equiv.diff --json --no-lsp --no-scip > /tmp/equiv-daemon.json
+      if ! diff -u /tmp/equiv-batch.json /tmp/equiv-daemon.json; then
+        echo "FAIL: batch vs daemon validate-diff JSON output differs" >&2
+        exit 1
+      fi
+      echo "PASS: byte-identical across batch and daemon paths"
+      graph-harness daemon stop >/dev/null
+      '
+    assert:
+      - { type: exit_code, expected: 0 }
+      - { type: contains, value: "PASS: byte-identical" }

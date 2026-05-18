@@ -1,0 +1,75 @@
+# yaml-language-server: $schema=https://github.com/shivamstaq/gotit/raw/main/schema/spec.schema.json
+spec_version: 1
+name: watcher-reindexes-on-file-change
+description: >
+  SPEC §6.20 + P0.5.T07/T08: when the daemon is running, modifying a
+  source file in a way that changes the extracted entity set triggers
+  the watcher → orchestrator path. fsnotify events within the 50 ms
+  coalesce window collapse to one re-extract; the new entity becomes
+  queryable via `code list`.
+
+  The substrate invariant ISN'T "any file write → kernel event": the
+  compare-before-emit contract (P0.5.T09) correctly suppresses events
+  for whitespace/comment-only edits because no entity changed. The
+  spec must add a real entity (new function declaration) to provoke
+  a state transition the watcher will pump onto the bus.
+tags: [daemon, watcher, fsnotify, p0.5t07, p0.5t08]
+order: 120
+requires:
+  - feature:p0.5-watcher-wired
+repo:
+  helper: go-module-with-checkout-validator
+
+setup:
+  - name: init_workspace
+    command: graph-harness init
+    assert: [{ type: exit_code, expected: 0 }]
+
+  - name: install_overlay
+    command: sh -c "mkdir -p .graph-harness/overlay && cp demo.checkout.gh .graph-harness/overlay/checkout.gh"
+    assert: [{ type: exit_code, expected: 0 }]
+
+daemons:
+  - name: gh-daemon
+    command: sh -c 'GRAPH_HARNESS_DISABLE_LSP=1 graph-harness daemon serve --workspace .'
+    phase: post_setup
+    start_timeout: 15s
+    ready:
+      log_contains: "daemon serving on"
+      timeout: 10s
+    stop:
+      signal: TERM
+      grace: 5s
+      expected_exit: 0
+    log_assert:
+      - { type: not_contains, value: "PANIC" }
+
+steps:
+  - name: add_new_entity_then_observe_watcher_reindex
+    # Append a wholly new function declaration. tree-sitter sees a new
+    # Function entity that wasn't there at daemon-cold-start time, so
+    # the unifier's UnifyChanged returns true, code.core appends a
+    # SymbolDisambiguation/entity-materialized event, and a subsequent
+    # `code list` query reflects the new qualified_name.
+    #
+    # The 1s sleep covers the 50 ms coalesce window plus the
+    # orchestrator's tree-sitter parse latency. We re-poll up to
+    # 5 times to absorb slow CI without making the assertion timeout
+    # masquerade as a real failure.
+    command: |
+      sh -c '
+      printf "\nfunc NewFlow() error { return nil }\n" >> internal/checkout/validator.go
+      for i in 1 2 3 4 5 6 7 8 9 10; do
+        sleep 0.5
+        out=$(graph-harness code list --qualified-name "checkout.NewFlow" --no-lsp --no-scip --json 2>/dev/null || true)
+        case "$out" in
+          *NewFlow*) echo "PASS: watcher reindexed in <${i}*0.5s"; exit 0 ;;
+        esac
+      done
+      echo "FAIL: watcher did not produce NewFlow entity within budget" >&2
+      graph-harness code list --no-lsp --no-scip 2>&1 | head -10 >&2
+      exit 1
+      '
+    assert:
+      - { type: exit_code, expected: 0 }
+      - { type: contains, value: "PASS: watcher reindexed" }

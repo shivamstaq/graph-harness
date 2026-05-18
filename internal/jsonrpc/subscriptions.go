@@ -141,6 +141,12 @@ func (m *SubscriptionManager) SubscribeWithOpts(ctx context.Context, conn *jsonr
 	subID := "sub-" + randomID()
 	stream := m.log.SubscribeWithFilter(filter)
 	subscriberID := m.SubscriberIDFor(conn)
+	// SPEC §6.22 reconnect: when the client doesn't supply a cursor,
+	// resume from the persisted last_processed_seq for this
+	// subscriber. Zero means start at head (default).
+	if cursor == 0 {
+		cursor = m.CursorOf(ctx, subscriberID)
+	}
 	// Decouple the pump from the caller's per-request ctx. The pump
 	// lives as long as the subscription does — either Unsubscribe()
 	// or DropConn() invokes cancel(); the request-bound ctx going
@@ -203,6 +209,13 @@ func (m *SubscriptionManager) Unsubscribe(subID string) {
 // resumes from seq+1. When the un-acked gap shrinks back under the
 // queue cap, the fellBehind one-shot flag clears so subsequent
 // overflows can fire a fresh notification.
+//
+// P0.5.T02/T03 cross-restart persistence: the ack also writes the
+// new last_processed_seq into the kernel-owned layer_state table via
+// EventLog.AdvanceCursor, keyed by the subscriber's stable identity
+// (subscriber_id || ephemeral). Restart of the daemon + reconnect
+// then resumes from seq+1 instead of head — closing the audit gap
+// where Ack was only in-memory.
 func (m *SubscriptionManager) Ack(subID string, seq uint64) error {
 	m.mu.Lock()
 	as, ok := m.subs[subID]
@@ -219,7 +232,29 @@ func (m *SubscriptionManager) Ack(subID string, seq uint64) error {
 	if int(as.cursor.Load()-as.ackedSeq.Load()) < as.queueCap {
 		as.fellBehind.Store(false)
 	}
+	// Persist the cursor so reconnect-across-daemon-restart can
+	// resume. Best-effort: a write failure does not fail the ack
+	// (the in-memory state is still correct for this session).
+	if m.log != nil && as.subscriberID != "" {
+		_ = m.log.AdvanceCursor(context.Background(), as.subscriberID, seq)
+	}
 	return nil
+}
+
+// CursorOf returns the persisted last_processed_seq for the given
+// subscriber identity, or zero if none has been recorded. Used by
+// SubscribeWithOpts when the client omits an explicit cursor — the
+// subscription resumes from the persisted seq+1 instead of head, per
+// SPEC §6.22 reconnect contract.
+func (m *SubscriptionManager) CursorOf(ctx context.Context, subscriberID string) uint64 {
+	if m.log == nil || subscriberID == "" {
+		return 0
+	}
+	seq, err := m.log.CursorOf(ctx, subscriberID)
+	if err != nil {
+		return 0
+	}
+	return seq
 }
 
 // DropConn drops every subscription tied to conn. Called from the

@@ -97,10 +97,30 @@ func (s *Service) subscriptions() *SubscriptionManager {
 	return s.subs
 }
 
-// transient returns the lazily-constructed TransientOverlay.
+// transient returns the lazily-constructed TransientOverlay. The
+// overlay's overflow sink is wired to emit a kernel.transient
+// TransientTierOverflow event on the kernel bus so subscribers can
+// learn about evictions (SPEC §6.19 + plan §3 gate 10/11). Best-
+// effort: emission failure is logged but does not stop the eviction.
 func (s *Service) transient() *TransientOverlay {
 	s.transOnce.Do(func() {
 		s.trans = NewTransientOverlay()
+		if s.Log != nil {
+			s.trans.SetOverflowSink(func(ev TransientEntry) {
+				payload, _ := json.Marshal(map[string]any{
+					"subscriber_id": ev.SubscriberID,
+					"source_class":  ev.SourceClass,
+					"target_id":     ev.TargetID,
+					"reason":        "lru_eviction",
+				})
+				_, _ = s.Log.Append(context.Background(), []kernel.Event{{
+					Layer:      "kernel.transient",
+					Kind:       "TransientTierOverflow",
+					Payload:    payload,
+					ProducedBy: kernel.SourceLayerInternal,
+				}})
+			})
+		}
 	})
 	return s.trans
 }

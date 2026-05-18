@@ -25,13 +25,48 @@ type Client struct {
 
 // Dial opens a Client to the daemon socket at the given path.
 func Dial(ctx context.Context, socketPath string) (*Client, error) {
+	return DialWithHandler(ctx, socketPath, nil)
+}
+
+// NotificationHandler is invoked when the daemon pushes a server-
+// initiated notification (`kernel.event`, `kernel.fellBehind`,
+// `kernel.subscriberEvicted`). method is the JSON-RPC method name;
+// params is the raw JSON payload. Handlers run on the connection's
+// receive goroutine — they should be brief and not block.
+type NotificationHandler func(method string, params json.RawMessage)
+
+// DialWithHandler is Dial with a notification handler. Passing nil
+// behaves like Dial — server-initiated notifications are discarded.
+// Required for clients that subscribe to push events (`graph-harness
+// daemon subscribe`, the TUI / Studio / IDE long-lived consumers).
+func DialWithHandler(ctx context.Context, socketPath string, h NotificationHandler) (*Client, error) {
 	raw, err := dialSocket(ctx, socketPath)
 	if err != nil {
 		return nil, err
 	}
 	stream := jsonrpc2.NewBufferedStream(raw, jsonrpc2.VSCodeObjectCodec{})
-	conn := jsonrpc2.NewConn(ctx, stream, nil) // client-only: no incoming handler
+	var handler jsonrpc2.Handler
+	if h != nil {
+		handler = jsonrpc2.HandlerWithError(func(_ context.Context, _ *jsonrpc2.Conn, req *jsonrpc2.Request) (any, error) {
+			if req.Notif {
+				var p json.RawMessage
+				if req.Params != nil {
+					p = *req.Params
+				}
+				h(req.Method, p)
+			}
+			return nil, nil
+		})
+	}
+	conn := jsonrpc2.NewConn(ctx, stream, handler)
 	return &Client{conn: conn}, nil
+}
+
+// Notify sends a one-way JSON-RPC notification to the daemon. Used
+// by clients that want to push events without expecting a reply
+// (e.g. ack-style fire-and-forget).
+func (c *Client) Notify(ctx context.Context, method string, params any) error {
+	return c.conn.Notify(ctx, method, params)
 }
 
 // Call invokes a method synchronously. result must be a pointer to a value

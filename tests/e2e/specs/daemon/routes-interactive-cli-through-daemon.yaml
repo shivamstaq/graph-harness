@@ -1,0 +1,72 @@
+# yaml-language-server: $schema=https://github.com/shivamstaq/gotit/raw/main/schema/spec.schema.json
+spec_version: 1
+name: routes-interactive-cli-through-daemon
+description: >
+  SPEC §9.1 + P0.5.T15: when the daemon is already running, interactive
+  CLI commands lower through JSON-RPC instead of opening Resources
+  per-invocation. The round-trip is "daemon serving → selectors test
+  reaches it → daemon stays alive throughout" — gotit owns the daemon
+  process so we get a deterministic pid + clean shutdown verification
+  rather than a flaky `daemon start` + `pkill` shell dance.
+
+  Currently routed: selectors test, code list, code provenance,
+  flows list, validate-diff, status. Other interactive commands
+  (query, review, tui, studio) are still pending P0.5.T15 closure.
+tags: [daemon, cli-routing, p0.5t15]
+order: 105
+requires:
+  - feature:p0.5-daemon-canonical-cli
+repo:
+  helper: go-module-with-checkout-validator
+
+setup:
+  - name: init_workspace
+    command: graph-harness init
+    assert: [{ type: exit_code, expected: 0 }]
+
+  - name: install_overlay
+    command: sh -c "mkdir -p .graph-harness/overlay && cp demo.checkout.gh .graph-harness/overlay/checkout.gh"
+    assert: [{ type: exit_code, expected: 0 }]
+
+daemons:
+  - name: gh-daemon
+    # Disable LSP so the daemon's cold-sweep finishes fast and the
+    # readiness marker fires within budget on hosts without gopls.
+    command: sh -c 'GRAPH_HARNESS_DISABLE_LSP=1 graph-harness daemon serve --workspace .'
+    phase: post_setup
+    start_timeout: 15s
+    ready:
+      # The serve command prints "graph-harness daemon serving on
+      # <socket> (pid=N, idle-timeout=...)" once the listener is up.
+      log_contains: "daemon serving on"
+      timeout: 10s
+    capture:
+      daemon_pid: 'regex:pid=(\d+)'
+    stop:
+      signal: TERM
+      grace: 5s
+      expected_exit: 0
+    log_assert:
+      - { type: not_contains, value: "PANIC" }
+
+steps:
+  - name: daemon_routed_call_reuses_running_daemon
+    # status (which dials the daemon when it's running) reports the
+    # same pid gotit captured at daemon start. If a CLI call had
+    # accidentally re-spawned the daemon we'd see a fresh pid; if the
+    # daemon had exited we'd see "not running". Both surface here.
+    command: |
+      sh -c '
+      graph-harness selectors test CheckoutValidator --json >/dev/null
+      status_pid=$(graph-harness daemon status --json | grep -o "\"pid\":[0-9]*" | head -1 | cut -d: -f2)
+      expected={{ daemon_pid }}
+      echo "captured=$expected status_pid=$status_pid"
+      if [ "$status_pid" != "$expected" ]; then
+        echo "FAIL: daemon pid changed across interactive call" >&2
+        exit 1
+      fi
+      echo "PASS: same daemon handled both calls"
+      '
+    assert:
+      - { type: exit_code, expected: 0 }
+      - { type: contains, value: "PASS: same daemon" }
