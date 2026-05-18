@@ -3,24 +3,141 @@ package code_core
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
+	"sync"
+
+	"github.com/shivamstaq/graph-harness/internal/kernel"
 )
 
 // Store is the SQLite-backed code.core adapter. It owns the entity table and
 // the adjacency table that backs `calls` / `references` traversal (SPEC §6.14
 // — adjacency in SQLite + planner BFS, no property-graph DB).
+//
+// Trust enforcement (P0.5.T18 / SPEC §9.1): when a TrustPolicy is
+// attached via SetTrustPolicy, writes via PutEntityWithToken refuse
+// to commit if the supplied kernel.WriteToken is invalid or fails
+// the policy's Verify check. The legacy PutEntity / IngestParsedFile
+// paths remain available during the migration window; both will be
+// retired once every daemon writer goes through the tokenized API.
 type Store struct {
 	db *sql.DB
+
+	trustMu sync.RWMutex
+	trust   *kernel.TrustPolicy
 }
 
 // NewStore wraps an opened *sql.DB and ensures the schema exists.
+//
+// initSchema runs CREATE-IF-NOT-EXISTS + ALTER TABLE additive
+// migrations. The ALTERs fail on a read-only DB connection
+// (`mode=ro` or `_pragma=query_only(1)`), so read-only callers
+// must use NewStoreReadOnly, which skips migrations entirely and
+// assumes the schema is already current.
 func NewStore(db *sql.DB) (*Store, error) {
 	s := &Store{db: db}
 	if err := s.initSchema(); err != nil {
 		return nil, err
 	}
 	return s, nil
+}
+
+// NewStoreReadOnly wraps a read-only *sql.DB. Skips the initSchema
+// migrations because they would fail on a query_only connection.
+// The caller is responsible for ensuring the schema is already
+// current — typically by opening the same DB read-write at least
+// once via NewStore before any read-only consumer runs.
+//
+// Used by batch-mode CLI (P0.5.T16 / SPEC §9.11) and daemon-routed
+// read commands that open the daemon's SQLite store with `mode=ro`
+// to avoid blocking the writer.
+func NewStoreReadOnly(db *sql.DB) *Store {
+	return &Store{db: db}
+}
+
+// SetTrustPolicy installs the kernel-issued trust policy on the
+// store. Once installed, PutEntityWithToken (and future *WithToken
+// methods) verify the caller's WriteToken before committing — non-
+// daemon callers without a token receive ErrMissingKernelSeqTag.
+//
+// Passing nil disables verification (the default — preserves legacy
+// behavior while the migration is in progress).
+func (s *Store) SetTrustPolicy(p *kernel.TrustPolicy) {
+	s.trustMu.Lock()
+	s.trust = p
+	s.trustMu.Unlock()
+}
+
+// trustPolicy returns the installed policy (nil if none).
+func (s *Store) trustPolicy() *kernel.TrustPolicy {
+	s.trustMu.RLock()
+	defer s.trustMu.RUnlock()
+	return s.trust
+}
+
+// PutEntityWithToken is the kernel-canonical write path. It verifies
+// tok against the installed TrustPolicy, stamps the kernel_seq_tag
+// column with tok.Seq(), and otherwise behaves like PutEntity.
+//
+// Returns kernel.ErrMissingKernelSeqTag (wrapped) when:
+//   - a TrustPolicy is installed and tok is invalid or fails Verify, OR
+//   - tok is the zero value (regardless of whether a policy is installed,
+//     once strict-mode rolls out; today this only errors when a policy
+//     is installed).
+//
+// Callers without legitimate authority (rogue CLI commands, library
+// code paths, etc.) cannot construct a WriteToken — the type's
+// fields are unexported, so the only way through this method is via
+// kernel.TrustPolicy.IssueWriteToken / IssueImporterToken.
+func (s *Store) PutEntityWithToken(ctx context.Context, e Entity, tok kernel.WriteToken, headSeq uint64) error {
+	if policy := s.trustPolicy(); policy != nil {
+		if err := policy.Verify(tok, headSeq); err != nil {
+			return fmt.Errorf("code.core: write rejected: %w", err)
+		}
+	}
+	// PutEntity already does the SQL upsert; we just need to stamp
+	// the kernel_seq_tag column. Done as a single UPDATE after the
+	// PutEntity completes so the tag is written transactionally
+	// with the row.
+	if err := s.PutEntity(ctx, e, tok.Seq()); err != nil {
+		return err
+	}
+	if _, err := s.db.ExecContext(ctx,
+		`UPDATE code_entities SET kernel_seq_tag = ? WHERE id = ?`,
+		tok.Seq(), e.ID); err != nil {
+		return err
+	}
+	return nil
+}
+
+// ErrUntaggedWrite is the sentinel returned by audit helpers that
+// find a row missing its kernel_seq_tag. Wraps kernel.ErrMissingKernelSeqTag
+// so callers can use errors.Is across the seam.
+var ErrUntaggedWrite = errors.Join(kernel.ErrMissingKernelSeqTag, errors.New("row missing kernel_seq_tag"))
+
+// AuditUntaggedRows returns the IDs of any code_entities rows whose
+// kernel_seq_tag is zero AND were created at a seq > minLegacySeq.
+// Used by post-migration smoke tests to confirm that strict mode is
+// safe to flip on — if the list is non-empty, some writer is still
+// bypassing the tokenized path.
+func (s *Store) AuditUntaggedRows(ctx context.Context, minLegacySeq uint64) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id FROM code_entities WHERE kernel_seq_tag = 0 AND created_seq > ?`,
+		minLegacySeq)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var out []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
 }
 
 func (s *Store) initSchema() error {
@@ -70,6 +187,23 @@ CREATE TABLE IF NOT EXISTS code_entity_provenance (
     FOREIGN KEY (entity_id) REFERENCES code_entities(id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_provenance_source ON code_entity_provenance(source_class);
+
+-- SPEC §6.21 suppress-at-source: dedup index for SymbolDisambiguation
+-- emissions. A disambiguation at (path, start_byte, end_byte) is
+-- defined to be the *same* event whenever the same set of canonical
+-- IDs claims that location. Re-running the orchestrator over an
+-- unchanged workspace therefore produces zero new disambiguation
+-- events because the prior claims_hash already lives in this table.
+-- A genuinely new disagreement (different IDs, e.g. after a code
+-- change) has a different claims_hash and DOES fire.
+CREATE TABLE IF NOT EXISTS code_core_emitted_disambiguations (
+    path        TEXT NOT NULL,
+    start_byte  INTEGER NOT NULL,
+    end_byte    INTEGER NOT NULL,
+    claims_hash TEXT NOT NULL,
+    emitted_seq INTEGER NOT NULL,
+    PRIMARY KEY (path, start_byte, end_byte, claims_hash)
+);
 `
 	if _, err := s.db.Exec(schema); err != nil {
 		return err
@@ -84,6 +218,18 @@ CREATE INDEX IF NOT EXISTS idx_provenance_source ON code_entity_provenance(sourc
 	_, _ = s.db.Exec(`ALTER TABLE code_entity_provenance ADD COLUMN produced_by_path TEXT NOT NULL DEFAULT ''`)
 	_, _ = s.db.Exec(`ALTER TABLE code_entity_provenance ADD COLUMN server_id TEXT NOT NULL DEFAULT ''`)
 	_, _ = s.db.Exec(`ALTER TABLE code_entity_provenance ADD COLUMN low_confidence INTEGER NOT NULL DEFAULT 0`)
+	// P0.5.T10: content_hash on File entities drives the cold-start
+	// drift scan (SPEC §6.20). Populated for kind=File rows when a
+	// file is ingested; the orchestrator's per-file fast-path skips
+	// re-extract when the stored hash equals the current disk hash.
+	_, _ = s.db.Exec(`ALTER TABLE code_entities ADD COLUMN content_hash TEXT NOT NULL DEFAULT ''`)
+	// P0.5.T18 / SPEC §9.1: kernel_seq_tag stamps every write with
+	// the kernel seq the daemon was at when it issued the write
+	// token. Audit consumers query the column to attribute rows to
+	// the kernel/importer/etc. The column is additive — pre-T18 rows
+	// carry the zero value, which the row-level audit treats as
+	// "legacy, source unverified."
+	_, _ = s.db.Exec(`ALTER TABLE code_entities ADD COLUMN kernel_seq_tag INTEGER NOT NULL DEFAULT 0`)
 	return s.migrateP0Provenance()
 }
 

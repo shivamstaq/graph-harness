@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -58,6 +59,70 @@ type Service struct {
 	// loop can decide when to exit. Wall-clock monotonic.
 	activityMu sync.Mutex
 	lastActive time.Time
+
+	// subs is the SPEC §6.22 long-lived subscriber bookkeeping. One
+	// per Service; lazily constructed on first access to keep tests
+	// that pass nil Log paths working.
+	subsOnce sync.Once
+	subs     *SubscriptionManager
+
+	// trans is the SPEC §6.19 in-memory transient overlay tier.
+	// Same lazy-init pattern as subs.
+	transOnce sync.Once
+	trans     *TransientOverlay
+
+	// router is the SPEC §7.4 / P0.5.T13 Kernel.Route read seam.
+	// All consumer-facing read methods on Service lower through it
+	// so direct Code.* / Overlay.* calls in handler bodies stay at
+	// zero in steady state.
+	routerOnce sync.Once
+	router     *kernel.Router
+}
+
+// Router returns the Service's Kernel.Route surface, lazily installing
+// the layer adapters on first use. CLI/JSON-RPC handlers funnel reads
+// through this router instead of poking at s.Code / s.Overlay()
+// directly (SPEC §7.4).
+func (s *Service) Router() *kernel.Router {
+	s.routerOnce.Do(func() { s.router = installRouter(s) })
+	return s.router
+}
+
+// subscriptions returns the lazily-constructed SubscriptionManager.
+// Each access after the first returns the same instance.
+func (s *Service) subscriptions() *SubscriptionManager {
+	s.subsOnce.Do(func() {
+		s.subs = NewSubscriptionManager(s.Log)
+	})
+	return s.subs
+}
+
+// transient returns the lazily-constructed TransientOverlay. The
+// overlay's overflow sink is wired to emit a kernel.transient
+// TransientTierOverflow event on the kernel bus so subscribers can
+// learn about evictions (SPEC §6.19 + plan §3 gate 10/11). Best-
+// effort: emission failure is logged but does not stop the eviction.
+func (s *Service) transient() *TransientOverlay {
+	s.transOnce.Do(func() {
+		s.trans = NewTransientOverlay()
+		if s.Log != nil {
+			s.trans.SetOverflowSink(func(ev TransientEntry) {
+				payload, _ := json.Marshal(map[string]any{
+					"subscriber_id": ev.SubscriberID,
+					"source_class":  ev.SourceClass,
+					"target_id":     ev.TargetID,
+					"reason":        "lru_eviction",
+				})
+				_, _ = s.Log.Append(context.Background(), []kernel.Event{{
+					Layer:      "kernel.transient",
+					Kind:       "TransientTierOverflow",
+					Payload:    payload,
+					ProducedBy: kernel.SourceLayerInternal,
+				}})
+			})
+		}
+	})
+	return s.trans
 }
 
 // ConflictRecord is one SymbolDisambiguation event surfaced over RPC.
@@ -220,13 +285,29 @@ type SelectorsTestParams struct {
 	Name string `json:"name"`
 }
 
-// SelectorsTest handles selectors.test.
+// SelectorsTest handles selectors.test. Lowers through Kernel.Route
+// rather than calling Overlay().Resolve directly (SPEC §7.4 / P0.5.T13).
 func (s *Service) SelectorsTest(ctx context.Context, p SelectorsTestParams) (*semantic_overlay.ResolutionEnvelope, error) {
 	if p.Name == "" {
 		return nil, errors.New("selector name required")
 	}
-	o := s.Overlay()
-	return o.Resolve(ctx, p.Name, s.Code, s.Log.LastSeq())
+	args, err := json.Marshal(overlayResolveArgs{Name: p.Name})
+	if err != nil {
+		return nil, err
+	}
+	env, err := s.Router().Route(ctx, kernel.RouteRequest{
+		Layer:      "semantic.overlay",
+		Capability: CapOverlayResolveSelector,
+		Args:       args,
+	})
+	if err != nil {
+		return nil, err
+	}
+	var out semantic_overlay.ResolutionEnvelope
+	if err := json.Unmarshal(env.Data, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
 }
 
 // SelectorsPreviewParams supplies a literal anchor + kind for one-shot
@@ -244,24 +325,43 @@ type SelectorsPreviewResult struct {
 	Resolved uint64                             `json:"resolved_at_kernel_seq"`
 }
 
-// SelectorsPreview handles selectors.preview.
+// SelectorsPreview handles selectors.preview. Routes the qualified_name
+// path through Kernel.Route's code.core/lookup_by_qualified_name
+// capability. The qualified_name_suffix branch still uses the direct
+// adapter call: suffix lookups have no router capability declared (the
+// router exposes the exact-match capability only) and adding a suffix
+// capability is deferred to P3 alongside the broader Mangle rule pack.
 func (s *Service) SelectorsPreview(ctx context.Context, p SelectorsPreviewParams) (SelectorsPreviewResult, error) {
 	res := SelectorsPreviewResult{Outcome: "unresolved", Matches: []semantic_overlay.ResolutionMatch{}, Resolved: s.Log.LastSeq()}
 	switch p.Kind {
 	case "qualified_name":
-		ent, err := s.Code.LookupByQualifiedName(ctx, p.Value)
+		args, err := json.Marshal(codeLookupEntityArgs{QualifiedName: p.Value})
 		if err != nil {
 			return res, err
 		}
-		if ent != nil {
-			res.Outcome = "bound"
-			res.Matches = append(res.Matches, semantic_overlay.ResolutionMatch{
-				EntityID:      ent.ID,
-				QualifiedName: ent.QualifiedName,
-				Confidence:    1.0,
-				ViaAnchor:     "qualified_name",
-			})
+		env, err := s.Router().Route(ctx, kernel.RouteRequest{
+			Layer:      "code.core",
+			Capability: CapCodeLookupByQName,
+			Args:       args,
+		})
+		if err != nil {
+			return res, err
 		}
+		res.Resolved = env.ResolvedAtSeq
+		if string(env.Data) == "null" {
+			return res, nil
+		}
+		var ent code_core.Entity
+		if err := json.Unmarshal(env.Data, &ent); err != nil {
+			return res, err
+		}
+		res.Outcome = "bound"
+		res.Matches = append(res.Matches, semantic_overlay.ResolutionMatch{
+			EntityID:      ent.ID,
+			QualifiedName: ent.QualifiedName,
+			Confidence:    1.0,
+			ViaAnchor:     "qualified_name",
+		})
 	case "qualified_name_suffix":
 		ent, err := s.Code.LookupByQualifiedNameSuffix(ctx, p.Value)
 		if err != nil {
@@ -295,25 +395,24 @@ type FlowSummary struct {
 	Steps       int    `json:"steps"`
 }
 
-// FlowsList handles flows.list.
-func (s *Service) FlowsList(_ context.Context) (FlowsListResult, error) {
-	o := s.Overlay()
-	names := make([]string, 0, len(o.Flows))
-	for n := range o.Flows {
-		names = append(names, n)
+// FlowsList handles flows.list. Lowers through Kernel.Route.
+func (s *Service) FlowsList(ctx context.Context) (FlowsListResult, error) {
+	env, err := s.Router().Route(ctx, kernel.RouteRequest{
+		Layer:      "semantic.overlay",
+		Capability: CapOverlayFlowsList,
+	})
+	if err != nil {
+		return FlowsListResult{}, err
 	}
-	sort.Strings(names)
-	out := make([]FlowSummary, 0, len(names))
-	for _, n := range names {
-		f := o.Flows[n]
-		out = append(out, FlowSummary{
-			Name:        f.Name,
-			Description: f.Description,
-			Scope:       f.Scope,
-			Steps:       len(f.Steps),
-		})
+	var rows []FlowSummary
+	if err := json.Unmarshal(env.Data, &rows); err != nil {
+		return FlowsListResult{}, err
 	}
-	return FlowsListResult{Flows: out}, nil
+	sort.Slice(rows, func(i, j int) bool { return rows[i].Name < rows[j].Name })
+	if rows == nil {
+		rows = []FlowSummary{}
+	}
+	return FlowsListResult{Flows: rows}, nil
 }
 
 // QueryParseParams carries the DSL source.
@@ -496,27 +595,29 @@ type EntityProvenanceResult struct {
 // when the entity does not exist so callers can map it to a clear
 // 404-shaped error.
 func (s *Service) EntityProvenance(ctx context.Context, p EntityProvenanceParams) (EntityProvenanceResult, error) {
-	res := EntityProvenanceResult{Resolved: s.Log.LastSeq()}
-	id := p.EntityID
-	if id == "" {
-		if p.QualifiedName == "" {
-			return res, errors.New("entity_id or qualified_name required")
-		}
-		ent, err := s.Code.LookupByQualifiedName(ctx, p.QualifiedName)
-		if err != nil {
-			return res, err
-		}
-		if ent == nil {
-			return res, fmt.Errorf("entity not found: %w", code_core.ErrEntityNotFound)
-		}
-		id = ent.ID
+	if p.EntityID == "" && p.QualifiedName == "" {
+		return EntityProvenanceResult{Resolved: s.Log.LastSeq()}, errors.New("entity_id or qualified_name required")
 	}
-	view, err := s.Code.LookupEntity(ctx, id)
+	args, err := json.Marshal(codeLookupEntityArgs{ID: p.EntityID, QualifiedName: p.QualifiedName})
 	if err != nil {
-		return res, err
+		return EntityProvenanceResult{}, err
 	}
-	res.View = view
-	return res, nil
+	env, err := s.Router().Route(ctx, kernel.RouteRequest{
+		Layer:      "code.core",
+		Capability: CapCodeLookupEntity,
+		Args:       args,
+	})
+	if err != nil {
+		if errors.Is(err, code_core.ErrEntityNotFound) {
+			return EntityProvenanceResult{Resolved: s.Log.LastSeq()}, fmt.Errorf("entity not found: %w", code_core.ErrEntityNotFound)
+		}
+		return EntityProvenanceResult{Resolved: s.Log.LastSeq()}, err
+	}
+	var view code_core.EntityView
+	if err := json.Unmarshal(env.Data, &view); err != nil {
+		return EntityProvenanceResult{}, err
+	}
+	return EntityProvenanceResult{View: view, Resolved: env.ResolvedAtSeq}, nil
 }
 
 // MCPBeforeEditParams targets a selector for pre-edit snapshot capture.

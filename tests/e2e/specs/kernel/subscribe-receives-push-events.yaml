@@ -1,0 +1,95 @@
+# yaml-language-server: $schema=https://github.com/shivamstaq/gotit/raw/main/schema/spec.schema.json
+spec_version: 1
+name: subscribe-receives-push-events
+description: >
+  SPEC §6.22 + P0.5.T01-T03: a JSON-RPC subscriber that calls
+  `kernel.subscribe` receives server-initiated `kernel.event`
+  notifications for every committed event matching the filter. The
+  pump goroutine persists the cursor on `kernel.ack` so reconnect
+  resumes from `last_processed_seq + 1` (the audit-fixed path).
+
+  The CLI surface `graph-harness daemon subscribe --filter <expr>`
+  is the user-facing subscribe wrapper. It dials, identifies, runs
+  kernel.subscribe, and streams notifications to stdout as NDJSON.
+  Two daemons here: the graph-harness daemon serves; the subscriber
+  is a background step that holds the JSON-RPC subscription while
+  a third step adds an entity that the watcher detects, the
+  orchestrator extracts, code.core appends an event for, and the
+  subscriber's pump notification appears in its stdout. Full
+  end-to-end push contract.
+tags: [kernel, subscriptions, p0.5t01, p0.5t02, p0.5t03]
+order: 200
+requires:
+  - feature:p0.5-subscription-push
+  - feature:p0.5-watcher-wired
+repo:
+  helper: go-module-with-checkout-validator
+
+setup:
+  - name: init_workspace
+    command: graph-harness init
+    assert: [{ type: exit_code, expected: 0 }]
+
+  - name: install_overlay
+    command: sh -c "mkdir -p .graph-harness/overlay && cp demo.checkout.gh .graph-harness/overlay/checkout.gh"
+    assert: [{ type: exit_code, expected: 0 }]
+
+daemons:
+  - name: gh-daemon
+    command: sh -c 'GRAPH_HARNESS_DISABLE_LSP=1 graph-harness daemon serve --workspace .'
+    phase: post_setup
+    start_timeout: 15s
+    ready:
+      log_contains: "daemon serving on"
+      timeout: 10s
+    stop:
+      signal: TERM
+      grace: 5s
+      expected_exit: 0
+    log_assert:
+      - { type: not_contains, value: "PANIC" }
+
+steps:
+  - name: subscribe_in_background_holds_jsonrpc_connection
+    # daemon subscribe runs until --max-events fire OR --timeout
+    # elapses. We set both: max-events=1 (one notification is the
+    # property we test), timeout=8s (generous slack for the watcher
+    # round-trip).
+    background: true
+    command: sh -c 'graph-harness daemon subscribe --filter "code.core" --max-events 1 --timeout 8s > $HOME/sub.out 2>&1'
+    ready:
+      # The subscribe command prints the subscription.bound NDJSON
+      # line once kernel.subscribe returns its subscription_id.
+      command: sh -c 'grep -q subscription.bound $HOME/sub.out 2>/dev/null'
+      timeout: 6s
+    stop:
+      signal: TERM
+      grace: 3s
+
+  - name: trigger_event_then_assert_subscriber_received_push
+    # Add a new free function — provokes UnifyChanged → code.core
+    # entity-materialized event on the kernel bus. The background
+    # subscriber's max-events=1 satisfies as soon as the first
+    # `kernel.event` notification arrives.
+    command: |
+      sh -c '
+      printf "\nfunc TriggeredFlow() error { return nil }\n" >> internal/checkout/validator.go
+      # Wait for the subscribe process to exit (max-events satisfied)
+      # — its stdout contains the captured notification.
+      for i in 1 2 3 4 5 6 7 8 9 10 11 12; do
+        sleep 0.5
+        if grep -q "kernel.event" "$HOME/sub.out" 2>/dev/null; then
+          echo "PASS: subscriber received kernel.event push"
+          cat "$HOME/sub.out"
+          exit 0
+        fi
+      done
+      echo "FAIL: subscriber did not receive a kernel.event within budget" >&2
+      cat "$HOME/sub.out" >&2 || true
+      exit 1
+      '
+    assert:
+      - { type: exit_code, expected: 0 }
+      - { type: contains, value: "PASS: subscriber received" }
+      - { type: contains, value: "subscription.bound" }
+      - { type: contains, value: "kernel.event" }

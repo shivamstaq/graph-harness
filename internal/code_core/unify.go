@@ -96,12 +96,26 @@ type idGroup struct {
 // any number of files. Returned entity IDs are deduplicated and
 // returned in canonical (sorted) order so callers can compare across
 // runs without an additional sort.
+//
+// For the change-aware variant the watcher → orchestrator path needs
+// (SPEC §6.21 compare-before-emit), see UnifyChanged.
 func (u *Unifier) Unify(ctx context.Context, syms []source_live.Symbol, seq uint64) ([]string, error) {
+	ids, _, err := u.UnifyChanged(ctx, syms, seq)
+	return ids, err
+}
+
+// UnifyChanged is Unify with an explicit state-transition signal.
+// changed=true iff at least one entity or provenance row was either
+// inserted or had its content fingerprint shift; refreshes of
+// last_seen_seq alone do not count as transitions. The daemon's
+// watch loop drives drift-event emission off this signal so re-
+// extracting an unchanged file produces zero kernel events.
+func (u *Unifier) UnifyChanged(ctx context.Context, syms []source_live.Symbol, seq uint64) ([]string, bool, error) {
 	if u.Store == nil {
-		return nil, fmt.Errorf("code_core.Unifier: Store is nil")
+		return nil, false, fmt.Errorf("code_core.Unifier: Store is nil")
 	}
 	if len(syms) == 0 {
-		return nil, nil
+		return nil, false, nil
 	}
 	threshold := u.DisagreementThreshold
 	if threshold <= 0 {
@@ -158,6 +172,7 @@ func (u *Unifier) Unify(ctx context.Context, syms []source_live.Symbol, seq uint
 	})
 
 	var written []string
+	anyChanged := false
 	for _, k := range locKeys {
 		group := loc[k]
 		distinctIDs := make([]string, 0, len(group))
@@ -168,31 +183,45 @@ func (u *Unifier) Unify(ctx context.Context, syms []source_live.Symbol, seq uint
 
 		for _, id := range distinctIDs {
 			g := group[id]
-			if err := u.writeEntity(ctx, g.entity, g.sources, seq); err != nil {
-				return nil, err
+			changed, err := u.writeEntity(ctx, g.entity, g.sources, seq)
+			if err != nil {
+				return nil, false, err
 			}
+			anyChanged = anyChanged || changed
 			written = append(written, id)
 		}
 
 		if len(distinctIDs) >= threshold {
 			if err := u.emitDisambiguation(ctx, k.path, k.startByte, k.endByte, group, seq); err != nil {
-				return nil, err
+				return nil, false, err
 			}
 		}
 	}
-	return written, nil
+	return written, anyChanged, nil
 }
 
-func (u *Unifier) writeEntity(ctx context.Context, e Entity, sources []SourceEntry, seq uint64) error {
-	if err := u.Store.PutEntity(ctx, e, seq); err != nil {
-		return fmt.Errorf("put entity %s: %w", e.ID, err)
+// writeEntity persists e and its provenance, returning whether the
+// stored state actually changed. changed=false signals a no-op
+// re-observation (per SPEC §6.21 compare-before-emit) — callers may
+// short-circuit downstream event emission accordingly. The
+// transition reflects entity content only; per-source last_seen_seq
+// refreshes are not classified as state transitions.
+func (u *Unifier) writeEntity(ctx context.Context, e Entity, sources []SourceEntry, seq uint64) (bool, error) {
+	entityChanged, err := u.Store.PutEntityIfChanged(ctx, e, seq)
+	if err != nil {
+		return false, fmt.Errorf("put entity %s: %w", e.ID, err)
 	}
+	provChanged := false
 	for _, src := range sources {
-		if err := u.Store.UpsertProvenance(ctx, e.ID, src); err != nil {
-			return fmt.Errorf("upsert provenance %s/%s: %w", e.ID, src.SourceClass, err)
+		changed, err := u.Store.UpsertProvenanceIfChanged(ctx, e.ID, src)
+		if err != nil {
+			return false, fmt.Errorf("upsert provenance %s/%s: %w", e.ID, src.SourceClass, err)
+		}
+		if changed {
+			provChanged = true
 		}
 	}
-	return nil
+	return entityChanged || provChanged, nil
 }
 
 // SymbolDisambiguationPayload is the JSON shape emitted as the
@@ -255,6 +284,24 @@ func (u *Unifier) emitDisambiguation(
 		ids = append(ids, id)
 	}
 	sort.Strings(ids)
+
+	// SPEC §6.21 suppress-at-source: skip re-emission when the same
+	// set of canonical IDs has already claimed this (path, start, end)
+	// location. The dedup index is keyed by the claims fingerprint so
+	// a genuinely new disagreement (different IDs) still fires; only
+	// idempotent re-observation of the same disagreement is suppressed.
+	// Store.MarkDisambiguationEmitted returns false when a row already
+	// exists for this fingerprint; we honor that as "do not emit."
+	if u.Store != nil {
+		hash := DisambiguationClaimsHash(ids)
+		fresh, err := u.Store.MarkDisambiguationEmitted(ctx, path, startByte, endByte, hash, seq)
+		if err != nil {
+			return fmt.Errorf("disambiguation dedup: %w", err)
+		}
+		if !fresh {
+			return nil
+		}
+	}
 	for _, id := range ids {
 		g := group[id]
 		claims = append(claims, SymbolDisambiguationClaim{

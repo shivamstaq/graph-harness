@@ -1,0 +1,63 @@
+# yaml-language-server: $schema=https://github.com/shivamstaq/gotit/raw/main/schema/spec.schema.json
+spec_version: 1
+name: batch-mode-skips-daemon-for-reads
+description: >
+  SPEC §9.11 / P0.5.T16: one-shot read commands invoked with `--batch`
+  (or with `GRAPH_HARNESS_BATCH=1` set) open layer SQLite read-only,
+  pin to the kernel head at startup, and DO NOT spawn the daemon. The
+  invariant matters for CI: deterministic output, no background
+  process, no daemon hydration latency on the critical path.
+
+  Variant: with --batch the daemon is NEVER spawned; without --batch
+  and with no pre-existing daemon, the read still degrades to batch
+  (per SPEC §9.11 "daemon-unavailable + read-only" carve-out) — the
+  spec exercises both halves.
+tags: [daemon, batch, p0.5t16]
+order: 110
+requires:
+  - feature:p0.5-batch-mode
+repo:
+  helper: go-module-with-checkout-validator
+
+setup:
+  - name: init_workspace
+    command: graph-harness init
+    assert: [{ type: exit_code, expected: 0 }]
+
+steps:
+  - name: batch_flag_keeps_daemon_offline
+    # Pre-condition: status shows daemon is not running. Then run
+    # `selectors test --batch` and re-check — the daemon MUST still
+    # be not-running (no auto-spawn for --batch).
+    command: |
+      bash -c '
+      before=$(graph-harness status | awk "/Daemon:/ {print \$NF}")
+      graph-harness selectors test CheckoutValidator --batch --no-lsp --no-scip --json >/dev/null
+      after=$(graph-harness status | awk "/Daemon:/ {print \$NF}")
+      echo "daemon_before=$before daemon_after=$after"
+      if [ "$before" != "running" ] && [ "$after" = "running" ]; then
+        echo "FAIL: --batch spawned the daemon" >&2
+        exit 1
+      fi
+      echo "PASS: --batch left daemon offline"
+      '
+    assert:
+      - { type: exit_code, expected: 0 }
+      - { type: contains, value: "PASS: --batch left daemon offline" }
+
+  - name: env_var_flag_has_same_effect
+    # GRAPH_HARNESS_BATCH=1 mirrors --batch; same invariant.
+    command: |
+      bash -c '
+      before=$(graph-harness status | awk "/Daemon:/ {print \$NF}")
+      GRAPH_HARNESS_BATCH=1 graph-harness selectors test CheckoutValidator --no-lsp --no-scip --json >/dev/null
+      after=$(graph-harness status | awk "/Daemon:/ {print \$NF}")
+      if [ "$before" != "running" ] && [ "$after" = "running" ]; then
+        echo "FAIL: GRAPH_HARNESS_BATCH=1 spawned the daemon" >&2
+        exit 1
+      fi
+      echo "PASS: env-var batch mode left daemon offline"
+      '
+    assert:
+      - { type: exit_code, expected: 0 }
+      - { type: contains, value: "PASS: env-var batch mode" }
