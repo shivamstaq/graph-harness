@@ -1,0 +1,42 @@
+# yaml-language-server: $schema=https://github.com/shivamstaq/gotit/raw/main/schema/spec.schema.json
+spec_version: 1
+name: route-fans-out-and-folds-provenance
+description: >
+  SPEC §7.4 + P0.5.T13: every consumer-facing read lowers through
+  `Kernel.Route(query) → ResultEnvelope`. The envelope carries a
+  stable `resolved_at_kernel_seq` plus the SPEC §4.5 provenance fold
+  (SourceCount, Confidence=min, Freshness=worst, LatestSeenSeq=max).
+
+  Tested via `code provenance` whose JSON output IS the
+  ResultEnvelope.Data shape returned by the router's code.core/
+  lookup_entity capability. The provenance section's keys are the
+  fold-summary the router asserts on every read.
+tags: [kernel, router, provenance, p0.5t13]
+order: 210
+requires:
+  - feature:p0.5-router
+repo:
+  helper: go-module-with-checkout-validator
+
+setup:
+  - name: init_workspace
+    command: graph-harness init
+    assert: [{ type: exit_code, expected: 0 }]
+
+steps:
+  - name: code_provenance_lowers_through_router_envelope
+    # The JSON envelope MUST carry every fold field. Router-lowered
+    # reads stamp resolved_at_kernel_seq; the entity view carries
+    # the provenance summary (source_count, confidence, freshness,
+    # latest_seen_seq) plus the per-source claim list.
+    command: graph-harness code provenance "checkout.CheckoutValidator.Validate" --batch --no-lsp --no-scip --json
+    assert:
+      - { type: exit_code, expected: 0 }
+      - { type: contains, value: "\"provenance\"" }
+      - { type: contains, value: "\"summary\"" }
+      - { type: contains, value: "\"source_count\"" }
+      - { type: contains, value: "\"confidence\"" }
+      - { type: contains, value: "\"freshness\"" }
+      - { type: contains, value: "\"latest_seen_seq\"" }
+      - { type: contains, value: "\"sources\"" }
+      - { type: contains, value: "structural_treesitter" }

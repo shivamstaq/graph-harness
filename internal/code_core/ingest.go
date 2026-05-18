@@ -17,12 +17,26 @@ import (
 // path used by the watcher / parse-on-edit loop.
 //
 // Returns the materialized entity IDs in order (File first, then
-// each Function/Method in declaration order).
+// each Function/Method in declaration order). For the change-aware
+// variant used by the watcher → orchestrator path (SPEC §6.21
+// compare-before-emit), see IngestParsedFileWithChange.
 func (s *Store) IngestParsedFile(ctx context.Context, pf *source_live.ParsedFile, createdSeq uint64) ([]string, error) {
+	ids, _, err := s.IngestParsedFileWithChange(ctx, pf, createdSeq)
+	return ids, err
+}
+
+// IngestParsedFileWithChange is IngestParsedFile with an explicit
+// changed-or-not signal. Watcher-driven re-extracts that observe an
+// unchanged file produce changed=false; the daemon orchestrator
+// skips drift-event emission accordingly. Returns the materialized
+// entity IDs and the aggregate change flag (OR across every entity
+// touched).
+func (s *Store) IngestParsedFileWithChange(ctx context.Context, pf *source_live.ParsedFile, createdSeq uint64) ([]string, bool, error) {
 	if pf == nil {
-		return nil, nil
+		return nil, false, nil
 	}
 	out := make([]string, 0, 1+len(pf.Functions))
+	anyChanged := false
 
 	// File entity.
 	fileEnt := Entity{
@@ -32,12 +46,15 @@ func (s *Store) IngestParsedFile(ctx context.Context, pf *source_live.ParsedFile
 		QualifiedName: pf.Path,
 		Path:          pf.Path,
 	}
-	if err := s.PutEntity(ctx, fileEnt, createdSeq); err != nil {
-		return nil, fmt.Errorf("put file entity: %w", err)
+	entChanged, err := s.PutEntityIfChanged(ctx, fileEnt, createdSeq)
+	if err != nil {
+		return nil, false, fmt.Errorf("put file entity: %w", err)
 	}
-	if err := s.UpsertProvenance(ctx, fileEnt.ID, treesitterEntry(createdSeq)); err != nil {
-		return nil, fmt.Errorf("provenance file entity: %w", err)
+	provChanged, err := s.UpsertProvenanceIfChanged(ctx, fileEnt.ID, treesitterEntry(createdSeq))
+	if err != nil {
+		return nil, false, fmt.Errorf("provenance file entity: %w", err)
 	}
+	anyChanged = anyChanged || entChanged || provChanged
 	out = append(out, fileEnt.ID)
 
 	for _, fn := range pf.Functions {
@@ -65,15 +82,18 @@ func (s *Store) IngestParsedFile(ctx context.Context, pf *source_live.ParsedFile
 				NormalizedSignature: ns,
 			}
 		}
-		if err := s.PutEntity(ctx, ent, createdSeq); err != nil {
-			return nil, fmt.Errorf("put function entity %s: %w", fn.QualifiedName, err)
+		entChanged, err := s.PutEntityIfChanged(ctx, ent, createdSeq)
+		if err != nil {
+			return nil, false, fmt.Errorf("put function entity %s: %w", fn.QualifiedName, err)
 		}
-		if err := s.UpsertProvenance(ctx, ent.ID, treesitterEntry(createdSeq)); err != nil {
-			return nil, fmt.Errorf("provenance function entity %s: %w", fn.QualifiedName, err)
+		provChanged, err := s.UpsertProvenanceIfChanged(ctx, ent.ID, treesitterEntry(createdSeq))
+		if err != nil {
+			return nil, false, fmt.Errorf("provenance function entity %s: %w", fn.QualifiedName, err)
 		}
+		anyChanged = anyChanged || entChanged || provChanged
 		out = append(out, ent.ID)
 	}
-	return out, nil
+	return out, anyChanged, nil
 }
 
 // treesitterEntry returns the canonical SourceEntry for a tree-sitter

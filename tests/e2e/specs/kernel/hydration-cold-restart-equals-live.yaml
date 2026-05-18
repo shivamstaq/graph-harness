@@ -1,0 +1,62 @@
+# yaml-language-server: $schema=https://github.com/shivamstaq/gotit/raw/main/schema/spec.schema.json
+spec_version: 1
+name: hydration-cold-restart-equals-live
+description: >
+  SPEC §6.20 + P0.5.T10/T11: daemon cold-restart produces the same
+  materialized state as continuous live observation. After a fresh
+  workspace + initial index, stopping and restarting the daemon (and
+  re-running an extract) yields a kernel head equal to the live-
+  observed value — no new events emitted by hydration, no entities
+  dropped or duplicated.
+
+  The Go-native property test
+  `internal/daemon/hydration_test.go::TestHydration_ColdRestartEqualsLiveObservation`
+  asserts byte-identity over the materialized rows. This e2e
+  variant proves the externally visible kernel head matches across
+  a cold-restart cycle on the daemon CLI surface — the user-visible
+  manifestation of the same invariant.
+tags: [kernel, hydration, p0.5t10, p0.5t11]
+order: 220
+requires:
+  - feature:p0.5-hydration-parity
+repo:
+  helper: go-module-with-checkout-validator
+
+setup:
+  - name: init_workspace
+    command: graph-harness init
+    assert: [{ type: exit_code, expected: 0 }]
+
+  - name: install_overlay
+    command: sh -c "mkdir -p .graph-harness/overlay && cp demo.checkout.gh .graph-harness/overlay/checkout.gh"
+    assert: [{ type: exit_code, expected: 0 }]
+
+  - name: warm_index_and_capture_seq
+    # First extract populates code.core. The selectors test --batch
+    # runs the orchestrator inline; subsequent `status` reads the
+    # head from the persistent event log.
+    command: graph-harness selectors test CheckoutValidator --batch --no-lsp --no-scip --json
+    assert: [{ type: exit_code, expected: 0 }]
+
+steps:
+  - name: cold_restart_does_not_drift_kernel_head
+    # Capture head, simulate daemon restart by stopping any running
+    # daemon, re-run the same extract, capture head again. Since the
+    # source is unchanged the head MUST match (compare-before-emit
+    # suppresses everything; cold-start drift scan finds no diff).
+    command: |
+      bash -c '
+      before=$(graph-harness status | awk "/Last seq:/ {print \$NF}")
+      graph-harness daemon stop >/dev/null 2>&1 || true
+      graph-harness selectors test CheckoutValidator --batch --no-lsp --no-scip --json >/dev/null
+      after=$(graph-harness status | awk "/Last seq:/ {print \$NF}")
+      echo "head_before=$before head_after=$after"
+      if [ "$before" != "$after" ]; then
+        echo "FAIL: kernel head drifted on cold-restart re-extract" >&2
+        exit 1
+      fi
+      echo "PASS: cold-restart head equals live-observed head"
+      '
+    assert:
+      - { type: exit_code, expected: 0 }
+      - { type: contains, value: "PASS: cold-restart head equals" }

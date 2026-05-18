@@ -11,10 +11,13 @@ import (
 
 	"github.com/shivamstaq/graph-harness/internal/daemon"
 	"github.com/shivamstaq/graph-harness/internal/facts"
+	"github.com/shivamstaq/graph-harness/internal/jsonrpc"
 	"github.com/shivamstaq/graph-harness/internal/kernel"
 )
 
-// newStatusCmd implements `graph-harness status`. P0.T14.
+// newStatusCmd implements `graph-harness status`. P0.T14 +
+// P0.5.T15 daemon routing: when the daemon is running, asks it for
+// status; otherwise reads the event log directly.
 func newStatusCmd() *cobra.Command {
 	c := &cobra.Command{
 		Use:   "status",
@@ -34,7 +37,29 @@ func newStatusCmd() *cobra.Command {
 			_, _ = fmt.Fprintf(out, "Socket:      %s\n", ws.SocketPath)
 			_, _ = fmt.Fprintf(out, "Event log:   %s\n", ws.EventLog)
 
-			seq, _ := tryLastSeq(ws.EventLog)
+			// Daemon-canonical seq read: dial if running so we
+			// avoid the SQLite open path. status does not auto-
+			// spawn the daemon — it is a probe command and must
+			// not have side-effects.
+			seq := uint64(0)
+			daemonStatus := "not running"
+			st := daemon.Inspect(ws)
+			if st.Running {
+				daemonStatus = fmt.Sprintf("running (pid=%d)", st.PID)
+				if client, derr := jsonrpc.Dial(cmd.Context(), ws.SocketPath); derr == nil {
+					var rpcStat struct {
+						LastSeq uint64 `json:"last_seq"`
+					}
+					if err := client.Call(cmd.Context(), "status", nil, &rpcStat); err == nil {
+						seq = rpcStat.LastSeq
+					}
+					_ = client.Close()
+				}
+			}
+			if seq == 0 {
+				seq, _ = tryLastSeq(ws.EventLog)
+			}
+			_, _ = fmt.Fprintf(out, "Daemon:      %s\n", daemonStatus)
 			_, _ = fmt.Fprintf(out, "Last seq:    %d\n", seq)
 			return nil
 		},
