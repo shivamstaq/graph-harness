@@ -1,0 +1,94 @@
+# yaml-language-server: $schema=https://github.com/shivamstaq/gotit/raw/main/schema/spec.schema.json
+spec_version: 1
+name: file-removed-cascades-symbol-deleted
+description: >
+  F7 / SPEC §6.20 hydration model: removing a watched source file
+  emits one `code.core.SymbolDeleted` event per child entity BEFORE
+  the parent `code.core.FileRemoved`. Subscribers see a deterministic
+  per-symbol drift cascade rather than just the File-level signal.
+
+  The internal/daemon/symbol_deleted_test.go Go test exercises the
+  cascade at the in-process level; this spec validates the same
+  contract end-to-end via the public `daemon subscribe` surface.
+tags: [substrate, watcher, symbol-deleted, p0.5t10, f7]
+order: 285
+requires:
+  - feature:p0.5-watcher-wired
+  - feature:p0.5-subscription-push
+repo:
+  helper: go-module-with-checkout-validator
+
+setup:
+  - name: init_workspace
+    command: graph-harness init
+    assert: [{ type: exit_code, expected: 0 }]
+
+  - name: seed_extra_file_with_multiple_functions
+    command: |
+      sh -c '
+      cat > internal/checkout/cascade.go <<EOF
+      package checkout
+
+      func CascadeAlpha() error { return nil }
+      func CascadeBeta() error  { return nil }
+      func CascadeGamma() error { return nil }
+      EOF
+      '
+    assert: [{ type: exit_code, expected: 0 }]
+
+daemons:
+  - name: gh-daemon
+    command: sh -c 'GRAPH_HARNESS_DISABLE_LSP=1 graph-harness daemon serve --workspace .'
+    phase: post_setup
+    start_timeout: 15s
+    ready:
+      log_contains: "daemon serving on"
+      timeout: 10s
+    stop:
+      signal: TERM
+      grace: 5s
+      expected_exit: 0
+    log_assert:
+      - { type: not_contains, value: "PANIC" }
+
+steps:
+  - name: subscribe_then_remove_file_assert_cascade
+    command: |
+      sh -c '
+      # Subscribe to code.core events. We expect 4 events (3
+      # SymbolDeleted + 1 FileRemoved) but the daemon emits them
+      # one per Append so --max-events 4 captures the burst.
+      graph-harness daemon subscribe \
+        --filter "code.core" \
+        --max-events 4 \
+        --timeout 10s > $HOME/sub.out 2>&1 &
+      SUB_PID=$!
+      for i in 1 2 3 4 5 6 7 8 9 10; do
+        sleep 0.2
+        grep -q subscription.bound $HOME/sub.out 2>/dev/null && break
+      done
+
+      # Remove the file; cascade must fire.
+      rm internal/checkout/cascade.go
+
+      wait $SUB_PID || true
+      cat $HOME/sub.out
+
+      SD_COUNT=$(grep -c "SymbolDeleted" $HOME/sub.out || true)
+      FR_COUNT=$(grep -c "FileRemoved" $HOME/sub.out || true)
+      echo "SymbolDeleted=$SD_COUNT FileRemoved=$FR_COUNT"
+      if [ "$SD_COUNT" -lt 3 ]; then
+        echo "FAIL: expected >=3 SymbolDeleted events; got $SD_COUNT" >&2
+        exit 1
+      fi
+      if [ "$FR_COUNT" -lt 1 ]; then
+        echo "FAIL: expected >=1 FileRemoved event; got $FR_COUNT" >&2
+        exit 1
+      fi
+      echo "PASS: cascade fired ($SD_COUNT SymbolDeleted + $FR_COUNT FileRemoved)"
+      '
+    assert:
+      - { type: exit_code, expected: 0 }
+      - { type: contains, value: "PASS: cascade fired" }
+      - { type: contains, value: "SymbolDeleted" }
+      - { type: contains, value: "FileRemoved" }

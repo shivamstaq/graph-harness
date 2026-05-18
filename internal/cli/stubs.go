@@ -45,8 +45,8 @@ func newFlowsCmd() *cobra.Command {
 	addBatchFlag(fl)
 	c.AddCommand(
 		fl,
-		&cobra.Command{Use: "create", Short: "Scaffold a new flow", RunE: stub("P0.T27")},
-		&cobra.Command{Use: "edit <name>", Short: "Edit a flow in $EDITOR", Args: cobra.ExactArgs(1), RunE: stub("P0.T27")},
+		newFlowsCreateCmd(),
+		newFlowsEditCmd(),
 	)
 	return c
 }
@@ -72,6 +72,7 @@ func newStudioCmd() *cobra.Command {
 	c := newStudioCmdReal()
 	c.Flags().Int("port", 0, "loopback port (0 = ephemeral)")
 	c.Flags().Bool("oneshot", false, "bind, print URL, then exit (CI-friendly)")
+	c.Flags().Bool("check", false, "resolve the consumer and exit 0 (smoke surface for daemon-routed CI)")
 	return c
 }
 

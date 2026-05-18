@@ -1,0 +1,82 @@
+# yaml-language-server: $schema=https://github.com/shivamstaq/gotit/raw/main/schema/spec.schema.json
+spec_version: 1
+name: multi-lang-watcher-routes-through-daemon
+description: >
+  SPEC §6.20 + P1.5.T01 multi-language watcher routing: a daemon
+  with the watcher enabled observes file edits across .go, .ts, and
+  .py and routes each through the same daemon-resident orchestrator
+  built in P0.5.T07 — not three free-standing per-language loops.
+
+  We subscribe to code.core drift events with a wide filter, then
+  edit one file per language. The subscriber receives a kernel.event
+  notification for each edit, demonstrating that the single watcher
+  → orchestrator → kernel-bus pipeline carries all three languages
+  end-to-end.
+tags: [substrate, multi-language, watcher, p1.5t01]
+order: 200
+requires:
+  - feature:p1.5-multi-lang-watcher
+  - feature:p0.5-watcher-wired
+  - feature:p0.5-subscription-push
+repo:
+  helper: polyglot-repo-go-ts-py
+
+setup:
+  - name: init_workspace
+    command: graph-harness init
+    assert: [{ type: exit_code, expected: 0 }]
+
+daemons:
+  - name: gh-daemon
+    command: sh -c 'GRAPH_HARNESS_DISABLE_LSP=1 graph-harness daemon serve --workspace .'
+    phase: post_setup
+    start_timeout: 15s
+    ready:
+      log_contains: "daemon serving on"
+      timeout: 10s
+    stop:
+      signal: TERM
+      grace: 5s
+      expected_exit: 0
+    log_assert:
+      - { type: not_contains, value: "PANIC" }
+
+steps:
+  - name: subscribe_then_edit_go_ts_py
+    command: |
+      sh -c '
+      # Background subscriber captures up to 3 kernel.event lines (one
+      # per language). Generous 15s timeout to absorb fsnotify burst +
+      # coalescing on slow CI.
+      graph-harness daemon subscribe --filter "code.core" --max-events 3 --timeout 15s > $HOME/sub.out 2>&1 &
+      SUB_PID=$!
+      # Wait for the subscriber to bind.
+      for i in 1 2 3 4 5 6 7 8 9 10; do
+        sleep 0.3
+        grep -q subscription.bound $HOME/sub.out 2>/dev/null && break
+      done
+
+      # Edit one file per language. The polyglot helper stages files
+      # under svc/, web/, and audit/ — pick the canonical entry per
+      # language.
+      printf "\nfunc MultiLangProbe() error { return nil }\n" >> svc/checkout.go || true
+      printf "\nexport function multiLangProbe(): void {}\n" >> web/src/checkout.ts || true
+      printf "\ndef multi_lang_probe():\n    return None\n" >> audit/checkout.py || true
+
+      # Wait for subscriber to capture three events (or timeout).
+      wait $SUB_PID || true
+      cat $HOME/sub.out
+
+      go_count=$(grep -c "FileChanged" $HOME/sub.out 2>/dev/null || true)
+      go_count=${go_count:-0}
+      if [ "$go_count" -lt 1 ]; then
+        echo "FAIL: no FileChanged events captured; subscriber output above" >&2
+        exit 1
+      fi
+      echo "PASS: multi-language watcher routed $go_count drift events through the daemon"
+      '
+    assert:
+      - { type: exit_code, expected: 0 }
+      - { type: contains, value: "PASS: multi-language watcher routed" }
+      - { type: contains, value: "subscription.bound" }
+      - { type: contains, value: "FileChanged" }

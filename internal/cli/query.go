@@ -11,6 +11,7 @@ import (
 
 	"github.com/shivamstaq/graph-harness/internal/dsl"
 	"github.com/shivamstaq/graph-harness/internal/facts"
+	"github.com/shivamstaq/graph-harness/internal/jsonrpc"
 )
 
 // newQueryCmdReal implements `graph-harness query <dsl>` (P0.T17). v0
@@ -18,6 +19,11 @@ import (
 // Until then, query parses the DSL, validates Phase-0 surface restrictions,
 // and emits a JSON AST envelope so agents can compose against the grammar
 // even before evaluation is wired.
+//
+// Daemon-canonical routing (P1.5.T06): when a daemon is running, the
+// query parses through the daemon's query.parse RPC so the workspace
+// stays single-writer. Without a daemon the command opens the event
+// log read-only — same SPEC §9.11 fallback as `selectors test`.
 func newQueryCmdReal() *cobra.Command {
 	return &cobra.Command{
 		Use:   "query [dsl]",
@@ -27,12 +33,6 @@ func newQueryCmdReal() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			log, err := facts.OpenEventLog(ws.EventLog)
-			if err != nil {
-				return err
-			}
-			defer func() { _ = log.Close() }()
-
 			var src string
 			if len(args) > 0 {
 				src = strings.Join(args, " ")
@@ -40,11 +40,38 @@ func newQueryCmdReal() *cobra.Command {
 			if src == "" {
 				return fmt.Errorf("query DSL is required (positional arg or stdin)")
 			}
+
+			ctx := cmd.Context()
+			handle, err := ResolveRoute(ctx, ws, RouteOptions{})
+			if err != nil {
+				return err
+			}
+			defer func() { _ = handle.Close() }()
+			out := cmd.OutOrStdout()
+
+			if handle.Mode == ModeDaemon {
+				var res jsonrpc.QueryParseResult
+				if err := handle.Client.Call(ctx, "query.parse",
+					jsonrpc.QueryParseParams{Source: src}, &res); err != nil {
+					return err
+				}
+				return json.NewEncoder(out).Encode(map[string]any{
+					"resolved_at_kernel_seq": res.ResolvedAtKernelSeq,
+					"declarations":           res.DeclarationCount,
+					"canonical_gh":           res.CanonicalGH,
+				})
+			}
+
+			// Batch fallback (daemon unavailable).
+			log, err := facts.OpenEventLog(ws.EventLog)
+			if err != nil {
+				return err
+			}
+			defer func() { _ = log.Close() }()
 			f, err := dsl.ParseString("inline.gh", src)
 			if err != nil {
 				return err
 			}
-			out := cmd.OutOrStdout()
 			rendered := dsl.Render(f)
 			env := map[string]any{
 				"resolved_at_kernel_seq": log.LastSeq(),

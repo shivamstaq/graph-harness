@@ -1,0 +1,45 @@
+# yaml-language-server: $schema=https://github.com/shivamstaq/gotit/raw/main/schema/spec.schema.json
+spec_version: 1
+name: daemon-lazy-spawn-on-first-cli
+description: >
+  plan/00 §7 kernel: the first CLI invocation that requires a
+  writer (review submit, overlay save) auto-spawns the daemon
+  under EnsureRunning. Subsequent invocations connect to the
+  already-running daemon.
+tags: [kernel, daemon, lifecycle, p0]
+order: 50
+requires:
+  - feature:p0.5-watcher-wired
+repo:
+  helper: go-module-empty
+
+setup:
+  - name: init_workspace
+    command: graph-harness init
+    assert: [{ type: exit_code, expected: 0 }]
+
+  - name: assert_no_daemon_initially
+    command: graph-harness daemon status
+    assert:
+      - { type: exit_code, expected: 0 }
+      - { type: contains, value: "not running" }
+
+steps:
+  - name: writer_command_auto_spawns_daemon
+    command: |
+      sh -c '
+      graph-harness review submit \
+        --layer semantic.overlay \
+        --kind selector \
+        --payload "{}" > $HOME/submit.out 2>&1
+      cat $HOME/submit.out
+      graph-harness daemon status > $HOME/status.out
+      grep -q running $HOME/status.out
+      '
+    assert:
+      - { type: exit_code, expected: 0 }
+
+  - name: cleanup_stop_daemon
+    command: graph-harness daemon stop
+    assert:
+      - { type: exit_code, expected: 0 }

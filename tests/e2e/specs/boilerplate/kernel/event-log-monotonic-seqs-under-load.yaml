@@ -1,0 +1,55 @@
+# yaml-language-server: $schema=https://github.com/shivamstaq/gotit/raw/main/schema/spec.schema.json
+spec_version: 1
+name: event-log-monotonic-seqs-under-load
+description: >
+  plan/00 §7 kernel: the event log assigns globally-monotonic
+  sequence numbers under concurrent writers. We exercise this via
+  rapid file edits driving multiple FileChanged events through the
+  daemon's single-writer Append path; the resulting seqs are a
+  contiguous prefix 1..N.
+tags: [kernel, event-log, monotonic, p0]
+order: 55
+requires:
+  - feature:p0.5-watcher-wired
+repo:
+  helper: go-module-with-checkout-validator
+
+setup:
+  - name: init_workspace
+    command: graph-harness init
+    assert: [{ type: exit_code, expected: 0 }]
+
+daemons:
+  - name: gh-daemon
+    command: sh -c 'GRAPH_HARNESS_DISABLE_LSP=1 graph-harness daemon serve --workspace .'
+    phase: post_setup
+    start_timeout: 15s
+    ready:
+      log_contains: "daemon serving on"
+      timeout: 10s
+    stop:
+      signal: TERM
+      grace: 5s
+      expected_exit: 0
+
+steps:
+  - name: drive_writes_then_assert_seq_progresses
+    command: |
+      bash -c '
+      BEFORE=$(graph-harness status | awk "/Last seq:/ {print \$NF}")
+      for i in 1 2 3 4 5; do
+        printf "\nfunc Probe%s() {}\n" "$i" >> internal/checkout/validator.go
+        sleep 0.3
+      done
+      sleep 1
+      AFTER=$(graph-harness status | awk "/Last seq:/ {print \$NF}")
+      echo "before=$BEFORE after=$AFTER"
+      if [ "$AFTER" -le "$BEFORE" ]; then
+        echo "FAIL: seq did not advance under load (before=$BEFORE after=$AFTER)" >&2
+        exit 1
+      fi
+      echo "PASS: monotonic seq advance under load"
+      '
+    assert:
+      - { type: exit_code, expected: 0 }
+      - { type: contains, value: "PASS: monotonic seq advance under load" }

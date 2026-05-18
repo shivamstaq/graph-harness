@@ -127,18 +127,44 @@ func TestEventLog_SubscribeWithFilterDropsNonMatches(t *testing.T) {
 func TestEventLog_CursorRoundTrip(t *testing.T) {
 	log := newTestEventLog(t)
 	ctx := context.Background()
-	if err := log.AdvanceCursor(ctx, "code.core", 42); err != nil {
+	if err := log.AdvanceCursor(ctx, "code.core", "", 42); err != nil {
 		t.Fatalf("advance: %v", err)
 	}
-	if err := log.AdvanceCursor(ctx, "code.core", 100); err != nil {
+	if err := log.AdvanceCursor(ctx, "code.core", "", 100); err != nil {
 		t.Fatalf("advance: %v", err)
 	}
-	got, err := log.CursorOf(ctx, "code.core")
+	got, err := log.CursorOf(ctx, "code.core", "")
 	if err != nil {
 		t.Fatalf("cursor: %v", err)
 	}
 	if got != 100 {
 		t.Errorf("cursor = %d, want 100", got)
+	}
+}
+
+// TestEventLog_PerSubscriptionCursors exercises F8 / P0.5.T02: two
+// subscriptions under the same subscriber_id with different
+// subscription_name values persist independent cursors. Without the
+// compound PK the second AdvanceCursor would overwrite the first.
+func TestEventLog_PerSubscriptionCursors(t *testing.T) {
+	log := newTestEventLog(t)
+	ctx := context.Background()
+	if err := log.AdvanceCursor(ctx, "ide-vscode", "code.core", 17); err != nil {
+		t.Fatalf("advance code.core: %v", err)
+	}
+	if err := log.AdvanceCursor(ctx, "ide-vscode", "semantic.overlay", 42); err != nil {
+		t.Fatalf("advance semantic.overlay: %v", err)
+	}
+	if got, _ := log.CursorOf(ctx, "ide-vscode", "code.core"); got != 17 {
+		t.Errorf("code.core cursor: want 17, got %d", got)
+	}
+	if got, _ := log.CursorOf(ctx, "ide-vscode", "semantic.overlay"); got != 42 {
+		t.Errorf("semantic.overlay cursor: want 42, got %d", got)
+	}
+	// The unscoped query (legacy "") must NOT collide with either named
+	// row; absent rows return zero.
+	if got, _ := log.CursorOf(ctx, "ide-vscode", ""); got != 0 {
+		t.Errorf("unscoped cursor: want 0 (no row), got %d", got)
 	}
 }
 

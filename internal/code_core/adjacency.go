@@ -15,17 +15,45 @@ import (
 // the adjacency table that backs `calls` / `references` traversal (SPEC §6.14
 // — adjacency in SQLite + planner BFS, no property-graph DB).
 //
-// Trust enforcement (P0.5.T18 / SPEC §9.1): when a TrustPolicy is
-// attached via SetTrustPolicy, writes via PutEntityWithToken refuse
-// to commit if the supplied kernel.WriteToken is invalid or fails
-// the policy's Verify check. The legacy PutEntity / IngestParsedFile
-// paths remain available during the migration window; both will be
-// retired once every daemon writer goes through the tokenized API.
+// Trust enforcement (P0.5.T18 + P1.5.T07 / SPEC §9.1): when a
+// TrustPolicy is attached via SetTrustPolicy, every write seam
+// (PutEntity, UpsertProvenance, AddRelation) consults it. In non-
+// strict mode the policy is permissive — writes are stamped with
+// the supplied createdSeq into kernel_seq_tag but no rejection
+// happens. In strict mode (TrustPolicy.SetStrict(true)) writes
+// without an explicit kernel.WriteToken require the Store to carry
+// a token-issuer (installed by the daemon at boot); writes that
+// reach the seam with no issuer + no explicit token + no whitelist
+// fail with kernel.ErrMissingKernelSeqTag.
+//
+// The kernel_seq_tag column is additive across code_entities,
+// code_entity_provenance, and code_relations — every row stamped
+// at write time so AuditUntagged* can verify the writer-monopoly
+// invariant.
 type Store struct {
 	db *sql.DB
 
 	trustMu sync.RWMutex
 	trust   *kernel.TrustPolicy
+	issuer  TokenIssuer
+}
+
+// TokenIssuer mints a WriteToken at a given kernel seq. The daemon
+// installs an issuer that consults its TrustPolicy.IssueWriteToken so
+// in-process write seams (Unifier, Orchestrator, IngestParsedFile)
+// can synthesize a valid token without threading the policy through
+// every call signature. External callers without a policy installed
+// hit the permissive legacy path.
+type TokenIssuer interface {
+	IssueWriteToken(seq uint64) kernel.WriteToken
+}
+
+// TokenIssuerFunc adapts a plain function to TokenIssuer.
+type TokenIssuerFunc func(seq uint64) kernel.WriteToken
+
+// IssueWriteToken satisfies TokenIssuer.
+func (f TokenIssuerFunc) IssueWriteToken(seq uint64) kernel.WriteToken {
+	return f(seq)
 }
 
 // NewStore wraps an opened *sql.DB and ensures the schema exists.
@@ -69,11 +97,60 @@ func (s *Store) SetTrustPolicy(p *kernel.TrustPolicy) {
 	s.trustMu.Unlock()
 }
 
+// SetTokenIssuer installs an in-process token issuer. The daemon
+// installs `TokenIssuerFunc(policy.IssueWriteToken)` at boot so
+// untokenized writes from in-daemon code paths auto-mint a daemon-
+// authority token, while external callers (lacking the issuer)
+// hit the strict-mode rejection seam.
+func (s *Store) SetTokenIssuer(t TokenIssuer) {
+	s.trustMu.Lock()
+	s.issuer = t
+	s.trustMu.Unlock()
+}
+
 // trustPolicy returns the installed policy (nil if none).
 func (s *Store) trustPolicy() *kernel.TrustPolicy {
 	s.trustMu.RLock()
 	defer s.trustMu.RUnlock()
 	return s.trust
+}
+
+// tokenIssuer returns the installed issuer (nil if none).
+func (s *Store) tokenIssuer() TokenIssuer {
+	s.trustMu.RLock()
+	defer s.trustMu.RUnlock()
+	return s.issuer
+}
+
+// authorizeImplicitWrite is the shared trust-policy check that
+// PutEntity / UpsertProvenance / AddRelation invoke when called
+// without an explicit WriteToken. In non-strict mode it always
+// permits and returns the resolved seq tag (the caller's seq).
+// In strict mode it requires an issuer to be installed; the
+// issuer mints a token at the caller's seq which is then verified.
+// Returns (seqTag, nil) on success, (0, ErrMissingKernelSeqTag)
+// when strict-mode enforcement rejects the write.
+func (s *Store) authorizeImplicitWrite(seq uint64) (uint64, error) {
+	policy := s.trustPolicy()
+	if policy == nil {
+		// No policy installed — permissive (legacy / test path).
+		return seq, nil
+	}
+	if !policy.IsStrict() {
+		// Policy installed but not strict — stamp tag, no enforcement.
+		return seq, nil
+	}
+	issuer := s.tokenIssuer()
+	if issuer == nil {
+		// Strict mode + no issuer = no way for in-process code to
+		// authorize a write. Reject so the audit catches the gap.
+		return 0, fmt.Errorf("code.core: strict trust mode requires a token issuer: %w", kernel.ErrMissingKernelSeqTag)
+	}
+	tok := issuer.IssueWriteToken(seq)
+	if err := policy.Verify(tok, seq); err != nil {
+		return 0, fmt.Errorf("code.core: write rejected: %w", err)
+	}
+	return tok.Seq(), nil
 }
 
 // PutEntityWithToken is the kernel-canonical write path. It verifies
@@ -136,6 +213,53 @@ func (s *Store) AuditUntaggedRows(ctx context.Context, minLegacySeq uint64) ([]s
 			return nil, err
 		}
 		out = append(out, id)
+	}
+	return out, rows.Err()
+}
+
+// AuditUntaggedProvenance returns (entity_id, source_class) pairs for
+// every code_entity_provenance row whose kernel_seq_tag is zero AND
+// last_seen_seq > minLegacySeq. Mirrors AuditUntaggedRows for the
+// provenance table (P1.5.T07).
+func (s *Store) AuditUntaggedProvenance(ctx context.Context, minLegacySeq uint64) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT entity_id || '/' || source_class FROM code_entity_provenance
+		 WHERE kernel_seq_tag = 0 AND last_seen_seq > ?`,
+		minLegacySeq)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var out []string
+	for rows.Next() {
+		var k string
+		if err := rows.Scan(&k); err != nil {
+			return nil, err
+		}
+		out = append(out, k)
+	}
+	return out, rows.Err()
+}
+
+// AuditUntaggedRelations returns (relation, from_id, to_id) tuples
+// for every code_relations row whose kernel_seq_tag is zero. Relations
+// do not carry a created_seq column today; the audit reports every
+// legacy row so post-migration smoke tests catch any direct write.
+func (s *Store) AuditUntaggedRelations(ctx context.Context) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT relation || '/' || from_id || '->' || to_id FROM code_relations
+		 WHERE kernel_seq_tag = 0`)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var out []string
+	for rows.Next() {
+		var k string
+		if err := rows.Scan(&k); err != nil {
+			return nil, err
+		}
+		out = append(out, k)
 	}
 	return out, rows.Err()
 }
@@ -230,6 +354,12 @@ CREATE TABLE IF NOT EXISTS code_core_emitted_disambiguations (
 	// carry the zero value, which the row-level audit treats as
 	// "legacy, source unverified."
 	_, _ = s.db.Exec(`ALTER TABLE code_entities ADD COLUMN kernel_seq_tag INTEGER NOT NULL DEFAULT 0`)
+	// P1.5.T07: extend the writer-monopoly tag to provenance and
+	// relations so AuditUntagged* covers every code.core write seam,
+	// not just code_entities. Additive ALTERs; pre-T07 rows carry
+	// the zero value (audit treats as legacy).
+	_, _ = s.db.Exec(`ALTER TABLE code_entity_provenance ADD COLUMN kernel_seq_tag INTEGER NOT NULL DEFAULT 0`)
+	_, _ = s.db.Exec(`ALTER TABLE code_relations ADD COLUMN kernel_seq_tag INTEGER NOT NULL DEFAULT 0`)
 	return s.migrateP0Provenance()
 }
 
@@ -254,13 +384,26 @@ WHERE id NOT IN (SELECT entity_id FROM code_entity_provenance)
 // (same id) — entity identity is content-addressable, so an upsert at the
 // same id with different mutable fields (e.g. body_hash) reflects the
 // latest observation rather than producing a new row.
+//
+// Trust enforcement (P0.5.T18 + P1.5.T07): when a TrustPolicy is
+// installed, PutEntity routes through authorizeImplicitWrite. Strict
+// mode requires a TokenIssuer to be attached to the Store (the daemon
+// installs one at boot); without one the write fails with
+// ErrMissingKernelSeqTag. The row's kernel_seq_tag column is stamped
+// with the resolved seq so AuditUntaggedRows can verify the writer-
+// monopoly invariant post-hoc.
 func (s *Store) PutEntity(ctx context.Context, e Entity, createdSeq uint64) error {
-	_, err := s.db.ExecContext(ctx, `
+	tag, err := s.authorizeImplicitWrite(createdSeq)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx, `
 		INSERT INTO code_entities
 		    (id, kind, language_id, qualified_name, receiver, path, body_hash,
 		     kind_tag, parent_id, ordinal,
-		     normalized_signature, symbol_fingerprint, ast_hash, created_seq)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		     normalized_signature, symbol_fingerprint, ast_hash, created_seq,
+		     kernel_seq_tag)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
 		    kind = excluded.kind,
 		    language_id = excluded.language_id,
@@ -273,10 +416,11 @@ func (s *Store) PutEntity(ctx context.Context, e Entity, createdSeq uint64) erro
 		    ordinal = excluded.ordinal,
 		    normalized_signature = excluded.normalized_signature,
 		    symbol_fingerprint = excluded.symbol_fingerprint,
-		    ast_hash = excluded.ast_hash
+		    ast_hash = excluded.ast_hash,
+		    kernel_seq_tag = excluded.kernel_seq_tag
 	`, e.ID, string(e.Kind), e.LanguageID, e.QualifiedName, e.Receiver,
 		e.Path, e.BodyHash, e.KindTag, e.ParentID, e.Ordinal,
-		e.NormalizedSignature, e.SymbolFingerprint, e.ASTHash, createdSeq)
+		e.NormalizedSignature, e.SymbolFingerprint, e.ASTHash, createdSeq, tag)
 	return err
 }
 
@@ -284,16 +428,24 @@ func (s *Store) PutEntity(ctx context.Context, e Entity, createdSeq uint64) erro
 // entity. Keyed by (entity_id, source_class) — one row per source.
 // Subsequent calls for the same key update confidence / last_seen_seq /
 // freshness so the table tracks the freshest observation per source.
+//
+// Trust enforcement (P1.5.T07): same authorizeImplicitWrite path as
+// PutEntity. The kernel_seq_tag column on code_entity_provenance is
+// stamped with the resolved seq.
 func (s *Store) UpsertProvenance(ctx context.Context, entityID string, e SourceEntry) error {
+	tag, err := s.authorizeImplicitWrite(e.LastSeenSeq)
+	if err != nil {
+		return err
+	}
 	low := 0
 	if e.LowConfidence {
 		low = 1
 	}
-	_, err := s.db.ExecContext(ctx, `
+	_, err = s.db.ExecContext(ctx, `
 		INSERT INTO code_entity_provenance
 		    (entity_id, source_class, confidence, last_seen_seq, freshness,
-		     produced_by, produced_by_path, server_id, low_confidence)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+		     produced_by, produced_by_path, server_id, low_confidence, kernel_seq_tag)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(entity_id, source_class) DO UPDATE SET
 		    confidence       = excluded.confidence,
 		    last_seen_seq    = excluded.last_seen_seq,
@@ -301,9 +453,10 @@ func (s *Store) UpsertProvenance(ctx context.Context, entityID string, e SourceE
 		    produced_by      = excluded.produced_by,
 		    produced_by_path = excluded.produced_by_path,
 		    server_id        = excluded.server_id,
-		    low_confidence   = excluded.low_confidence
+		    low_confidence   = excluded.low_confidence,
+		    kernel_seq_tag   = excluded.kernel_seq_tag
 	`, entityID, string(e.SourceClass), e.Confidence, e.LastSeenSeq, string(e.Freshness),
-		e.ProducedBy, e.ProducedByPath, e.ServerID, low)
+		e.ProducedBy, e.ProducedByPath, e.ServerID, low, tag)
 	return err
 }
 
@@ -351,11 +504,18 @@ func (s *Store) GetProvenance(ctx context.Context, entityID string) ([]SourceEnt
 	return out, nil
 }
 
-// AddRelation inserts a typed edge (idempotent on dup).
-func (s *Store) AddRelation(ctx context.Context, relation, fromID, toID string) error {
-	_, err := s.db.ExecContext(ctx, `
-		INSERT OR IGNORE INTO code_relations (relation, from_id, to_id) VALUES (?, ?, ?)
-	`, relation, fromID, toID)
+// AddRelation inserts a typed edge (idempotent on dup). The createdSeq
+// stamps the kernel_seq_tag column for trust enforcement (P1.5.T07);
+// callers in non-strict mode can pass 0 if they have no seq context
+// — the audit treats kernel_seq_tag=0 as "legacy, source unverified."
+func (s *Store) AddRelation(ctx context.Context, relation, fromID, toID string, createdSeq uint64) error {
+	tag, err := s.authorizeImplicitWrite(createdSeq)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx, `
+		INSERT OR IGNORE INTO code_relations (relation, from_id, to_id, kernel_seq_tag) VALUES (?, ?, ?, ?)
+	`, relation, fromID, toID, tag)
 	return err
 }
 
@@ -604,6 +764,24 @@ func (s *Store) DeleteEntity(ctx context.Context, id string) error {
 type ListFilter struct {
 	QualifiedName string
 	LanguageID    string
+}
+
+// ListEntitiesByPath returns every entity whose `path` column matches
+// the supplied workspace-relative path. Used by the cold-start drift
+// scan + watcher remove-handler to enumerate the children of a
+// removed File so the SymbolDeleted cascade can fire one event per
+// child (F7 / SPEC §6.20 hydration model). The File entity itself
+// is included; callers filter it out by `kind == KindFile` if they
+// want only the descendants.
+func (s *Store) ListEntitiesByPath(ctx context.Context, path string) ([]Entity, error) {
+	if path == "" {
+		return nil, nil
+	}
+	return s.queryEntities(ctx,
+		`SELECT id, kind, language_id, qualified_name, receiver, path, body_hash,
+		        kind_tag, parent_id, ordinal,
+		        normalized_signature, symbol_fingerprint, ast_hash
+		 FROM code_entities WHERE path = ? ORDER BY id ASC`, path)
 }
 
 // ListEntities returns every entity matching the filter, ordered by

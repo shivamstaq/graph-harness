@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/shivamstaq/graph-harness/internal/code_core"
 	"github.com/shivamstaq/graph-harness/internal/extract"
 	"github.com/shivamstaq/graph-harness/internal/facts"
 	"github.com/shivamstaq/graph-harness/internal/kernel"
@@ -38,6 +39,10 @@ type WatchLoop struct {
 	watcher *source_live.Watcher
 	orch    *extract.Orchestrator
 	log     *facts.EventLog
+	// code is the kernel-canonical store reference used by the F7
+	// SymbolDeleted cascade in handleRemoved. May be nil for legacy
+	// constructors; the cascade is then a no-op.
+	code *code_core.Store
 
 	// cancel terminates the loop's context-scoped goroutine.
 	cancel context.CancelFunc
@@ -86,6 +91,10 @@ type FileRemovedPayload struct {
 // NewWatchLoop builds a WatchLoop bound to the given orchestrator,
 // event log, and workspace root. The watcher is constructed but not
 // started — call Start to begin observing fsnotify events.
+//
+// For the F7 SymbolDeleted cascade on file removal, pass the
+// code.core Store via SetCodeStore before Start; without it the
+// cascade no-ops (FileRemoved still fires).
 func NewWatchLoop(root string, orch *extract.Orchestrator, log *facts.EventLog, errLog func(format string, args ...any)) (*WatchLoop, error) {
 	w, err := source_live.NewWatcher(root)
 	if err != nil {
@@ -98,6 +107,13 @@ func NewWatchLoop(root string, orch *extract.Orchestrator, log *facts.EventLog, 
 		log:     log,
 		errLog:  errLog,
 	}, nil
+}
+
+// SetCodeStore installs the code.core store reference used by the
+// F7 SymbolDeleted cascade in handleRemoved. Must be called before
+// Start. Idempotent.
+func (l *WatchLoop) SetCodeStore(store *code_core.Store) {
+	l.code = store
 }
 
 // SetOnChange installs a synchronization hook used by tests to observe
@@ -272,6 +288,18 @@ func (l *WatchLoop) handleChanged(ctx context.Context, rel string) {
 func (l *WatchLoop) handleRemoved(ctx context.Context, rel string) {
 	if rel == "" || l.log == nil {
 		return
+	}
+	// F7 / SPEC §6.20: emit a SymbolDeleted event per child entity
+	// of the removed file BEFORE the File row's FK cascade drops them.
+	// Then emit FileRemoved for the File itself.
+	fileID := code_core.FileID(rel)
+	if err := emitSymbolDeletedCascade(ctx, l.code, l.log, rel, fileID); err != nil {
+		l.logf("watch: emit SymbolDeleted cascade %s: %v", rel, err)
+	}
+	if l.code != nil {
+		if err := l.code.DeleteEntity(ctx, fileID); err != nil {
+			l.logf("watch: delete file entity %s: %v", rel, err)
+		}
 	}
 	payload, _ := json.Marshal(FileRemovedPayload{Path: rel})
 	if _, err := l.log.Append(ctx, []kernel.Event{{

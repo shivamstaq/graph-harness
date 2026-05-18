@@ -1,0 +1,185 @@
+# yaml-language-server: $schema=https://github.com/shivamstaq/gotit/raw/main/schema/spec.schema.json
+spec_version: 1
+name: all-commands-route-when-daemon-running
+description: >
+  P1.5.T06 daemon-canonical CLI breadth: when a daemon is serving the
+  workspace, every interactive command routes through it over JSON-RPC
+  rather than opening a competing set of SQLite handles. We invoke
+  `query`, `review list`, `review submit`, and `review get` (against
+  the just-submitted id), then assert `daemon status` still reports
+  the same pid we started with after each command.
+
+  The pid-stable invariant is the proxy for "the command did not
+  shadow the daemon by spawning its own writer." If a command opened
+  Resources directly it would not crash the daemon — but the writer-
+  monopoly contract (SPEC §9.1) would be silently violated. We assert
+  the routed path explicitly.
+tags: [daemon, cli-breadth, p1.5t06]
+order: 230
+requires:
+  - feature:p1.5-cli-breadth
+  - feature:p0.5-daemon-canonical-cli
+
+setup:
+  - name: init_workspace
+    command: graph-harness init
+    assert: [{ type: exit_code, expected: 0 }]
+
+daemons:
+  - name: gh-daemon
+    command: sh -c 'GRAPH_HARNESS_DISABLE_LSP=1 graph-harness daemon serve --workspace .'
+    phase: post_setup
+    start_timeout: 15s
+    ready:
+      log_contains: "daemon serving on"
+      timeout: 10s
+    stop:
+      signal: TERM
+      grace: 5s
+      expected_exit: 0
+    log_assert:
+      - { type: not_contains, value: "PANIC" }
+
+steps:
+  - name: capture_initial_daemon_pid
+    command: |
+      sh -c '
+      graph-harness daemon status > $HOME/pid_initial.txt
+      cat $HOME/pid_initial.txt
+      grep -oE "pid=[0-9]+" $HOME/pid_initial.txt > $HOME/pid_initial_grep.txt
+      cat $HOME/pid_initial_grep.txt
+      '
+    assert:
+      - { type: exit_code, expected: 0 }
+      - { type: contains, value: "running" }
+      - { type: contains, value: "pid=" }
+
+  - name: query_routes_through_daemon
+    command: |
+      sh -c '
+      graph-harness query "selector Probe { anchor qualified_name \"x\" }"
+      graph-harness daemon status > $HOME/pid_after_query.txt
+      grep -oE "pid=[0-9]+" $HOME/pid_after_query.txt > $HOME/pid_after_query_grep.txt
+      diff $HOME/pid_initial_grep.txt $HOME/pid_after_query_grep.txt
+      echo "PASS: daemon pid stable after query"
+      '
+    assert:
+      - { type: exit_code, expected: 0 }
+      - { type: contains, value: "PASS: daemon pid stable after query" }
+
+  - name: review_list_routes_through_daemon
+    command: |
+      sh -c '
+      graph-harness review list --json > $HOME/review_list.txt
+      cat $HOME/review_list.txt
+      graph-harness daemon status > $HOME/pid_after_list.txt
+      grep -oE "pid=[0-9]+" $HOME/pid_after_list.txt > $HOME/pid_after_list_grep.txt
+      diff $HOME/pid_initial_grep.txt $HOME/pid_after_list_grep.txt
+      echo "PASS: daemon pid stable after review list"
+      '
+    assert:
+      - { type: exit_code, expected: 0 }
+      - { type: contains, value: "PASS: daemon pid stable after review list" }
+
+  - name: review_submit_routes_through_daemon
+    command: |
+      sh -c '
+      graph-harness review submit \
+        --layer semantic.overlay \
+        --kind selector \
+        --payload "{}" > $HOME/submit.out 2>&1
+      cat $HOME/submit.out
+      # First line of `review submit` output is the proposal id.
+      head -1 $HOME/submit.out > $HOME/proposal_id.txt
+      cat $HOME/proposal_id.txt
+      graph-harness daemon status > $HOME/pid_after_submit.txt
+      grep -oE "pid=[0-9]+" $HOME/pid_after_submit.txt > $HOME/pid_after_submit_grep.txt
+      diff $HOME/pid_initial_grep.txt $HOME/pid_after_submit_grep.txt
+      echo "PASS: daemon pid stable after review submit"
+      '
+    assert:
+      - { type: exit_code, expected: 0 }
+      - { type: contains, value: "PASS: daemon pid stable after review submit" }
+
+  - name: review_get_routes_through_daemon
+    command: |
+      sh -c '
+      ID=$(cat $HOME/proposal_id.txt)
+      graph-harness review get "$ID" > $HOME/get.out 2>&1
+      cat $HOME/get.out
+      graph-harness daemon status > $HOME/pid_after_get.txt
+      grep -oE "pid=[0-9]+" $HOME/pid_after_get.txt > $HOME/pid_after_get_grep.txt
+      diff $HOME/pid_initial_grep.txt $HOME/pid_after_get_grep.txt
+      echo "PASS: daemon pid stable after review get"
+      '
+    assert:
+      - { type: exit_code, expected: 0 }
+      - { type: contains, value: "PASS: daemon pid stable after review get" }
+
+  - name: tui_routes_through_daemon
+    # F2: tui --interactive=false fetches status via the Consumer
+    # interface. When the daemon is running, ResolveRoute hands tui
+    # a ClientService wrapping the JSON-RPC client.
+    command: |
+      sh -c '
+      graph-harness tui > $HOME/tui.out 2>&1
+      cat $HOME/tui.out
+      graph-harness daemon status > $HOME/pid_after_tui.txt
+      grep -oE "pid=[0-9]+" $HOME/pid_after_tui.txt > $HOME/pid_after_tui_grep.txt
+      diff $HOME/pid_initial_grep.txt $HOME/pid_after_tui_grep.txt
+      echo "PASS: daemon pid stable after tui"
+      '
+    assert:
+      - { type: exit_code, expected: 0 }
+      - { type: contains, value: "PASS: daemon pid stable after tui" }
+      - { type: contains, value: "graph-harness TUI" }
+
+  - name: studio_check_routes_through_daemon
+    # F2: studio --check resolves the consumer and exits; with the
+    # daemon running, consumer=daemon.
+    command: |
+      sh -c '
+      graph-harness studio --check > $HOME/studio.out 2>&1
+      cat $HOME/studio.out
+      graph-harness daemon status > $HOME/pid_after_studio.txt
+      grep -oE "pid=[0-9]+" $HOME/pid_after_studio.txt > $HOME/pid_after_studio_grep.txt
+      diff $HOME/pid_initial_grep.txt $HOME/pid_after_studio_grep.txt
+      echo "PASS: daemon pid stable after studio --check"
+      '
+    assert:
+      - { type: exit_code, expected: 0 }
+      - { type: contains, value: "PASS: daemon pid stable after studio --check" }
+      - { type: contains, value: "studio: ok (consumer=daemon)" }
+
+  - name: mcp_check_routes_through_daemon
+    # F2: mcp --check resolves the consumer (same shape as studio).
+    command: |
+      sh -c '
+      graph-harness mcp --check > $HOME/mcp.out 2>&1
+      cat $HOME/mcp.out
+      graph-harness daemon status > $HOME/pid_after_mcp.txt
+      grep -oE "pid=[0-9]+" $HOME/pid_after_mcp.txt > $HOME/pid_after_mcp_grep.txt
+      diff $HOME/pid_initial_grep.txt $HOME/pid_after_mcp_grep.txt
+      echo "PASS: daemon pid stable after mcp --check"
+      '
+    assert:
+      - { type: exit_code, expected: 0 }
+      - { type: contains, value: "PASS: daemon pid stable after mcp --check" }
+      - { type: contains, value: "mcp: ok (consumer=daemon)" }
+
+  - name: watch_routes_through_daemon
+    # F2: watch subscribes via JSON-RPC; --max-events 1 --timeout 3s
+    # so it exits regardless of whether an event arrives.
+    command: |
+      sh -c '
+      graph-harness watch code.core --max-events 1 --timeout 3s > $HOME/watch.out 2>&1 || true
+      cat $HOME/watch.out
+      graph-harness daemon status > $HOME/pid_after_watch.txt
+      grep -oE "pid=[0-9]+" $HOME/pid_after_watch.txt > $HOME/pid_after_watch_grep.txt
+      diff $HOME/pid_initial_grep.txt $HOME/pid_after_watch_grep.txt
+      echo "PASS: daemon pid stable after watch"
+      '
+    assert:
+      - { type: exit_code, expected: 0 }
+      - { type: contains, value: "PASS: daemon pid stable after watch" }
+      - { type: contains, value: "subscription.bound" }

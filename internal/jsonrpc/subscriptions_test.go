@@ -382,6 +382,144 @@ func TestKernelSubscribe_BackpressureEmitsFellBehind(t *testing.T) {
 	}
 }
 
+// TestKernelRebuildFromSnapshot_AdvancesCursorAndClearsFellBehind
+// exercises the SPEC §6.22 + P1.5.T08 backpressure-recovery contract.
+// After a subscription falls behind (queue overflow → kernel.fellBehind
+// fired once), the client calls kernel.rebuildFromSnapshot; the daemon
+// captures the current head as a snapshot, advances the subscription
+// cursor past the un-acked gap, and clears the fellBehind one-shot so
+// a subsequent overflow can fire another notification.
+func TestKernelRebuildFromSnapshot_AdvancesCursorAndClearsFellBehind(t *testing.T) {
+	t.Parallel()
+	srv, log, sockPath := startTestServer(t)
+	defer srv.Stop()
+
+	fellBehinds := make(chan FellBehindNotification, 4)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	raw, err := net.Dial("unix", sockPath)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	stream := jsonrpc2.NewBufferedStream(raw, jsonrpc2.VSCodeObjectCodec{})
+	handler := jsonrpc2.HandlerWithError(func(_ context.Context, _ *jsonrpc2.Conn, req *jsonrpc2.Request) (any, error) {
+		if req.Method == "kernel.fellBehind" {
+			var n FellBehindNotification
+			if req.Params != nil {
+				_ = json.Unmarshal(*req.Params, &n)
+			}
+			select {
+			case fellBehinds <- n:
+			default:
+			}
+		}
+		return nil, nil
+	})
+	conn := jsonrpc2.NewConn(ctx, stream, handler)
+	defer func() { _ = conn.Close() }()
+
+	var subRes SubscribeResult
+	if err := conn.Call(ctx, "kernel.subscribe", SubscribeParams{
+		Filter:   "",
+		QueueCap: 2,
+	}, &subRes); err != nil {
+		t.Fatalf("subscribe: %v", err)
+	}
+
+	// Overflow the queue to trigger fellBehind.
+	for i := range 5 {
+		if _, err := log.Append(ctx, []kernel.Event{{
+			Layer:      "code.core",
+			Kind:       "FileChanged",
+			ProducedBy: kernel.SourceLayerInternal,
+			Payload:    json.RawMessage(`{"i":` + string(rune('0'+i)) + `}`),
+		}}); err != nil {
+			t.Fatalf("append %d: %v", i, err)
+		}
+	}
+	select {
+	case <-fellBehinds:
+	case <-time.After(3 * time.Second):
+		t.Fatalf("expected fellBehind before rebuild")
+	}
+
+	// Now call rebuildFromSnapshot — daemon captures head, advances
+	// cursor, clears the one-shot flag.
+	var rebuild RebuildFromSnapshotResult
+	if err := conn.Call(ctx, "kernel.rebuildFromSnapshot",
+		RebuildFromSnapshotParams{SubscriptionID: subRes.SubscriptionID},
+		&rebuild); err != nil {
+		t.Fatalf("rebuildFromSnapshot: %v", err)
+	}
+	if rebuild.CheckpointSeq == 0 {
+		t.Fatalf("rebuild checkpoint seq must be > 0; got %+v", rebuild)
+	}
+	if rebuild.NewCursor != rebuild.CheckpointSeq {
+		t.Fatalf("rebuild new_cursor=%d should equal checkpoint_seq=%d",
+			rebuild.NewCursor, rebuild.CheckpointSeq)
+	}
+	if rebuild.RecoveryHint != "requery_via_route" {
+		t.Fatalf("rebuild recovery_hint should document re-query path; got %q", rebuild.RecoveryHint)
+	}
+	// Deprecated aliases preserved for one release; assert they
+	// still mirror the new fields for back-compat clients.
+	if rebuild.SnapshotSeq != rebuild.CheckpointSeq || rebuild.SnapshotID != rebuild.CheckpointID {
+		t.Fatalf("deprecated aliases should mirror checkpoint fields; got %+v", rebuild)
+	}
+
+	// A second overflow burst MUST produce another fellBehind because
+	// the one-shot flag was cleared. (Drain any stragglers from the
+	// first burst first; the channel cap is 4 so we just sanity-drain.)
+	for {
+		select {
+		case <-fellBehinds:
+			continue
+		case <-time.After(100 * time.Millisecond):
+		}
+		break
+	}
+	for i := range 5 {
+		if _, err := log.Append(ctx, []kernel.Event{{
+			Layer:      "code.core",
+			Kind:       "FileChanged",
+			ProducedBy: kernel.SourceLayerInternal,
+			Payload:    json.RawMessage(`{"k":` + string(rune('0'+i)) + `}`),
+		}}); err != nil {
+			t.Fatalf("post-rebuild append %d: %v", i, err)
+		}
+	}
+	select {
+	case <-fellBehinds:
+	case <-time.After(3 * time.Second):
+		t.Fatalf("expected fellBehind after rebuild for fresh overflow")
+	}
+}
+
+// TestKernelRebuildFromSnapshot_UnknownSubscription returns an error.
+func TestKernelRebuildFromSnapshot_UnknownSubscription(t *testing.T) {
+	t.Parallel()
+	srv, _, sockPath := startTestServer(t)
+	defer srv.Stop()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	raw, err := net.Dial("unix", sockPath)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	stream := jsonrpc2.NewBufferedStream(raw, jsonrpc2.VSCodeObjectCodec{})
+	conn := jsonrpc2.NewConn(ctx, stream, nil)
+	defer func() { _ = conn.Close() }()
+
+	var res RebuildFromSnapshotResult
+	err = conn.Call(ctx, "kernel.rebuildFromSnapshot",
+		RebuildFromSnapshotParams{SubscriptionID: "no-such-sub"}, &res)
+	if err == nil {
+		t.Fatalf("expected error for unknown subscription")
+	}
+}
+
 // TestKernelCancel_StopsLongRunningHandler exercises SPEC §6.23
 // per-request cancellation: kernel.cancel({request_id}) aborts an
 // in-flight handler that honors ctx.Done(). We register a test-only

@@ -24,6 +24,26 @@ type Host struct {
 	drivers       map[string]Driver
 	languageMutex map[string]*sync.Mutex
 	closed        bool
+
+	// notifHandler is installed at Host-scope; every Driver built
+	// after this point inherits it on construction. P1.5.T02.
+	notifHandler NotificationHandler
+}
+
+// SetNotificationHandler installs an LSP push-back callback at host
+// scope. Drivers built after this call inherit the handler at spawn;
+// drivers already running receive the handler immediately. P1.5.T02.
+func (h *Host) SetNotificationHandler(handler NotificationHandler) {
+	h.mu.Lock()
+	h.notifHandler = handler
+	drivers := make([]Driver, 0, len(h.drivers))
+	for _, d := range h.drivers {
+		drivers = append(drivers, d)
+	}
+	h.mu.Unlock()
+	for _, d := range drivers {
+		d.SetNotificationHandler(handler)
+	}
 }
 
 // NewHost constructs a Host rooted at the given workspace path. The
@@ -94,6 +114,14 @@ func (h *Host) DriverFor(ctx context.Context, languageID string) (Driver, error)
 	d = h.registry.build(languageID)
 	if d == nil {
 		return nil, fmt.Errorf("lsp: registry returned nil driver for %q", languageID)
+	}
+	// Inherit host-scope notification handler before Initialize so the
+	// driver's read loop has it from the first message. P1.5.T02.
+	h.mu.Lock()
+	notifHandler := h.notifHandler
+	h.mu.Unlock()
+	if notifHandler != nil {
+		d.SetNotificationHandler(notifHandler)
 	}
 	if err := d.Initialize(ctx, h.root); err != nil {
 		return nil, fmt.Errorf("lsp: initialize %s: %w", languageID, err)

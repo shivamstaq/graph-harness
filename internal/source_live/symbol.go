@@ -115,6 +115,15 @@ type Symbol struct {
 	SourceClass   SourceClass
 	ProducedBy    string
 	Confidence    float64
+
+	// SymbolFingerprint and ASTHash are per-symbol stable hashes
+	// used by the selector resolver's symbol_fingerprint and ast_hash
+	// anchor evaluators (SPEC §3.3, P1.T25). Computed by tree-sitter
+	// parsers (F11) and copied through to the code.core Entity row.
+	// Empty strings mean "not computed by this extractor"; the
+	// resolver falls back to the next anchor on the ladder.
+	SymbolFingerprint string
+	ASTHash           string
 }
 
 // IsAnonymous reports whether the Symbol identifies an anonymous entity

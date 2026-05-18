@@ -1,0 +1,57 @@
+# yaml-language-server: $schema=https://github.com/shivamstaq/gotit/raw/main/schema/spec.schema.json
+spec_version: 1
+name: multi-source-idempotent-reextract
+description: >
+  SPEC §6.21 + P1.5.T03 multi-source compare-before-emit: re-running
+  the orchestrator over an unchanged polyglot workspace produces zero
+  new kernel events across all three sources (LSP + SCIP +
+  tree-sitter), not just the single-source path P0.5.T09 covered.
+
+  This is the multi-language fan-out of the suppress-at-source
+  invariant: the kernel head seq before and after a second extract
+  pass over a Go + TypeScript + Python workspace MUST be byte-equal
+  when no source has changed.
+tags: [substrate, multi-language, suppress-at-source, p1.5t03]
+order: 110
+requires:
+  - feature:p1.5-multi-source-suppress
+  - feature:p0.5-suppress-at-source
+  - feature:p1-multi-language
+repo:
+  helper: polyglot-repo-go-ts-py
+
+setup:
+  - name: init_workspace
+    command: graph-harness init
+    assert: [{ type: exit_code, expected: 0 }]
+
+  - name: install_overlay
+    command: sh -c "mkdir -p .graph-harness/overlay && cp demo.checkout.gh .graph-harness/overlay/checkout.gh"
+    assert: [{ type: exit_code, expected: 0 }]
+
+  - name: warm_state_with_first_index
+    # F15: drop --no-lsp --no-scip. The first pass drives the full
+    # multi-source pipeline (tree-sitter, plus LSP when gopls is on
+    # PATH). SCIP is opt-in (no .scip-index/ staged here); the
+    # compare-before-emit contract still has to hold across whichever
+    # subset of sources is actually active.
+    command: graph-harness selectors test CheckoutValidator --batch --json
+    assert: [{ type: exit_code, expected: 0 }]
+
+steps:
+  - name: second_pass_emits_zero_new_events_across_three_sources
+    command: |
+      bash -c '
+      before=$(graph-harness status | awk "/Last seq:/ {print \$NF}")
+      graph-harness selectors test CheckoutValidator --batch --json >/dev/null
+      after=$(graph-harness status | awk "/Last seq:/ {print \$NF}")
+      echo "polyglot_head_before=$before polyglot_head_after=$after"
+      if [ "$before" != "$after" ]; then
+        echo "FAIL: kernel head advanced on multi-source no-op re-extract" >&2
+        exit 1
+      fi
+      echo "PASS: kernel head unchanged across Go+TS+Py no-op re-extract (with LSP/SCIP active where available)"
+      '
+    assert:
+      - { type: exit_code, expected: 0 }
+      - { type: contains, value: "PASS: kernel head unchanged" }

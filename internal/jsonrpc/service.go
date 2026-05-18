@@ -97,6 +97,25 @@ func (s *Service) subscriptions() *SubscriptionManager {
 	return s.subs
 }
 
+// StartSubscriptionEviction kicks off the SPEC §6.22 heartbeat
+// eviction sweep on the Service's SubscriptionManager. Called from
+// daemon serve at boot (P1.5.T10) so silent subscribers past the
+// idle threshold are dropped continuously in production rather than
+// only when a test invokes the sweep manually. Passing tickInterval=0
+// uses the manager's default (idleThreshold/4, clamped at 1s).
+func (s *Service) StartSubscriptionEviction(ctx context.Context) {
+	s.subscriptions().StartEvictionLoop(ctx, 0)
+}
+
+// SetSubscriptionIdleThreshold overrides the SPEC §6.22 idle
+// threshold on the underlying SubscriptionManager. F17 — the
+// `daemon serve --eviction-threshold <duration>` flag plumbs the
+// per-process override here so e2e specs can drive observable
+// evictions in CI-friendly time.
+func (s *Service) SetSubscriptionIdleThreshold(d time.Duration) {
+	s.subscriptions().SetIdleThreshold(d)
+}
+
 // transient returns the lazily-constructed TransientOverlay. The
 // overlay's overflow sink is wired to emit a kernel.transient
 // TransientTierOverflow event on the kernel bus so subscribers can
@@ -516,6 +535,75 @@ func (s *Service) ReviewReject(ctx context.Context, p ReviewIDParams) (ReviewAck
 	return ReviewAck{OK: true}, nil
 }
 
+// ReviewSubmitParams is the input shape for review.submit (P1.5.T06).
+type ReviewSubmitParams struct {
+	TargetLayer string                    `json:"target_layer"`
+	Kind        string                    `json:"kind"`
+	Author      string                    `json:"author"`
+	Description string                    `json:"description,omitempty"`
+	Payload     json.RawMessage           `json:"payload,omitempty"`
+	Evidence    []review_queue.EvidenceItem `json:"evidence,omitempty"`
+}
+
+// ReviewSubmitResult carries the newly-allocated proposal id + the
+// proposal's resolved state (needs_evidence when requirements unmet).
+type ReviewSubmitResult struct {
+	ID    string                  `json:"id"`
+	State string                  `json:"state"`
+	Item  *review_queue.Proposal  `json:"item,omitempty"`
+}
+
+// ReviewSubmit handles review.submit — the daemon-canonical write
+// path for proposals. P1.5.T06.
+func (s *Service) ReviewSubmit(ctx context.Context, p ReviewSubmitParams) (ReviewSubmitResult, error) {
+	id, err := s.Queue.Submit(ctx, review_queue.Proposal{
+		TargetLayer: p.TargetLayer,
+		Kind:        p.Kind,
+		Author:      p.Author,
+		Description: p.Description,
+		Payload:     []byte(p.Payload),
+		Evidence:    p.Evidence,
+	})
+	if err != nil {
+		return ReviewSubmitResult{}, err
+	}
+	item, err := s.Queue.Get(ctx, id)
+	if err != nil {
+		return ReviewSubmitResult{ID: id}, err
+	}
+	state := ""
+	if item != nil {
+		state = string(item.State)
+	}
+	return ReviewSubmitResult{ID: id, State: state, Item: item}, nil
+}
+
+// ReviewAddEvidenceParams is the input for review.addEvidence.
+type ReviewAddEvidenceParams struct {
+	ID       string                       `json:"id"`
+	Evidence []review_queue.EvidenceItem  `json:"evidence"`
+}
+
+// ReviewAddEvidenceResult reports the proposal's state after the
+// evidence was appended (may auto-promote to pending_review).
+type ReviewAddEvidenceResult struct {
+	State string `json:"state"`
+}
+
+// ReviewAddEvidence handles review.addEvidence — daemon-canonical
+// write path for attaching evidence to a needs_evidence proposal.
+// P1.5.T06.
+func (s *Service) ReviewAddEvidence(ctx context.Context, p ReviewAddEvidenceParams) (ReviewAddEvidenceResult, error) {
+	if p.ID == "" {
+		return ReviewAddEvidenceResult{}, errors.New("id required")
+	}
+	st, err := s.Queue.AddEvidence(ctx, p.ID, p.Evidence)
+	if err != nil {
+		return ReviewAddEvidenceResult{}, err
+	}
+	return ReviewAddEvidenceResult{State: string(st)}, nil
+}
+
 // OverlaySaveParams writes a .gh file under .graph-harness/overlay/.
 // The relative path is sanitized: no `..` segments, no absolute paths.
 type OverlaySaveParams struct {
@@ -687,6 +775,97 @@ func (s *Service) DaemonShutdown(_ context.Context) (ReviewAck, error) {
 	return ReviewAck{OK: true}, nil
 }
 
+// SnapshotCreateParams is the input shape for kernel.snapshot
+// (F12 / P0.T11). Layer scopes the captured event set; pass "" for
+// every layer. Seq=0 means "current head".
+type SnapshotCreateParams struct {
+	Layer string `json:"layer,omitempty"`
+	Seq   uint64 `json:"seq,omitempty"`
+}
+
+// SnapshotCreate implements kernel.snapshot — captures a snapshot
+// of the event log at the requested seq (or head when seq=0). The
+// returned SnapshotHandle is opaque; clients pass it back to
+// kernel.restoreSnapshot or use it to drive Compact-style
+// recoverability proofs.
+func (s *Service) SnapshotCreate(ctx context.Context, p SnapshotCreateParams) (kernel.SnapshotHandle, error) {
+	if s.Log == nil {
+		return kernel.SnapshotHandle{}, errors.New("snapshot: event log not available")
+	}
+	return s.Log.CreateSnapshot(ctx, p.Layer, p.Seq)
+}
+
+// SnapshotListParams allows filtering by layer; empty layer lists
+// every snapshot in the workspace.
+type SnapshotListParams struct {
+	Layer string `json:"layer,omitempty"`
+}
+
+// SnapshotInfo is the per-row wire shape returned by kernel.listSnapshots.
+type SnapshotInfo struct {
+	ID        string `json:"id"`
+	Seq       uint64 `json:"seq"`
+	Layer     string `json:"layer"`
+	CreatedAt string `json:"created_at"`
+}
+
+// SnapshotListResult wraps the list of snapshots.
+type SnapshotListResult struct {
+	Snapshots []SnapshotInfo `json:"snapshots"`
+}
+
+// SnapshotList implements kernel.listSnapshots — reports every
+// captured snapshot for the workspace, optionally filtered to a
+// single layer. F12.
+func (s *Service) SnapshotList(ctx context.Context, p SnapshotListParams) (SnapshotListResult, error) {
+	if s.Log == nil {
+		return SnapshotListResult{Snapshots: []SnapshotInfo{}}, nil
+	}
+	rows, err := s.Log.ListSnapshots(ctx, p.Layer)
+	if err != nil {
+		return SnapshotListResult{}, err
+	}
+	out := make([]SnapshotInfo, len(rows))
+	for i, r := range rows {
+		out[i] = SnapshotInfo{ID: r.ID, Seq: r.Seq, Layer: r.Layer, CreatedAt: r.CreatedAt}
+	}
+	return SnapshotListResult{Snapshots: out}, nil
+}
+
+// SnapshotRestoreParams names the snapshot to replay.
+type SnapshotRestoreParams struct {
+	ID string `json:"id"`
+}
+
+// SnapshotRestoreResult reports the count of events restored.
+type SnapshotRestoreResult struct {
+	EventsRestored int `json:"events_restored"`
+}
+
+// SnapshotRestore implements kernel.restoreSnapshot — replays the
+// snapshot's events into the live log. **Heavy operation:** pauses
+// the writer for the duration; should never be invoked while users
+// are actively editing the workspace. Use with care.
+func (s *Service) SnapshotRestore(ctx context.Context, p SnapshotRestoreParams) (SnapshotRestoreResult, error) {
+	if s.Log == nil {
+		return SnapshotRestoreResult{}, errors.New("snapshot: event log not available")
+	}
+	if p.ID == "" {
+		return SnapshotRestoreResult{}, errors.New("snapshot id required")
+	}
+	events, err := s.Log.LoadSnapshot(ctx, kernel.SnapshotHandle{ID: p.ID})
+	if err != nil {
+		return SnapshotRestoreResult{}, err
+	}
+	for i := range events {
+		events[i].Seq = 0
+	}
+	if _, err := s.Log.Append(ctx, events); err != nil {
+		return SnapshotRestoreResult{}, err
+	}
+	return SnapshotRestoreResult{EventsRestored: len(events)}, nil
+}
+
 // DoctorReportResult is the wire shape returned by health.extractors
 // (and by the MCP gh://doctor resource). It carries the raw
 // []detect.Report slice — the same data that backs `graph-harness
@@ -696,6 +875,59 @@ type DoctorReportResult struct {
 	WorkspaceRoot string          `json:"workspace_root"`
 	GeneratedAt   time.Time       `json:"generated_at"`
 	Languages     []detect.Report `json:"languages"`
+}
+
+// AuditUntaggedResult is the wire shape returned by daemon.auditUntagged.
+// Each field is a list of identifiers for rows whose kernel_seq_tag is
+// zero — the canonical writer-monopoly violation signal. Empty lists
+// mean strict mode is holding (F16 / SPEC §9.1).
+type AuditUntaggedResult struct {
+	Entities    []string `json:"entities"`
+	Provenance  []string `json:"provenance"`
+	Relations   []string `json:"relations"`
+	TotalCount  int      `json:"total_count"`
+	WorkspaceID string   `json:"workspace_id,omitempty"`
+}
+
+// AuditUntagged aggregates the three Audit* helpers on the code.core
+// store and surfaces them as a single RPC. F16 / P1.5.T07 — gives
+// operators a CLI surface to verify the strict-mode writer-monopoly
+// invariant after a polyglot fixture index.
+func (s *Service) AuditUntagged(ctx context.Context) (AuditUntaggedResult, error) {
+	out := AuditUntaggedResult{
+		Entities:   []string{},
+		Provenance: []string{},
+		Relations:  []string{},
+	}
+	if s.Workspace != nil {
+		out.WorkspaceID = s.Workspace.ID
+	}
+	if s.Code == nil {
+		return out, nil
+	}
+	ents, err := s.Code.AuditUntaggedRows(ctx, 0)
+	if err != nil {
+		return out, err
+	}
+	prov, err := s.Code.AuditUntaggedProvenance(ctx, 0)
+	if err != nil {
+		return out, err
+	}
+	rels, err := s.Code.AuditUntaggedRelations(ctx)
+	if err != nil {
+		return out, err
+	}
+	if ents != nil {
+		out.Entities = ents
+	}
+	if prov != nil {
+		out.Provenance = prov
+	}
+	if rels != nil {
+		out.Relations = rels
+	}
+	out.TotalCount = len(out.Entities) + len(out.Provenance) + len(out.Relations)
+	return out, nil
 }
 
 // DoctorReport runs detection over the workspace's registered language

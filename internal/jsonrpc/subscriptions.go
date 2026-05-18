@@ -62,9 +62,15 @@ type SubscriptionManager struct {
 type activeSub struct {
 	id           string
 	subscriberID string
-	filter       string
-	conn         *jsonrpc2.Conn
-	stream       facts.EventStream
+	// subscriptionName is the cursor key half (F8 / P0.5.T02). Cursors
+	// persist per (subscriberID, subscriptionName), so a single
+	// subscriber can multiplex many subscriptions and have each
+	// resume independently across reconnect. Default to the filter
+	// expression when the client doesn't supply one explicitly.
+	subscriptionName string
+	filter           string
+	conn             *jsonrpc2.Conn
+	stream           facts.EventStream
 
 	// cursor is updated atomically every time an event is pushed; ack
 	// reads it for persistence. ackedSeq lags the head until the
@@ -238,6 +244,16 @@ func (m *SubscriptionManager) Subscribe(ctx context.Context, conn *jsonrpc2.Conn
 	return m.SubscribeWithOpts(ctx, conn, filterExpr, cursor, 0)
 }
 
+// SubscribeOptions controls SubscribeWithName. Zero values are
+// interpreted as defaults.
+type SubscribeOptions struct {
+	// Name is the subscription_name persisted alongside subscriber_id
+	// for cursor lookup (F8). Empty defaults to the filter expression.
+	Name string
+	// QueueCap overrides the per-subscription queue depth.
+	QueueCap int
+}
+
 // SubscribeWithOpts is Subscribe with an explicit per-subscription
 // queue cap. queueCap <= 0 falls back to defaultQueueDepth.
 // Returns the subscription_id the client uses to ack / unsubscribe.
@@ -249,6 +265,20 @@ func (m *SubscriptionManager) Subscribe(ctx context.Context, conn *jsonrpc2.Conn
 // instead bound to the connection: DropConn cancels the pump on
 // disconnect, or Unsubscribe cancels it explicitly.
 func (m *SubscriptionManager) SubscribeWithOpts(ctx context.Context, conn *jsonrpc2.Conn, filterExpr string, cursor uint64, queueCap int) (string, error) {
+	return m.SubscribeWithName(ctx, conn, filterExpr, cursor, SubscribeOptions{QueueCap: queueCap})
+}
+
+// SubscribeWithName is the F8 / P0.5.T02 entry point that lets the
+// client pin a stable subscription_name. The (subscriber_id,
+// subscription_name) pair is the persistent cursor key — calling
+// this method again with the same name after a daemon restart
+// resumes from the persisted seq+1 for that name specifically.
+//
+// SubscribeWithOpts (back-compat) calls through with an empty name,
+// which lowers the cursor key onto the legacy single-row-per-
+// subscriber behavior. Tests and external clients that need
+// multiplexed cursors should call SubscribeWithName.
+func (m *SubscriptionManager) SubscribeWithName(ctx context.Context, conn *jsonrpc2.Conn, filterExpr string, cursor uint64, opts SubscribeOptions) (string, error) {
 	if conn == nil {
 		return "", fmt.Errorf("subscribe: nil connection")
 	}
@@ -262,14 +292,23 @@ func (m *SubscriptionManager) SubscribeWithOpts(ctx context.Context, conn *jsonr
 		return "", fmt.Errorf("parse filter: %w", err)
 	}
 
+	subscriptionName := opts.Name
+	if subscriptionName == "" {
+		// Default subscription_name to the filter expression so
+		// distinct filters under the same subscriber_id get distinct
+		// persisted cursors automatically — no client opt-in needed
+		// for the common case.
+		subscriptionName = filterExpr
+	}
+
 	subID := "sub-" + randomID()
 	stream := m.log.SubscribeWithFilter(filter)
 	subscriberID := m.SubscriberIDFor(conn)
 	// SPEC §6.22 reconnect: when the client doesn't supply a cursor,
-	// resume from the persisted last_processed_seq for this
-	// subscriber. Zero means start at head (default).
+	// resume from the persisted last_processed_seq for (subscriber_id,
+	// subscription_name). Zero means start at head (default).
 	if cursor == 0 {
-		cursor = m.CursorOf(ctx, subscriberID)
+		cursor = m.CursorOf(ctx, subscriberID, subscriptionName)
 	}
 	// Decouple the pump from the caller's per-request ctx. The pump
 	// lives as long as the subscription does — either Unsubscribe()
@@ -279,19 +318,21 @@ func (m *SubscriptionManager) SubscribeWithOpts(ctx context.Context, conn *jsonr
 	subCtx, cancel := context.WithCancel(context.Background())
 	_ = ctx
 
+	queueCap := opts.QueueCap
 	if queueCap <= 0 {
 		queueCap = defaultQueueDepth
 	}
 	as := &activeSub{
-		id:           subID,
-		subscriberID: subscriberID,
-		filter:       filterExpr,
-		conn:         conn,
-		stream:       stream,
-		startSeq:     cursor,
-		queueCap:     queueCap,
-		cancel:       cancel,
-		done:         make(chan struct{}),
+		id:               subID,
+		subscriberID:     subscriberID,
+		subscriptionName: subscriptionName,
+		filter:           filterExpr,
+		conn:             conn,
+		stream:           stream,
+		startSeq:         cursor,
+		queueCap:         queueCap,
+		cancel:           cancel,
+		done:             make(chan struct{}),
 	}
 	as.cursor.Store(cursor)
 	as.ackedSeq.Store(cursor)
@@ -360,21 +401,58 @@ func (m *SubscriptionManager) Ack(subID string, seq uint64) error {
 	// resume. Best-effort: a write failure does not fail the ack
 	// (the in-memory state is still correct for this session).
 	if m.log != nil && as.subscriberID != "" {
-		_ = m.log.AdvanceCursor(context.Background(), as.subscriberID, seq)
+		_ = m.log.AdvanceCursor(context.Background(), as.subscriberID, as.subscriptionName, seq)
+	}
+	return nil
+}
+
+// AdvanceCursor forces the subscription's cursor to seq without
+// requiring the client to have observed every intermediate event.
+// Used by kernel.rebuildFromSnapshot (P1.5.T08) — when a subscriber
+// has fallen behind and asks the daemon for a snapshot, the daemon
+// captures fresh state and advances the cursor past the gap so the
+// pump resumes from seq+1 instead of replaying the skipped backlog.
+//
+// Unlike Ack (which is monotonic and refuses to go backwards), this
+// is monotonic *forward* too: callers that pass a seq below the
+// current cursor receive an error since "rebuilding from a snapshot
+// older than what was already delivered" is a regression, not a
+// recovery.
+//
+// Both ackedSeq and cursor advance — clearing the fellBehind flag so
+// the next overflow can fire a fresh kernel.fellBehind notification.
+// The persistent layer_state cursor is also bumped so a reconnect
+// across daemon restart resumes from the same head.
+func (m *SubscriptionManager) AdvanceCursor(subID string, seq uint64) error {
+	m.mu.Lock()
+	as, ok := m.subs[subID]
+	m.mu.Unlock()
+	if !ok {
+		return fmt.Errorf("rebuildFromSnapshot: subscription %s not found", subID)
+	}
+	prev := as.ackedSeq.Load()
+	if seq < prev {
+		return fmt.Errorf("rebuildFromSnapshot: snapshot seq %d is behind acked %d", seq, prev)
+	}
+	as.cursor.Store(seq)
+	as.ackedSeq.Store(seq)
+	as.fellBehind.Store(false)
+	if m.log != nil && as.subscriberID != "" {
+		_ = m.log.AdvanceCursor(context.Background(), as.subscriberID, as.subscriptionName, seq)
 	}
 	return nil
 }
 
 // CursorOf returns the persisted last_processed_seq for the given
-// subscriber identity, or zero if none has been recorded. Used by
-// SubscribeWithOpts when the client omits an explicit cursor — the
-// subscription resumes from the persisted seq+1 instead of head, per
-// SPEC §6.22 reconnect contract.
-func (m *SubscriptionManager) CursorOf(ctx context.Context, subscriberID string) uint64 {
+// (subscriberID, subscriptionName) pair, or zero if none has been
+// recorded. Used by SubscribeWithOpts when the client omits an
+// explicit cursor — the subscription resumes from the persisted
+// seq+1 instead of head, per SPEC §6.22 reconnect contract + F8.
+func (m *SubscriptionManager) CursorOf(ctx context.Context, subscriberID, subscriptionName string) uint64 {
 	if m.log == nil || subscriberID == "" {
 		return 0
 	}
-	seq, err := m.log.CursorOf(ctx, subscriberID)
+	seq, err := m.log.CursorOf(ctx, subscriberID, subscriptionName)
 	if err != nil {
 		return 0
 	}
@@ -482,35 +560,25 @@ func randomID() string {
 	return hex.EncodeToString(b[:])
 }
 
-// parseFilter turns a Participle filter expression into the
-// kernel.EventFilter the event log uses. Empty string yields the
-// match-all filter. Full grammar parity with the layer-manifest
-// filter clause lands when the DSL parser exposes its public form
-// here; for now we accept layer-or-(layer.kind) shorthand which is
-// the only form the P0.5 demo + subscriber-roundtrip test needs.
+// parseFilter turns a filter expression into the kernel.EventFilter
+// the event log uses. Per F20 / SPEC §6.16 + plan/answers/06 §W,
+// the grammar accepts:
+//
+//   - the empty string → match-all
+//   - shorthand: `layer` or `layer/kind` (back-compat with pre-F20)
+//   - full Participle grammar: `field op "value"` with AND / OR / NOT
+//     and parentheses; OR / NOT / produced_by parse but error at the
+//     EventFilter lowering until kernel.EventFilter grows a typed
+//     predicate tree (forward-compatible parse, conservative lower).
+//
+// Lowering to kernel.EventFilter is handled by Filter.ToEventFilter.
 func parseFilter(expr string) (kernel.EventFilter, error) {
-	if expr == "" {
+	ast, err := ParseFilterExpr(expr)
+	if err != nil {
+		return kernel.EventFilter{}, err
+	}
+	if ast == nil {
 		return kernel.EventFilter{}, nil
 	}
-	f := kernel.EventFilter{}
-	// Support "layer" and "layer/kind" shorthand (e.g. "code.core",
-	// "code.core/FileChanged"). The grammar will widen to the
-	// Participle dialect once that is plumbed through; for now this
-	// keeps the surface minimal but useful.
-	if i := indexByte(expr, '/'); i > 0 {
-		f.Layers = []string{expr[:i]}
-		f.Kinds = []string{expr[i+1:]}
-	} else {
-		f.Layers = []string{expr}
-	}
-	return f, nil
-}
-
-func indexByte(s string, c byte) int {
-	for i := range len(s) {
-		if s[i] == c {
-			return i
-		}
-	}
-	return -1
+	return ast.ToEventFilter()
 }

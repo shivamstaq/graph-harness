@@ -1,0 +1,70 @@
+# yaml-language-server: $schema=https://github.com/shivamstaq/gotit/raw/main/schema/spec.schema.json
+spec_version: 1
+name: harnesses-list-and-show
+description: >
+  F12 / P0.T06 + SPEC §11.1: `graph-harness harnesses list`
+  enumerates harness `.gh` files under `.graph-harness/harnesses/`.
+  `harnesses show <name>` prints the raw source. `harnesses
+  explain <name>` parses the file and lists its declarations.
+tags: [overlay, harnesses, p0t06, f12]
+order: 40
+requires:
+  - feature:p1-multi-language
+repo:
+  helper: go-module-empty
+
+setup:
+  - name: init_workspace
+    command: graph-harness init
+    assert: [{ type: exit_code, expected: 0 }]
+
+  - name: seed_harness_file
+    command: |
+      sh -c '
+      mkdir -p .graph-harness/harnesses
+      cat > .graph-harness/harnesses/payment.gh <<EOF
+      // Payment harness — exemplar selector + flow
+      selector PaymentAuthorize {
+        anchor qualified_name "payments.Authorize"
+      }
+      flow PaymentAuth {
+        scope PaymentAuthorize
+        step Authorize targets PaymentAuthorize
+      }
+      EOF
+      '
+    assert: [{ type: exit_code, expected: 0 }]
+
+steps:
+  - name: harnesses_list_shows_seeded_file
+    command: graph-harness harnesses list
+    assert:
+      - { type: exit_code, expected: 0 }
+      - { type: contains, value: "payment" }
+
+  - name: harnesses_list_json_is_well_formed
+    command: graph-harness harnesses list --json
+    assert:
+      - { type: exit_code, expected: 0 }
+      - { type: contains, value: "\"name\":\"payment\"" }
+
+  - name: harnesses_show_prints_source
+    command: graph-harness harnesses show payment
+    assert:
+      - { type: exit_code, expected: 0 }
+      - { type: contains, value: "selector PaymentAuthorize" }
+      - { type: contains, value: "flow PaymentAuth" }
+
+  - name: harnesses_explain_lists_declarations
+    command: graph-harness harnesses explain payment
+    assert:
+      - { type: exit_code, expected: 0 }
+      - { type: contains, value: "selector PaymentAuthorize" }
+      - { type: contains, value: "flow PaymentAuth" }
+      - { type: contains, value: "2 declarations" }
+
+  - name: harnesses_check_validates_clean
+    command: graph-harness harnesses check payment
+    assert:
+      - { type: exit_code, expected: 0 }
+      - { type: contains, value: "ok" }

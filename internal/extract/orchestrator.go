@@ -63,6 +63,13 @@ type Orchestrator struct {
 	refresh          *scip.Refresher // nil-safe
 	enableTreesitter bool            // false = skip tree-sitter parsing entirely
 
+	// refreshSeq returns the kernel head seq the SCIP refresh
+	// consumer goroutine should stamp on freshly-imported symbols.
+	// nil → use 0 (legacy non-watcher path).
+	refreshSeq func() uint64
+	refreshCtx context.Context //nolint:containedctx // F9: refresh consumer goroutine lifetime is tied to Close, not per-call
+	refreshDone chan struct{}
+
 	scipMu  sync.RWMutex
 	scipMap map[string][]source_live.Symbol // workspace-relative path → SCIP-derived symbols
 
@@ -219,6 +226,17 @@ func (o *Orchestrator) Close(ctx context.Context) error {
 	}
 	if o.refresh != nil {
 		o.refresh.Stop()
+	}
+	// F9: drain the SCIP refresh consumer goroutine. Stop() closes
+	// the events channel, which makes the goroutine's range loop
+	// exit; the close(o.refreshDone) inside the goroutine signals
+	// us. Bounded wait to keep Close non-blocking under broken
+	// refresher state.
+	if o.refreshDone != nil {
+		select {
+		case <-o.refreshDone:
+		case <-time.After(2 * time.Second):
+		}
 	}
 	return firstErr
 }
@@ -568,6 +586,83 @@ func (o *Orchestrator) AvailableLSPLanguages() []string {
 		return nil
 	}
 	return o.host.AvailableLanguages()
+}
+
+// SetLSPNotificationHandler installs an LSP push-back callback on the
+// orchestrator's host. The daemon installs a handler that translates
+// every server-initiated notification (publishDiagnostics, $/progress,
+// documentSymbol push variants) into a code.core drift event on the
+// kernel bus via the P0.5.T01 push channel. P1.5.T02.
+//
+// Safe no-op when LSP is disabled. Drivers spawned after this call
+// inherit the handler; already-spawned drivers receive it immediately
+// through the host.
+func (o *Orchestrator) SetLSPNotificationHandler(h lsp.NotificationHandler) {
+	if o.host == nil {
+		return
+	}
+	o.host.SetNotificationHandler(h)
+}
+
+// SCIPRefreshHook fires once per consumed SCIP refresh Event. The
+// daemon installs a hook that appends `code.core.SCIPRefreshed` on
+// the kernel bus so subscribers see hot-reload activity end-to-end.
+// Nil leaves the consumer goroutine silent.
+type SCIPRefreshHook func(indexPath string, languageID string, symbolCount int)
+
+// StartSCIPRefresh begins the F9 / P1.T11 SCIP hot-reload pipeline.
+// The Refresher watches `.scip-index/` via fsnotify; this method
+// kicks off Start + a consumer goroutine that drains Events() and
+// routes the resulting Symbols through the unifier so a fresh
+// .scip file landing in the workspace produces drift events without
+// requiring an explicit re-index.
+//
+// seqFn returns the kernel head seq each Event should be stamped
+// with (typically `log.LastSeq`). Pass nil to use a constant zero,
+// which means "no event-log integration" — the symbols still flow
+// through the unifier (so compare-before-emit suppresses no-ops),
+// but the resulting drift events lose their kernel-seq attribution.
+//
+// hook fires once per consumed event (after unify) so the daemon
+// can append a `code.core.SCIPRefreshed` event on the kernel bus
+// for observability. Pass nil to keep the consumer silent.
+//
+// Idempotent: subsequent calls are no-ops once the consumer is
+// running.
+func (o *Orchestrator) StartSCIPRefresh(ctx context.Context, seqFn func() uint64, errLog func(format string, args ...any), hook SCIPRefreshHook) error {
+	if o.refresh == nil {
+		return nil
+	}
+	if err := o.refresh.Start(ctx); err != nil {
+		return fmt.Errorf("scip refresher start: %w", err)
+	}
+	o.refreshCtx = ctx
+	o.refreshSeq = seqFn
+	o.refreshDone = make(chan struct{})
+	go func() {
+		defer close(o.refreshDone)
+		for ev := range o.refresh.Events() {
+			if ev.Err != nil {
+				if errLog != nil {
+					errLog("scip refresh: %v", ev.Err)
+				}
+				continue
+			}
+			seq := uint64(0)
+			if seqFn != nil {
+				seq = seqFn()
+			}
+			if _, _, err := o.unifier.UnifyChanged(ctx, ev.Symbols, seq); err != nil {
+				if errLog != nil {
+					errLog("scip refresh unify (%s): %v", ev.IndexPath, err)
+				}
+			}
+			if hook != nil {
+				hook(ev.IndexPath, ev.LanguageID, len(ev.Symbols))
+			}
+		}
+	}()
+	return nil
 }
 
 // HasSCIPIndexes reports whether the cached SCIP map covers any files.

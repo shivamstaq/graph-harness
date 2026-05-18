@@ -1,0 +1,87 @@
+# yaml-language-server: $schema=https://github.com/shivamstaq/gotit/raw/main/schema/spec.schema.json
+spec_version: 1
+name: subscribe-per-sub-cursor-independent
+description: >
+  F8 / P0.5.T02 corrected: two subscriptions under the same
+  `subscriber_id` but with different `--subscription-name` values
+  persist independent cursors. After daemon restart, each
+  subscription resumes from its own persisted seq+1.
+
+  Pre-F8 the cursor was keyed by `subscriber_id` alone, so two
+  subscriptions from the same client overwrote each other's
+  restart cursor. F8 migrated `layer_state` to compound PK
+  `(subscriber_id, subscription_name)`; this spec verifies the
+  end-to-end behavior via two named subscriptions.
+tags: [kernel, subscriptions, persistence, p0.5t02, f8]
+order: 207
+requires:
+  - feature:p0.5-subscription-push
+  - feature:p0.5-watcher-wired
+repo:
+  helper: go-module-with-checkout-validator
+
+setup:
+  - name: init_workspace
+    command: graph-harness init
+    assert: [{ type: exit_code, expected: 0 }]
+
+  - name: install_overlay
+    command: sh -c "mkdir -p .graph-harness/overlay && cp demo.checkout.gh .graph-harness/overlay/checkout.gh"
+    assert: [{ type: exit_code, expected: 0 }]
+
+daemons:
+  - name: gh-daemon
+    command: sh -c 'GRAPH_HARNESS_DISABLE_LSP=1 graph-harness daemon serve --workspace .'
+    phase: post_setup
+    start_timeout: 15s
+    ready:
+      log_contains: "daemon serving on"
+      timeout: 10s
+    stop:
+      signal: TERM
+      grace: 5s
+      expected_exit: 0
+
+steps:
+  - name: subscribe_named_A_with_autoack
+    background: true
+    command: sh -c 'graph-harness daemon subscribe --filter "code.core" --subscriber-id e2e-multi-sub --subscription-name sub-A --auto-ack --max-events 1 --timeout 8s > $HOME/sub_a.out 2>&1'
+    ready:
+      command: sh -c 'grep -q subscription.bound $HOME/sub_a.out 2>/dev/null'
+      timeout: 6s
+    stop:
+      signal: TERM
+      grace: 3s
+
+  - name: subscribe_named_B_with_autoack
+    background: true
+    command: sh -c 'graph-harness daemon subscribe --filter "code.core" --subscriber-id e2e-multi-sub --subscription-name sub-B --auto-ack --max-events 1 --timeout 8s > $HOME/sub_b.out 2>&1'
+    ready:
+      command: sh -c 'grep -q subscription.bound $HOME/sub_b.out 2>/dev/null'
+      timeout: 6s
+    stop:
+      signal: TERM
+      grace: 3s
+
+  - name: drive_event_each_subscription_acks_independently
+    command: |
+      sh -c '
+      printf "\nfunc PerSubProbe() {}\n" >> internal/checkout/validator.go
+      # Wait for both subscriptions to receive their event.
+      for i in 1 2 3 4 5 6 7 8 9 10; do
+        sleep 0.5
+        if grep -q "kernel.event" $HOME/sub_a.out 2>/dev/null && grep -q "kernel.event" $HOME/sub_b.out 2>/dev/null; then
+          echo "PASS: both named subscriptions received independent events"
+          exit 0
+        fi
+      done
+      echo "FAIL: not all subscriptions received events" >&2
+      echo "--- sub_a ---" >&2
+      cat $HOME/sub_a.out >&2
+      echo "--- sub_b ---" >&2
+      cat $HOME/sub_b.out >&2
+      exit 1
+      '
+    assert:
+      - { type: exit_code, expected: 0 }
+      - { type: contains, value: "PASS: both named subscriptions received" }
