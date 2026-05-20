@@ -48,7 +48,11 @@ steps:
     # The publish-transient command issues kernel.publishTransient
     # and then blocks on signal so the conn stays open — transient
     # entries are scoped to the conn and disappear when it closes.
+    # The test kills this daemon externally (pgrep + kill in the
+    # next step) to exercise the disconnect-drops-state path;
+    # expect_exit:true tells the runner that early exit is the design.
     background: true
+    expect_exit: true
     command: |
       sh -c '
       graph-harness daemon publish-transient \
@@ -59,9 +63,10 @@ steps:
         --hold 30s > $HOME/pub.out 2>&1
       '
     ready:
-      # The publisher prints transient.published once kernel.publishTransient returns.
+      # The publisher prints transient.published once kernel.publishTransient
+      # returns. 15s absorbs TUI fork-storm latency; sub-second on a quiet box.
       command: sh -c 'grep -q transient.published $HOME/pub.out 2>/dev/null'
-      timeout: 6s
+      timeout: 15s
     stop:
       signal: TERM
       grace: 3s
@@ -85,7 +90,12 @@ steps:
     # entry vanishes from the in-memory tier.
     command: |
       sh -c '
-      pkill -TERM -f "publish-transient.*ent-editor-buffer-42" || true
+      # pkill -f matches against the full argv. Our own sh -c argv
+      # contains this regex literal, so a naive `pkill -f
+      # "publish-transient.*"` would match (and kill) this script
+      # itself. Filter pgrep output through `grep -v $$` to skip
+      # the current shell.
+      pgrep -f "daemon publish-transient" | grep -v "^$$\$" | xargs -r kill -TERM 2>/dev/null || true
       # Give the daemon time to process the DisconnectNotify path.
       for i in 1 2 3 4 5 6 7 8 9 10; do
         sleep 0.3

@@ -57,11 +57,16 @@ steps:
     # the next step writes a file that produces the first event.
     # The auto-ack flag wires kernel.ack on each event so the
     # cursor lands in layer_state before disconnect.
+    # `--max-events 1` exits naturally once the ACK lands —
+    # `expect_exit: true` tells the runner the natural exit is the
+    # design, not a fault.
     background: true
-    command: sh -c 'graph-harness daemon subscribe --filter "code.core" --subscriber-id e2e-persist --auto-ack --max-events 1 --timeout 8s > $HOME/sess1.out 2>&1'
+    expect_exit: true
+    command: sh -c 'graph-harness daemon subscribe --filter "code.core" --subscriber-id e2e-persist --auto-ack --max-events 1 --timeout 20s > $HOME/sess1.out 2>&1'
     ready:
+      # 15s absorbs TUI fork-storm latency; sub-second on a quiet box.
       command: sh -c 'grep -q subscription.bound $HOME/sess1.out 2>/dev/null'
-      timeout: 6s
+      timeout: 15s
     stop:
       signal: TERM
       grace: 3s
@@ -94,10 +99,11 @@ steps:
     # (cursor jumped to head, missed Persist2's seq) or receives
     # session1's already-acked Persist1 event.
     background: true
-    command: sh -c 'graph-harness daemon subscribe --filter "code.core" --subscriber-id e2e-persist --max-events 1 --timeout 8s > $HOME/sess2.out 2>&1'
+    expect_exit: true
+    command: sh -c 'graph-harness daemon subscribe --filter "code.core" --subscriber-id e2e-persist --max-events 1 --timeout 20s > $HOME/sess2.out 2>&1'
     ready:
       command: sh -c 'grep -q subscription.bound $HOME/sess2.out 2>/dev/null'
-      timeout: 6s
+      timeout: 15s
     stop:
       signal: TERM
       grace: 3s

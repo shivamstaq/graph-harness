@@ -45,20 +45,24 @@ daemons:
 steps:
   - name: subscribe_named_A_with_autoack
     background: true
-    command: sh -c 'graph-harness daemon subscribe --filter "code.core" --subscriber-id e2e-multi-sub --subscription-name sub-A --auto-ack --max-events 1 --timeout 8s > $HOME/sub_a.out 2>&1'
+    expect_exit: true
+    command: sh -c 'graph-harness daemon subscribe --filter "code.core" --subscriber-id e2e-multi-sub --subscription-name sub-A --auto-ack --max-events 1 --timeout 20s > $HOME/sub_a.out 2>&1'
     ready:
+      # 15s readiness window absorbs TUI fork-storm latency; the bind
+      # itself is sub-second on a quiet box.
       command: sh -c 'grep -q subscription.bound $HOME/sub_a.out 2>/dev/null'
-      timeout: 6s
+      timeout: 15s
     stop:
       signal: TERM
       grace: 3s
 
   - name: subscribe_named_B_with_autoack
     background: true
-    command: sh -c 'graph-harness daemon subscribe --filter "code.core" --subscriber-id e2e-multi-sub --subscription-name sub-B --auto-ack --max-events 1 --timeout 8s > $HOME/sub_b.out 2>&1'
+    expect_exit: true
+    command: sh -c 'graph-harness daemon subscribe --filter "code.core" --subscriber-id e2e-multi-sub --subscription-name sub-B --auto-ack --max-events 1 --timeout 20s > $HOME/sub_b.out 2>&1'
     ready:
       command: sh -c 'grep -q subscription.bound $HOME/sub_b.out 2>/dev/null'
-      timeout: 6s
+      timeout: 15s
     stop:
       signal: TERM
       grace: 3s

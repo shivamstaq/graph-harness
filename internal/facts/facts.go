@@ -88,12 +88,21 @@ func OpenEventLog(path string) (*EventLog, error) {
 
 // Close releases the underlying database handle.
 func (e *EventLog) Close() error {
+	// Snapshot subscriptions under the lock, drop them from the map,
+	// then close channels without holding subsMu. subscription.close
+	// re-takes subsMu via owner.subsMu when invoked through the public
+	// Close() path; releasing subsMu before that call avoids a
+	// self-deadlock and the now-empty e.subs makes the delete a no-op.
 	e.subsMu.Lock()
+	subs := make([]*subscription, 0, len(e.subs))
 	for _, s := range e.subs {
-		_ = s.close()
+		subs = append(subs, s)
 	}
 	e.subs = map[uint64]*subscription{}
 	e.subsMu.Unlock()
+	for _, s := range subs {
+		_ = s.close()
+	}
 	return e.db.Close()
 }
 
