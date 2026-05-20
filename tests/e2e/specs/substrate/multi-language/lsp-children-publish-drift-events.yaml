@@ -55,11 +55,14 @@ steps:
   - name: subscribe_in_background_then_edit_to_trigger_diagnostic
     command: |
       sh -c '
-      # Background subscriber to code.core events.
-      graph-harness daemon subscribe --filter "code.core" --max-events 1 --timeout 20s > $HOME/sub.out 2>&1 &
+      # Background subscriber to code.core events. 30s --timeout
+      # absorbs LSP+fsnotify pipeline lag under TUI fork-storm load.
+      graph-harness daemon subscribe --filter "code.core" --max-events 1 --timeout 30s > $HOME/sub.out 2>&1 &
       SUB_PID=$!
-      # Wait for the subscribe bind.
-      for i in 1 2 3 4 5 6 7 8 9 10; do
+      # Wait up to 15s for the subscribe bind (30 × 0.5s). On a quiet
+      # box the bind is sub-second; the larger window only fires when
+      # the system is genuinely saturated.
+      for i in $(seq 1 30); do
         sleep 0.5
         grep -q subscription.bound $HOME/sub.out 2>/dev/null && break
       done

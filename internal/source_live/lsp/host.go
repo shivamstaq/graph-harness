@@ -127,6 +127,14 @@ func (h *Host) DriverFor(ctx context.Context, languageID string) (Driver, error)
 		return nil, fmt.Errorf("lsp: initialize %s: %w", languageID, err)
 	}
 	h.mu.Lock()
+	// Close may have run while Initialize was in flight; the map is
+	// then nil and a bare assignment panics. Drop the freshly-built
+	// driver instead and report host-closed.
+	if h.closed {
+		h.mu.Unlock()
+		_ = d.Shutdown(ctx)
+		return nil, fmt.Errorf("lsp: host closed")
+	}
 	h.drivers[languageID] = d
 	h.mu.Unlock()
 	return d, nil

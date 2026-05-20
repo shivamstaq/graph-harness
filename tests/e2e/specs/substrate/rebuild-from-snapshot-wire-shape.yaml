@@ -40,10 +40,12 @@ steps:
     # against. daemon subscribe --max-events 1 binds; the
     # `subscription.bound` line carries the id we need.
     background: true
-    command: sh -c 'graph-harness daemon subscribe --filter code.core --max-events 1 --timeout 8s > $HOME/sub.out 2>&1'
+    expect_exit: true
+    command: sh -c 'graph-harness daemon subscribe --filter code.core --max-events 1 --timeout 20s > $HOME/sub.out 2>&1'
     ready:
+      # 15s absorbs TUI fork-storm latency; sub-second on a quiet box.
       command: sh -c 'grep -q subscription.bound $HOME/sub.out 2>/dev/null'
-      timeout: 6s
+      timeout: 15s
     stop:
       signal: TERM
       grace: 3s

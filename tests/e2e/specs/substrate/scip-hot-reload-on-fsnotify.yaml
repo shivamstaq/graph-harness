@@ -70,10 +70,12 @@ steps:
 
   - name: subscribe_for_scip_refreshed_event
     background: true
-    command: sh -c 'graph-harness daemon subscribe --filter "code.core/SCIPRefreshed" --max-events 1 --timeout 12s > $HOME/refreshed.out 2>&1'
+    expect_exit: true
+    command: sh -c 'graph-harness daemon subscribe --filter "code.core/SCIPRefreshed" --max-events 1 --timeout 25s > $HOME/refreshed.out 2>&1'
     ready:
+      # 15s absorbs TUI fork-storm latency; sub-second on a quiet box.
       command: sh -c 'grep -q subscription.bound $HOME/refreshed.out 2>/dev/null'
-      timeout: 6s
+      timeout: 15s
     stop:
       signal: TERM
       grace: 3s

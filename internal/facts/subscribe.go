@@ -14,6 +14,7 @@ type subscription struct {
 	filter kernel.EventFilter
 	ch     chan kernel.Event
 	once   sync.Once
+	owner  *EventLog
 }
 
 // Subscribe registers an in-process subscriber and returns its event stream.
@@ -28,6 +29,7 @@ func (e *EventLog) Subscribe(_ kernel.EventFilter) EventStream {
 		id:     e.subCounter,
 		filter: kernel.EventFilter{},
 		ch:     make(chan kernel.Event, 1024),
+		owner:  e,
 	}
 	e.subs[s.id] = s
 	return s
@@ -66,6 +68,18 @@ func (s *subscription) Events() <-chan kernel.Event { return s.ch }
 func (s *subscription) Close() error { return s.close() }
 
 func (s *subscription) close() error {
-	s.once.Do(func() { close(s.ch) })
+	s.once.Do(func() {
+		// Unregister from the EventLog before closing the channel so
+		// fanout can never observe a closed channel still in e.subs
+		// (which would panic on send). EventLog.Close already holds
+		// subsMu and drives close() from within; the nil-owner branch
+		// preserves that path's existing locking discipline.
+		if s.owner != nil {
+			s.owner.subsMu.Lock()
+			delete(s.owner.subs, s.id)
+			s.owner.subsMu.Unlock()
+		}
+		close(s.ch)
+	})
 	return nil
 }
