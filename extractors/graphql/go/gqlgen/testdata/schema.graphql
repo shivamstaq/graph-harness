@@ -1,0 +1,12 @@
+type Query {
+  user(id: ID!): User
+  users: [User!]!
+}
+
+type Mutation {
+  createUser(name: String!, age: Int): User!
+}
+
+type Subscription {
+  userAdded: User
+}
