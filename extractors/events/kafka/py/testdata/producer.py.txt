@@ -1,0 +1,16 @@
+from confluent_kafka import Producer, Consumer
+from kafka import KafkaConsumer, KafkaProducer
+
+def publish_order(p: Producer):
+    p.produce("order.created", value=b"v")
+
+def publish_via_kp(p: KafkaProducer):
+    p.send("inventory.updated", value=b"v")
+
+def subscribe_orders(c: Consumer):
+    c.subscribe(["order.created", "audit.events"])
+
+def consume_user_signups():
+    c = KafkaConsumer("user.signed_in", group_id="audit")
+    for msg in c:
+        pass

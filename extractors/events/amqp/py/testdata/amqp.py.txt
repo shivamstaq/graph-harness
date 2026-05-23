@@ -1,0 +1,14 @@
+import pika
+
+def publish_order(channel):
+    channel.basic_publish(
+        exchange="orders.exchange",
+        routing_key="order.created",
+        body=b"{}",
+    )
+
+def consume_orders(channel):
+    channel.basic_consume(
+        queue="orders.queue",
+        on_message_callback=lambda ch, m, p, b: None,
+    )

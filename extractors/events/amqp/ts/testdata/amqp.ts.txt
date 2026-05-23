@@ -1,0 +1,13 @@
+import amqp from "amqplib";
+
+export async function publishOrder(channel: amqp.Channel) {
+  channel.publish("orders.exchange", "order.created", Buffer.from("{}"));
+}
+
+export async function sendDirect(channel: amqp.Channel) {
+  channel.sendToQueue("audit.queue", Buffer.from("{}"));
+}
+
+export async function consume(channel: amqp.Channel) {
+  await channel.consume("orders.queue", (msg) => {});
+}

@@ -1,0 +1,29 @@
+import { OrderService } from "../src/order_service";
+
+describe("OrderService", () => {
+  beforeEach(() => {
+    // setup
+  });
+
+  afterEach(() => {
+    // teardown
+  });
+
+  it("places an order", async () => {
+    const svc = new OrderService();
+    await svc.placeOrder({ id: "1" });
+  });
+
+  describe("cancel", () => {
+    it("cancels happy path", async () => {
+      const svc = new OrderService();
+      await svc.cancelOrder({ id: "2" });
+    });
+    test.skip("noop on already-cancelled", () => {});
+  });
+
+  it("publishes order.created", async () => {
+    const topic = "order.created";
+    expect(topic).toBeDefined();
+  });
+});

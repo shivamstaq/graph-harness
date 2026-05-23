@@ -1,0 +1,24 @@
+package redispubsubdemo
+
+import (
+	"context"
+
+	"github.com/redis/go-redis/v9"
+	"github.com/gomodule/redigo/redis"
+)
+
+func PublishUpdate(ctx context.Context, rdb *go_redis.Client) error {
+	return rdb.Publish(ctx, "notifications", "hello").Err()
+}
+
+func SubscribeNotifs(ctx context.Context, rdb *go_redis.Client) *go_redis.PubSub {
+	return rdb.Subscribe(ctx, "notifications", "alerts")
+}
+
+func PatternSubscribe(ctx context.Context, rdb *go_redis.Client) *go_redis.PubSub {
+	return rdb.PSubscribe(ctx, "events.*")
+}
+
+func PublishViaRedigo(conn redis.Conn) (interface{}, error) {
+	return conn.Do("PUBLISH", "deprecated.ch", "payload")
+}

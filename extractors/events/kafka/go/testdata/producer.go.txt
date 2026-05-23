@@ -1,0 +1,52 @@
+package orderpub
+
+import (
+	"context"
+
+	"github.com/segmentio/kafka-go"
+	confkafka "github.com/confluentinc/confluent-kafka-go/v2/kafka"
+)
+
+// PublishOrder publishes an order.created event using segmentio/kafka-go.
+func PublishOrder(ctx context.Context, w *kafka.Writer) error {
+	return w.WriteMessages(ctx, kafka.Message{
+		Topic: "order.created",
+		Key:   []byte("k"),
+		Value: []byte("v"),
+	})
+}
+
+// MakeWriter constructs a Writer pinned to inventory.updated.
+func MakeWriter() *kafka.Writer {
+	return kafka.NewWriter(kafka.WriterConfig{
+		Topic:   "inventory.updated",
+		Brokers: []string{"broker:9092"},
+	})
+}
+
+// MakeReader constructs a Reader pinned to user.signed_in.
+func MakeReader() *kafka.Reader {
+	return kafka.NewReader(kafka.ReaderConfig{
+		Topic:   "user.signed_in",
+		Brokers: []string{"broker:9092"},
+	})
+}
+
+// PublishConfluent uses confluent-kafka-go's Producer API.
+func PublishConfluent(p *confkafka.Producer) error {
+	topic := "payment.captured"
+	return p.Produce(&confkafka.Message{
+		TopicPartition: confkafka.TopicPartition{Topic: &topic},
+		Value:          []byte("v"),
+	}, nil)
+}
+
+// SubscribeConfluent subscribes a confluent consumer to a single topic.
+func SubscribeConfluent(c *confkafka.Consumer) error {
+	return c.Subscribe("audit.events", nil)
+}
+
+// SubscribeMany subscribes to multiple topics.
+func SubscribeMany(c *confkafka.Consumer) error {
+	return c.SubscribeTopics([]string{"alpha.topic", "beta.topic"}, nil)
+}

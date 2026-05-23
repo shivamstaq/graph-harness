@@ -1,0 +1,14 @@
+import { connect, NatsConnection } from "nats";
+
+export async function pubHello(nc: NatsConnection) {
+  nc.publish("hello.greeting", "hi");
+}
+
+export async function requestPing(nc: NatsConnection) {
+  await nc.request("ping.echo", "data");
+}
+
+export async function subscribeHello(nc: NatsConnection) {
+  const sub = nc.subscribe("hello.greeting");
+  for await (const m of sub) {}
+}

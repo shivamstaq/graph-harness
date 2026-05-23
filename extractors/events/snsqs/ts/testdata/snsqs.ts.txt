@@ -1,0 +1,22 @@
+import { SNSClient, PublishCommand } from "@aws-sdk/client-sns";
+import { SQSClient, SendMessageCommand, ReceiveMessageCommand } from "@aws-sdk/client-sqs";
+
+export async function publishSNS(client: SNSClient) {
+  return client.send(new PublishCommand({
+    TopicArn: "arn:aws:sns:us-east-1:000:order-events",
+    Message: "hello",
+  }));
+}
+
+export async function sendSQS(client: SQSClient) {
+  return client.send(new SendMessageCommand({
+    QueueUrl: "https://sqs.us-east-1.amazonaws.com/000/orders-queue",
+    MessageBody: "v",
+  }));
+}
+
+export async function receiveSQS(client: SQSClient) {
+  return client.send(new ReceiveMessageCommand({
+    QueueUrl: "https://sqs.us-east-1.amazonaws.com/000/audit-queue",
+  }));
+}

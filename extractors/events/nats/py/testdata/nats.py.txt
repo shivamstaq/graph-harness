@@ -1,0 +1,13 @@
+import asyncio
+import nats
+
+async def publish_hello(nc):
+    await nc.publish("hello.greeting", b"hi")
+
+async def request_ping(nc):
+    await nc.request("ping.echo", b"data")
+
+async def subscribe_hello(nc):
+    sub = await nc.subscribe("hello.greeting")
+    async for msg in sub.messages:
+        pass

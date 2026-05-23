@@ -1,0 +1,18 @@
+import boto3
+
+def publish_to_sns(client):
+    return client.publish(
+        TopicArn="arn:aws:sns:us-east-1:000:order-events",
+        Message="hi",
+    )
+
+def send_to_sqs(client):
+    return client.send_message(
+        QueueUrl="https://sqs.us-east-1.amazonaws.com/000/orders-queue",
+        MessageBody="v",
+    )
+
+def receive_from_sqs(client):
+    return client.receive_message(
+        QueueUrl="https://sqs.us-east-1.amazonaws.com/000/audit-queue",
+    )
