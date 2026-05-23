@@ -1,0 +1,10 @@
+import redis
+
+def publish_notif(r):
+    r.publish("notifications", "hello")
+
+def subscribe_notifs(pubsub):
+    pubsub.subscribe("notifications", "alerts")
+
+def pattern_subscribe(pubsub):
+    pubsub.psubscribe("events.*")

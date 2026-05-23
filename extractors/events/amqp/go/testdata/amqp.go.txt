@@ -1,0 +1,24 @@
+package amqpdemo
+
+import (
+	"context"
+
+	amqp "github.com/rabbitmq/amqp091-go"
+)
+
+func PublishOrder(ch *amqp.Channel) error {
+	return ch.Publish("orders.exchange", "order.created", false, false, amqp.Publishing{
+		ContentType: "application/json",
+		Body:        []byte("{}"),
+	})
+}
+
+func PublishWithCtx(ctx context.Context, ch *amqp.Channel) error {
+	return ch.PublishWithContext(ctx, "billing.exchange", "billing.invoiced", false, false, amqp.Publishing{
+		Body: []byte("{}"),
+	})
+}
+
+func ConsumeOrders(ch *amqp.Channel) (<-chan amqp.Delivery, error) {
+	return ch.Consume("orders.queue", "consumer-1", true, false, false, false, nil)
+}

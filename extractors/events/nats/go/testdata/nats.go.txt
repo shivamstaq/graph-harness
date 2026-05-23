@@ -1,0 +1,26 @@
+package natsdemo
+
+import (
+	"github.com/nats-io/nats.go"
+)
+
+func PublishGreeting(nc *nats.Conn) error {
+	return nc.Publish("hello.greeting", []byte("hi"))
+}
+
+func PublishOrder(nc *nats.Conn) error {
+	return nc.PublishMsg(&nats.Msg{
+		Subject: "order.created",
+		Data:    []byte("v"),
+	})
+}
+
+func SubscribeGreetings(nc *nats.Conn) error {
+	_, err := nc.Subscribe("hello.greeting", func(m *nats.Msg) {})
+	return err
+}
+
+func QueueSubscribeWorkers(nc *nats.Conn) error {
+	_, err := nc.QueueSubscribe("worker.jobs", "workers", func(m *nats.Msg) {})
+	return err
+}

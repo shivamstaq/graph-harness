@@ -1,0 +1,32 @@
+import { Kafka } from "kafkajs";
+
+const kafka = new Kafka({ clientId: "demo", brokers: ["broker:9092"] });
+
+export async function publishOrder() {
+  const producer = kafka.producer();
+  await producer.connect();
+  await producer.send({
+    topic: "order.created",
+    messages: [{ value: "v" }],
+  });
+}
+
+export async function publishBatch() {
+  const producer = kafka.producer();
+  await producer.sendBatch({
+    topicMessages: [
+      { topic: "alpha.events", messages: [{ value: "a" }] },
+      { topic: "beta.events", messages: [{ value: "b" }] },
+    ],
+  });
+}
+
+export async function subscribeOrders() {
+  const consumer = kafka.consumer({ groupId: "audit" });
+  await consumer.subscribe({ topic: "order.created", fromBeginning: true });
+}
+
+export async function subscribeMany() {
+  const consumer = kafka.consumer({ groupId: "audit" });
+  await consumer.subscribe({ topics: ["alpha.events", "beta.events"] });
+}

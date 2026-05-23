@@ -1,0 +1,29 @@
+package snsqsdemo
+
+import (
+	"context"
+
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/sns"
+	"github.com/aws/aws-sdk-go-v2/service/sqs"
+)
+
+func PublishToSNS(ctx context.Context, c *sns.Client) (*sns.PublishOutput, error) {
+	return c.Publish(ctx, &sns.PublishInput{
+		TopicArn: aws.String("arn:aws:sns:us-east-1:000:order-events"),
+		Message:  aws.String("hello"),
+	})
+}
+
+func SendToSQS(ctx context.Context, c *sqs.Client) (*sqs.SendMessageOutput, error) {
+	return c.SendMessage(ctx, &sqs.SendMessageInput{
+		QueueUrl:    aws.String("https://sqs.us-east-1.amazonaws.com/000/orders-queue"),
+		MessageBody: aws.String("hi"),
+	})
+}
+
+func ReceiveFromSQS(ctx context.Context, c *sqs.Client) (*sqs.ReceiveMessageOutput, error) {
+	return c.ReceiveMessage(ctx, &sqs.ReceiveMessageInput{
+		QueueUrl: aws.String("https://sqs.us-east-1.amazonaws.com/000/audit-queue"),
+	})
+}
