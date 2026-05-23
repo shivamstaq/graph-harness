@@ -1,0 +1,166 @@
+# yaml-language-server: $schema=https://github.com/shivamstaq/gotit/raw/main/schema/spec.schema.json
+spec_version: 1
+name: p2-event-payload-cross-lang
+description: >-
+  Phase 2 end-to-end smoke: a Go publisher emits `order.created`, a TS
+  consumer subscribes, a Python audit consumes, and a Jest contract test
+  references the topic. Adding a `transaction_id` field to the Go payload
+  surfaces three `missing_dependent_update` findings — one per dependent —
+  and populates FrameworkContext.Dependents.
+tags: [phase2, smoke, framework-extractors, events, kafka, p2t-smoke]
+order: 200
+requires:
+  - feature:p2-framework-extractors
+repo:
+  helper: go-module-empty
+
+# The fixture is inlined via setup steps so this spec stays self-contained:
+# it does not depend on the bench agent's `internal/bench/fixtures/scenario2/`
+# tree landing first. The fixture is intentionally minimal — just enough for
+# the Go, TS, Py, and Jest extractors to register one publisher, two
+# subscribers, and one contract test for the `order.created` topic.
+setup:
+  - name: init_workspace
+    command: graph-harness init
+    assert:
+      - { type: exit_code, expected: 0 }
+
+  - name: write_go_publisher
+    command: |
+      sh -c 'mkdir -p services/orders && cat > services/orders/publisher.go <<"GOEOF"
+      package orders
+
+      import "github.com/segmentio/kafka-go"
+
+      // OrderCreated is the payload published to the order.created topic.
+      type OrderCreated struct {
+        OrderID string `json:"order_id"`
+        UserID  string `json:"user_id"`
+        Amount  int64  `json:"amount"`
+      }
+
+      // Publish writes one OrderCreated event to Kafka.
+      func Publish(w *kafka.Writer, e OrderCreated) error {
+        return w.WriteMessages(nil, kafka.Message{
+          Topic: "order.created",
+          Value: nil,
+        })
+      }
+      GOEOF'
+    assert:
+      - { type: exit_code, expected: 0 }
+
+  - name: write_ts_consumer
+    command: |
+      sh -c 'mkdir -p services/notifications && cat > services/notifications/consumer.ts <<"TSEOF"
+      import { Kafka } from "kafkajs";
+
+      const kafka = new Kafka({ brokers: ["localhost:9092"] });
+      const consumer = kafka.consumer({ groupId: "notifications" });
+
+      export async function run() {
+        await consumer.subscribe({ topic: "order.created" });
+        await consumer.run({
+          eachMessage: async ({ message }) => {
+            const payload = JSON.parse(message.value!.toString());
+            console.log("notify", payload.order_id, payload.user_id);
+          },
+        });
+      }
+      TSEOF'
+    assert:
+      - { type: exit_code, expected: 0 }
+
+  - name: write_py_audit
+    command: |
+      sh -c 'mkdir -p services/audit && cat > services/audit/consumer.py <<"PYEOF"
+      from kafka import KafkaConsumer
+      import json
+
+      def run():
+          consumer = KafkaConsumer("order.created", bootstrap_servers="localhost:9092")
+          for msg in consumer:
+              payload = json.loads(msg.value)
+              record(payload["order_id"], payload["user_id"], payload["amount"])
+
+      def record(order_id, user_id, amount):
+          pass
+      PYEOF'
+    assert:
+      - { type: exit_code, expected: 0 }
+
+  - name: write_jest_contract_test
+    command: |
+      sh -c 'mkdir -p tests/contracts && cat > tests/contracts/order-created.test.ts <<"JESTEOF"
+      import { describe, it, expect } from "@jest/globals";
+
+      describe("order.created contract", () => {
+        it("includes order_id, user_id, amount", () => {
+          const sample = { order_id: "o1", user_id: "u1", amount: 100 };
+          expect(sample).toHaveProperty("order_id");
+          expect(sample).toHaveProperty("user_id");
+          expect(sample).toHaveProperty("amount");
+        });
+      });
+      JESTEOF'
+    assert:
+      - { type: exit_code, expected: 0 }
+
+  - name: write_payload_diff
+    command: |
+      sh -c 'cat > payload.diff <<"DIFFEOF"
+      --- a/services/orders/publisher.go
+      +++ b/services/orders/publisher.go
+      @@ -7,6 +7,7 @@ type OrderCreated struct {
+         OrderID string `json:"order_id"`
+         UserID  string `json:"user_id"`
+         Amount  int64  `json:"amount"`
+      +  TransactionID string `json:"transaction_id"`
+       }
+      DIFFEOF'
+    assert:
+      - { type: exit_code, expected: 0 }
+
+  - name: commit_fixture
+    command: sh -c "git add -A && git -c user.email=ci@example.com -c user.name=ci commit -m 'phase2 smoke fixture' >/dev/null"
+    assert:
+      - { type: exit_code, expected: 0 }
+
+  - name: daemon_start
+    command: graph-harness daemon start
+    assert:
+      - { type: exit_code, expected: 0 }
+
+steps:
+  - name: validate_diff_emits_three_dependents
+    command: graph-harness validate-diff --diff payload.diff --json
+    assert:
+      - { type: exit_code, expected: 0 }
+      # Three dependents: TS consumer, Py audit, Jest contract test.
+      - { type: json_path, path: "$.findings[0].kind", op: "==", expected: "missing_dependent_update" }
+      - { type: json_path, path: "$.findings[1].kind", op: "==", expected: "missing_dependent_update" }
+      - { type: json_path, path: "$.findings[2].kind", op: "==", expected: "missing_dependent_update" }
+      # Subject entity_kind is the publisher (EventPublisher); the dependents
+      # are carried on FrameworkContext.Dependents per §4 demo.
+      - { type: json_path, path: "$.findings[0].subject.entity_kind", op: "==", expected: "code.framework:EventPublisher" }
+      # Each finding's evidence names the missing dependent file.
+      - { type: contains, value: "services/notifications/consumer.ts" }
+      - { type: contains, value: "services/audit/consumer.py" }
+      - { type: contains, value: "tests/contracts/order-created.test.ts" }
+
+  - name: framework_context_dependents_populated
+    command: graph-harness validate-diff --diff payload.diff --json
+    assert:
+      - { type: exit_code, expected: 0 }
+      # Optional: the FrameworkContext.Dependents list is populated on the
+      # subject side. Asserted via stdout-substring so the spec stays robust
+      # to JSON path engine differences for nested arrays.
+      - { type: contains, value: "framework_context" }
+      - { type: contains, value: "dependents" }
+      - { type: contains, value: "order.created" }
+
+  - name: validate_diff_idempotent
+    command: graph-harness validate-diff --diff payload.diff --json
+    assert:
+      - { type: exit_code, expected: 0 }
+      - { type: json_path, path: "$.findings[0].kind", op: "==", expected: "missing_dependent_update" }
