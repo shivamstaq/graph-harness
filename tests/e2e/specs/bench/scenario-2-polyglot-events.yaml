@@ -1,0 +1,49 @@
+# yaml-language-server: $schema=https://github.com/shivamstaq/gotit/raw/main/schema/spec.schema.json
+spec_version: 1
+name: scenario-2-polyglot-events
+description: >
+  Pass-2 bench scenario 2 (polyglot Kafka event-payload propagation):
+  a Go publisher emits `kafka:order.created`, consumed by a TS web
+  consumer + a Py audit consumer + a Jest contract test. Three target
+  diffs (add / rename / remove a payload field) each must produce one
+  `missing_dependent_update` finding listing all three dependents.
+  `graph-harness bench --scenario 2 --regime mature` loads the fixture
+  under tests/testdata/bench/scenario2/, applies the seed (framework
+  producer + dependents + reverse-index binding), runs change.process
+  against each target diff, and scores the detection axis per
+  dependent language. The scenario passes its gate when
+  min(per-language score) >= 0.7.
+tags: [bench, polyglot, events, p2t42]
+order: 51
+requires:
+  - cgo
+  - tree-sitter
+  - feature:p2-framework-edges
+
+# The bench command discovers the scenario root by walking up from cwd
+# looking for `tests/testdata/bench/scenario2/`. As with scenario 1, the
+# fallback chain through the GRAPH_HARNESS_E2E_PROJECT_ROOT env var lets
+# this spec run from gotit's tmpdir.
+repo:
+  helper: go-module-empty
+
+steps:
+  - name: bench_scenario2_passes_gate
+    command: graph-harness bench --scenario 2 --regime mature
+    assert:
+      - { type: exit_code, expected: 0 }
+      # Per-language detection-axis shape.
+      - { type: contains, value: '"detection_axis"' }
+      - { type: contains, value: '"typescript"' }
+      - { type: contains, value: '"python"' }
+      # Every dependent matched -> scenario-level pass-gate true.
+      - { type: contains, value: '"passes_gate": true' }
+      # Per-diff envelope is present (add / rename / remove).
+      - { type: contains, value: '"diff_id": "add_field"' }
+      - { type: contains, value: '"diff_id": "rename_field"' }
+      - { type: contains, value: '"diff_id": "remove_field"' }
+      # missing_dependent_update finding shape leaks into per_diff.findings_observed
+      # counts but not as a literal key — we assert the scenario.id instead.
+      - { type: json_path, path: "$.scenario.id", op: "==", expected: 2 }
+      - { type: json_path, path: "$.detection_axis.typescript.score", op: ">=", expected: 0.7 }
+      - { type: json_path, path: "$.detection_axis.python.score", op: ">=", expected: 0.7 }

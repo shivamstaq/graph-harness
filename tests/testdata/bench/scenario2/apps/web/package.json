@@ -1,0 +1,8 @@
+{
+  "name": "web-order-consumer",
+  "version": "0.0.0",
+  "private": true,
+  "dependencies": {
+    "kafkajs": "^2.2.0"
+  }
+}

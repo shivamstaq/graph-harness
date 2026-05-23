@@ -1,0 +1,22 @@
+--- a/services/order/event.go
++++ b/services/order/event.go
+@@ -7,7 +7,6 @@ package order
+ // dependent (TS web consumer, Py audit consumer, Jest contract test)
+ // and must trigger `missing_dependent_update` from change.process.
+ type OrderCreated struct {
+ 	OrderID    string
+-	CustomerID string
+ 	Amount     float64
+ }
+--- a/services/order/publisher.go
++++ b/services/order/publisher.go
+@@ -10,7 +10,8 @@ import (
+ // PublishOrderCreated emits the OrderCreated payload on the
+ // `order.created` Kafka topic. The qualified name "order.PublishOrderCreated"
+ // is the flow's Publish step anchor.
+-func PublishOrderCreated(ctx context.Context, w *kafka.Writer, ev OrderCreated) error {
++// CustomerID dropped; dependents must drop their reference.
++func PublishOrderCreated(ctx context.Context, w *kafka.Writer, ev OrderCreated) error {
+ 	payload, err := json.Marshal(ev)
+ 	if err != nil {
+ 		return err

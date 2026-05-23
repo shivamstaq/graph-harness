@@ -1,0 +1,60 @@
+{
+  "scenario_id": 2,
+  "name": "polyglot order.created event-payload propagation",
+  "regime": "mature",
+  "shared_linking_key": "kafka:order.created",
+  "comment": "Each target diff mutates the Go OrderCreated payload + the publisher function. Stage 4 reverse-index expansion pulls the EventPublisher into the touched set; Stage 5 BFS walks every entity sharing the kafka:order.created qualified name; Stage 6 fires exactly one missing_dependent_update finding listing the three stale dependents. Detection axis is scored per dependent language so a regression in one language surfaces independently.",
+  "diffs": [
+    {
+      "diff_id": "add_field",
+      "diff_file": "diffs/add_field.diff",
+      "expected": [
+        {
+          "kind": "missing_dependent_update",
+          "severity": "high",
+          "subject_qualified_name": "kafka:order.created",
+          "subject_kind": "code.framework:EventPublisher",
+          "dependents": [
+            {"language": "typescript", "entity_id": "sub:web.order_consumer",  "kind": "EventSubscriber"},
+            {"language": "python",     "entity_id": "sub:audit.consumer",      "kind": "EventSubscriber"},
+            {"language": "typescript", "entity_id": "ctest:order_created_spec","kind": "ContractTest"}
+          ]
+        }
+      ]
+    },
+    {
+      "diff_id": "rename_field",
+      "diff_file": "diffs/rename_field.diff",
+      "expected": [
+        {
+          "kind": "missing_dependent_update",
+          "severity": "high",
+          "subject_qualified_name": "kafka:order.created",
+          "subject_kind": "code.framework:EventPublisher",
+          "dependents": [
+            {"language": "typescript", "entity_id": "sub:web.order_consumer",  "kind": "EventSubscriber"},
+            {"language": "python",     "entity_id": "sub:audit.consumer",      "kind": "EventSubscriber"},
+            {"language": "typescript", "entity_id": "ctest:order_created_spec","kind": "ContractTest"}
+          ]
+        }
+      ]
+    },
+    {
+      "diff_id": "remove_field",
+      "diff_file": "diffs/remove_field.diff",
+      "expected": [
+        {
+          "kind": "missing_dependent_update",
+          "severity": "high",
+          "subject_qualified_name": "kafka:order.created",
+          "subject_kind": "code.framework:EventPublisher",
+          "dependents": [
+            {"language": "typescript", "entity_id": "sub:web.order_consumer",  "kind": "EventSubscriber"},
+            {"language": "python",     "entity_id": "sub:audit.consumer",      "kind": "EventSubscriber"},
+            {"language": "typescript", "entity_id": "ctest:order_created_spec","kind": "ContractTest"}
+          ]
+        }
+      ]
+    }
+  ]
+}
