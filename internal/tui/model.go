@@ -24,7 +24,7 @@ import (
 type Model struct {
 	svc jsonrpc.Consumer
 
-	view   int // 0 status, 1 findings, 2 conflicts, 3 doctor
+	view   int // 0 status, 1 findings, 2 conflicts, 3 doctor, 4 impact
 	width  int
 	height int
 	status jsonrpc.StatusResult
@@ -34,6 +34,12 @@ type Model struct {
 	cursor int
 	err    error
 	tick   time.Time
+
+	// impact is the P2.T39 live impact panel. nil when the CLI did
+	// not wire an ImpactDataSource (e.g. snapshot/--interactive=false
+	// path) — in that case the "impact" tab is omitted from the
+	// tab bar and the view never appears.
+	impact *ImpactPanel
 }
 
 // NewModel constructs the model bound to the given Consumer. svc may
@@ -47,6 +53,18 @@ func NewModel(svc jsonrpc.Consumer) *Model {
 // launched after a validate-diff invocation that produced findings).
 func (m *Model) SetFindings(f []change_process.ValidationFinding) { m.finds = f }
 
+// AttachImpact wires the P2.T39 live impact panel. Both args are
+// required for the panel to render anything useful: `source` is the
+// re-derive seam (StagedDiff / EntitiesForPath / ValidateDiff) and
+// `events` is the push channel the panel subscribes to (sourced from
+// facts.EventLog.SubscribeWithFilter in batch mode or
+// kernel.subscribe over JSON-RPC in daemon mode). Passing nil for
+// `events` produces a passive panel that only re-derives on demand.
+// Per P2.T39 the panel is push-driven — there is no polling timer.
+func (m *Model) AttachImpact(source ImpactDataSource, events <-chan ImpactEvent) {
+	m.impact = NewImpactPanel(source, events)
+}
+
 // Run runs the bubbletea program in alternate-screen mode. Blocks until the
 // user exits. Caller passes ctx for cancellation.
 func (m *Model) Run(_ context.Context) error {
@@ -57,7 +75,22 @@ func (m *Model) Run(_ context.Context) error {
 
 // Init implements tea.Model.
 func (m *Model) Init() tea.Cmd {
-	return tea.Batch(m.refreshCmd(), tea.Tick(2*time.Second, func(t time.Time) tea.Msg { return tickMsg(t) }))
+	cmds := []tea.Cmd{m.refreshCmd(), tea.Tick(2*time.Second, func(t time.Time) tea.Msg { return tickMsg(t) })}
+	if m.impact != nil {
+		if c := m.impact.Init(); c != nil {
+			cmds = append(cmds, c)
+		}
+	}
+	return tea.Batch(cmds...)
+}
+
+// tabCount returns the number of visible tabs. The "impact" tab is
+// only counted when AttachImpact has been called.
+func (m *Model) tabCount() int {
+	if m.impact != nil {
+		return 5
+	}
+	return 4
 }
 
 type tickMsg time.Time
@@ -90,18 +123,38 @@ func (m *Model) refreshCmd() tea.Cmd {
 
 // Update implements tea.Model.
 func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	// The impact panel owns its own message types (impactEventMsg,
+	// impactDeriveMsg). Forward those unconditionally so the panel's
+	// push-driven recv loop keeps running across view switches.
+	switch msg.(type) {
+	case impactEventMsg, impactDeriveMsg:
+		if m.impact != nil {
+			_, cmd := m.impact.Update(msg)
+			return m, cmd
+		}
+		return m, nil
+	}
+	tabs := m.tabCount()
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
+		if m.impact != nil {
+			m.impact.SetSize(msg.Width, msg.Height)
+		}
 	case tea.KeyMsg:
-		switch msg.String() {
+		key := msg.String()
+		// Let the impact panel claim keys while it's the active view.
+		if m.impact != nil && m.view == 4 && m.impact.HandleKey(key) {
+			return m, nil
+		}
+		switch key {
 		case "ctrl+c", "q":
 			return m, tea.Quit
 		case "tab", "right", "l":
-			m.view = (m.view + 1) % 4
+			m.view = (m.view + 1) % tabs
 			m.cursor = 0
 		case "shift+tab", "left", "h":
-			m.view = (m.view + 3) % 4
+			m.view = (m.view + tabs - 1) % tabs
 			m.cursor = 0
 		case "down", "j":
 			m.cursor++
@@ -146,6 +199,9 @@ func (m *Model) View() string {
 	b.WriteString("\n")
 
 	tabs := []string{"workspace", "findings", "conflicts", "doctor"}
+	if m.impact != nil {
+		tabs = append(tabs, "impact")
+	}
 	for i, t := range tabs {
 		if i == m.view {
 			b.WriteString(tabActive.Render(t))
@@ -164,6 +220,10 @@ func (m *Model) View() string {
 		b.WriteString(m.renderConflicts())
 	case 3:
 		b.WriteString(m.renderDoctor())
+	case 4:
+		if m.impact != nil {
+			b.WriteString(m.impact.Render())
+		}
 	}
 
 	if m.err != nil {
