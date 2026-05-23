@@ -1,6 +1,6 @@
 // Package change_process implements the 12-stage validation pipeline.
 //
-// Phase 1 emits three finding kinds:
+// Phase 1 + 2 emit five finding kinds:
 //
 //   - `flow_unreviewed` (stage 10) — touched flow-scoped function without
 //     acknowledging the flow (Phase 0 carryover).
@@ -17,6 +17,13 @@
 //   - `symbol_disambiguation` (stage 6) — surfaces
 //     `code.core.SymbolDisambiguation` events as a finding kind so the
 //     reviewer sees the conflicting source claims inline (plan §P1.T31).
+//   - `missing_dependent_update` (stage 6) — Phase 2 (P2.T36). Emitted when
+//     a touched producer (`EventPublisher`, `SchemaField`, or `Route`)
+//     has downstream dependents (subscribers, schema reads/writes,
+//     contract tests, handlers) that are NOT also touched in the same
+//     diff. Stage 5 walks framework edges to populate the impacted
+//     set; stage 6 fires one finding per producer with the stale
+//     dependents listed in evidence (plan §P2.T35–T37).
 //
 // Empty repair payload until P3 ships RepairInstruction synthesis. The
 // pipeline is idempotent at a fixed kernel sequence (SPEC §8.1).
@@ -29,6 +36,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"regexp"
+	"sort"
 	"strings"
 
 	"github.com/shivamstaq/graph-harness/internal/code_core"
@@ -37,16 +45,62 @@ import (
 	"github.com/shivamstaq/graph-harness/internal/semantic_overlay"
 )
 
+// FindingKindMissingDependentUpdate is the P2 finding emitted when a
+// change to an EventPublisher / SchemaField / Route leaves a downstream
+// entity (subscriber, contract test, schema read/write, route handler)
+// untouched in the same diff. Evidence carries the list of dependents
+// that should have been updated together. (plan §P2.T36)
+const FindingKindMissingDependentUpdate = "missing_dependent_update"
+
 // ValidationFinding is the SPEC §8.2 shape. The CLI emits this as JSON via
 // `validate-diff --json`. P1 finding kinds: `flow_unreviewed`,
-// `unresolved_anchor`, `symbol_disambiguation`.
+// `unresolved_anchor`, `symbol_disambiguation`. P2 adds
+// `missing_dependent_update`.
 type ValidationFinding struct {
 	ID       string         `json:"id"`
-	Kind     string         `json:"kind"`     // flow_unreviewed | unresolved_anchor | selector_reanchored | symbol_disambiguation
+	Kind     string         `json:"kind"`     // flow_unreviewed | unresolved_anchor | selector_reanchored | symbol_disambiguation | missing_dependent_update
 	Severity string         `json:"severity"` // info | low | medium | high | critical
 	Subject  Subject        `json:"subject"`
 	Evidence []EvidenceItem `json:"evidence"`
-	Repair   map[string]any `json:"repair"` // empty in P1, populated in P3
+	Repair   map[string]any `json:"repair"` // empty in P1/P2, populated in P3
+
+	// FrameworkContext is the P2.T37 per-control-firing context that
+	// surfaces alongside framework-edge findings. Populated for
+	// `missing_dependent_update` and any future control whose subject
+	// is a touched framework producer so the control evidence can
+	// reference "you changed an event payload — here are the
+	// subscribers" without a second lookup. Omitted from JSON when
+	// the touched entity is not a framework producer.
+	FrameworkContext *FrameworkContext `json:"framework_context,omitempty"`
+}
+
+// FrameworkContext is the structured payload that Stage 7 injects when
+// a control's subject (or a Stage 6 finding's subject) is a touched
+// framework producer. Carried by ValidationFinding so the consumer
+// (Studio, TUI, MCP, control evidence templates) can render
+// "publisher → dependents" without re-walking the impacted set.
+type FrameworkContext struct {
+	TouchedKind    string         `json:"touched_kind"` // "EventPublisher" | "SchemaField" | "Route"
+	TouchedSubject EntityRef      `json:"touched_subject"`
+	Dependents     []DependentRef `json:"dependents"`
+}
+
+// EntityRef is a compact reference to a code.core / code.framework entity.
+type EntityRef struct {
+	Kind          string `json:"kind"`
+	ID            string `json:"id"`
+	QualifiedName string `json:"qualified_name"`
+}
+
+// DependentRef is one stale dependent surfaced in FrameworkContext.
+// Reason is a human-readable phrase ("subscribes to event",
+// "reads field", "handles route") explaining why the dependent is
+// considered impacted.
+type DependentRef struct {
+	Kind          string `json:"kind"`
+	ID            string `json:"id"`
+	QualifiedName string `json:"qualified_name"`
+	Reason        string `json:"reason"`
 }
 
 // Subject identifies the entity the finding is about (selector resolution).
@@ -120,9 +174,33 @@ func (p *Pipeline) ValidateDiff(ctx context.Context, unified []byte, validationS
 
 	// Stages 3, 3b: bounded refresh + pin validation_seq — implicit at the
 	// validation_seq input here. We honor the contract.
-	// Stages 4, 5: touched_set + impacted_set (P0 = touched only; impacted
-	// requires call-graph edges that arrive in P1 via LSP/SCIP).
-	// Stage 6: resolve flow selectors against touched.
+	// Stage 4: touched_set is `touched` above. Expand it through the
+	// reverse selector index so a touched Function that anchors a
+	// framework producer (e.g. a `PublishOrder` Go func whose body
+	// emits the `kafka:order.created` event) marks that producer as
+	// touched too — otherwise the producer would itself appear as a
+	// stale dependent in the impacted set (plan §P2.T35 "or anchors
+	// to one via reverse index").
+	touchedIDs, err := p.expandTouchedViaReverseIndex(ctx, touched)
+	if err != nil {
+		return nil, err
+	}
+
+	// Stage 5: impacted_set = touched ∪ framework-edge dependents.
+	// Naive BFS per plan §P2.T35 — Mangle rule engine arrives in P3.
+	// Capped at depth 4 to match the code.framework manifest's
+	// `traversal.max_depth`.
+	impacted, err := p.computeImpactedSet(ctx, touchedIDs)
+	if err != nil {
+		return nil, err
+	}
+
+	// Stage 6 (P2.T36): emit `missing_dependent_update` findings for any
+	// framework producer that has dependents NOT in the touched set.
+	mduFindings := p.collectMissingDependentUpdateFindings(res.DiffSHA, touchedIDs, impacted)
+	res.Findings = append(res.Findings, mduFindings...)
+
+	// Stage 6 (continued): resolve flow selectors against touched.
 	for flowName, flow := range p.Overlay.Flows {
 		// In P0 we resolve the flow's scope as a selector by name.
 		scope := flow.Scope
@@ -385,6 +463,353 @@ func newUnresolvedAnchorID(diffSHA, selector string) string {
 	_, _ = h.Write([]byte("ua:"))
 	_, _ = h.Write([]byte(selector))
 	return "finding_" + hex.EncodeToString(h.Sum(nil))[:8]
+}
+
+// frameworkProducerKinds enumerates the Kind values whose changes
+// propagate across framework edges per plan §P2.T35. The pipeline
+// fires a `missing_dependent_update` finding when a producer is
+// touched but at least one of its downstream dependents is not.
+//
+// Convention (Pass-0.5-A): framework entities live in the same
+// code_core.Store as code.core entities. The Kind column carries the
+// framework kind verbatim ("Route" / "EventPublisher" / "SchemaField"
+// / etc.). The qualified_name column carries the framework's shared
+// linking key so producers and their dependents discover one another
+// via `Store.LookupAllByQualifiedName(qn)`:
+//
+//   - Event family (publisher, subscriber, contract-test-for-event)
+//     share `qualified_name = "<transport>:<event_name>"`
+//     (e.g. "kafka:order.created").
+//   - Schema-field family (field, schema-read, schema-write,
+//     test-for-field) share
+//     `qualified_name = "<schema_table>.<field_name>"`
+//     (e.g. "users.email").
+//   - Route family (route, handler, contract-test-for-route) share
+//     `qualified_name = "<method> <path>"` (e.g. "GET /users/{id}").
+//
+// Per-extractor conventions are documented in plan/02-framework-extractors.md
+// §P2.T15 / §P2.T22 / §P2.T09; the pipeline only needs the shared
+// linking key to enumerate dependents.
+var frameworkProducerKinds = map[string][]string{
+	"EventPublisher": {"EventSubscriber", "ContractTest", "EventPublisher"},
+	"SchemaField":    {"SchemaRead", "SchemaWrite", "Test", "SchemaField"},
+	"Route":          {"Handler", "ContractTest", "Route"},
+}
+
+// dependentReason maps (producer_kind, dependent_kind) to a short
+// English phrase used in FrameworkContext.Dependents[].Reason. The
+// rendering keeps the per-finding evidence stable across runs (the
+// pipeline's idempotence contract — SPEC §8.1).
+var dependentReason = map[string]map[string]string{
+	"EventPublisher": {
+		"EventSubscriber": "subscribes to event",
+		"ContractTest":    "contract test for event",
+		"EventPublisher":  "co-publishes event",
+	},
+	"SchemaField": {
+		"SchemaRead":  "reads field",
+		"SchemaWrite": "writes field",
+		"Test":        "tests field",
+		"SchemaField": "co-defines field",
+	},
+	"Route": {
+		"Handler":      "handles route",
+		"ContractTest": "contract test for route",
+		"Route":        "co-defines route",
+	},
+}
+
+// impactedRecord is one row of the Stage-5 impacted set. Producers and
+// dependents share the record shape so Stage-6 emission and Stage-7
+// context injection can walk a single slice.
+type impactedRecord struct {
+	ProducerID   string         // touched entity that pulled this row in
+	ProducerKind string         // "EventPublisher" / "SchemaField" / "Route"
+	ProducerQN   string         // shared linking key
+	Dependents   []DependentRef // every dependent reachable from the producer
+}
+
+// expandTouchedViaReverseIndex walks the selector reverse index from
+// every diff-touched entity and adds any co-bound entity (typically a
+// framework producer such as EventPublisher / SchemaField / Route) to
+// the touched set. This is the "or anchors to one via reverse index"
+// arm of plan §P2.T35: a touched Function that anchors a producer
+// counts as touching the producer itself, otherwise the producer
+// would show up as a stale dependent in its own
+// `missing_dependent_update` finding.
+//
+// Uses the O(1) reverse index (Store.SelectorsBoundTo +
+// Store.EntitiesForSelector) — naive fan-out scans are a non-goal
+// per plan §5 risks.
+func (p *Pipeline) expandTouchedViaReverseIndex(ctx context.Context, touched map[string]string) (map[string]struct{}, error) {
+	out := map[string]struct{}{}
+	for _, id := range touched {
+		out[id] = struct{}{}
+	}
+	if p.Code == nil {
+		return out, nil
+	}
+	// Snapshot the starting set so we don't iterate while mutating.
+	seeds := make([]string, 0, len(out))
+	for id := range out {
+		seeds = append(seeds, id)
+	}
+	for _, id := range seeds {
+		bindings, err := p.Code.SelectorsBoundTo(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		for _, b := range bindings {
+			peers, err := p.Code.EntitiesForSelector(ctx, b.SelectorID)
+			if err != nil {
+				return nil, err
+			}
+			for _, peer := range peers {
+				out[peer] = struct{}{}
+			}
+		}
+	}
+	return out, nil
+}
+
+// computeImpactedSet is Stage 5 (P2.T35). For each touched entity it:
+//
+//  1. Looks up the full entity row to read its Kind + QualifiedName.
+//  2. For every entity whose Kind is a framework producer,
+//     enumerates dependents via shared qualified_name + producer-kind
+//     dependent table.
+//
+// BFS is depth-capped at 4 (the manifest's
+// `traversal.max_depth` for code.framework). Frontiers beyond depth 4
+// are silently dropped — this is a naive walk, intentionally; the
+// Mangle rule engine in P3 will replace it with a planned traversal.
+//
+// Reverse-index expansion is performed upstream by
+// expandTouchedViaReverseIndex so the touched set passed in here
+// already includes any framework producer co-bound to a diff-touched
+// function.
+//
+// Returns the map producer_entity_id → impactedRecord. The producer
+// is the touched entity that originated each record so Stage 6 can
+// fire one finding per producer.
+func (p *Pipeline) computeImpactedSet(ctx context.Context, touchedIDs map[string]struct{}) (map[string]*impactedRecord, error) {
+	const maxDepth = 4 // code.framework manifest traversal.max_depth
+	out := map[string]*impactedRecord{}
+	if p.Code == nil {
+		return out, nil
+	}
+
+	// Walk the touched set looking for framework producers.
+	visited := map[string]struct{}{}
+	frontier := make([]string, 0, len(touchedIDs))
+	for id := range touchedIDs {
+		frontier = append(frontier, id)
+		visited[id] = struct{}{}
+	}
+
+	for depth := 0; depth < maxDepth && len(frontier) > 0; depth++ {
+		var next []string
+		for _, id := range frontier {
+			ent, err := p.Code.LookupEntityByID(ctx, id)
+			if err != nil {
+				return nil, err
+			}
+			if ent == nil {
+				continue
+			}
+			depKinds, isProducer := frameworkProducerKinds[string(ent.Kind)]
+			if !isProducer || ent.QualifiedName == "" {
+				continue
+			}
+			// Enumerate dependents via shared qualified_name.
+			peers, err := p.Code.LookupAllByQualifiedName(ctx, ent.QualifiedName)
+			if err != nil {
+				return nil, err
+			}
+			rec, ok := out[ent.ID]
+			if !ok {
+				rec = &impactedRecord{
+					ProducerID:   ent.ID,
+					ProducerKind: string(ent.Kind),
+					ProducerQN:   ent.QualifiedName,
+				}
+				out[ent.ID] = rec
+			}
+			for _, peer := range peers {
+				if peer.ID == ent.ID {
+					continue
+				}
+				if !containsString(depKinds, string(peer.Kind)) {
+					continue
+				}
+				reason := dependentReason[string(ent.Kind)][string(peer.Kind)]
+				rec.Dependents = append(rec.Dependents, DependentRef{
+					Kind:          string(peer.Kind),
+					ID:            peer.ID,
+					QualifiedName: peer.QualifiedName,
+					Reason:        reason,
+				})
+				if _, seen := visited[peer.ID]; !seen {
+					visited[peer.ID] = struct{}{}
+					next = append(next, peer.ID)
+				}
+			}
+		}
+		frontier = next
+	}
+
+	// Stable evidence ordering: sort each producer's dependents by
+	// (Kind, QualifiedName, ID) so the pipeline's idempotence contract
+	// holds at fixed kernel seq. Sort the producer map at emission
+	// time (Stage 6) — the map itself is consumed by ID-keyed callers.
+	for _, rec := range out {
+		sortDependents(rec.Dependents)
+	}
+	return out, nil
+}
+
+// collectMissingDependentUpdateFindings is Stage 6 (P2.T36). For each
+// producer in the impacted set, fires one finding listing every
+// dependent NOT in the touched set. Severity per producer kind:
+//
+//   - EventPublisher → high (semantic-breakage risk)
+//   - SchemaField    → high (data-shape break; addition is downgraded
+//     to info when no readers/writers exist)
+//   - Route          → medium
+//
+// Stage 7 (P2.T37) context injection: FrameworkContext is attached
+// to every emitted finding so a downstream control (or surface) can
+// reference the producer + stale-dependent set without re-walking
+// the impacted map.
+func (p *Pipeline) collectMissingDependentUpdateFindings(diffSHA string, touchedIDs map[string]struct{}, impacted map[string]*impactedRecord) []ValidationFinding {
+	// Deterministic emission order: sort producers by (Kind, QN, ID).
+	producers := make([]*impactedRecord, 0, len(impacted))
+	for _, rec := range impacted {
+		producers = append(producers, rec)
+	}
+	sortProducers(producers)
+
+	var out []ValidationFinding
+	for _, rec := range producers {
+		// Filter dependents to the stale subset.
+		stale := make([]DependentRef, 0, len(rec.Dependents))
+		for _, d := range rec.Dependents {
+			if _, hit := touchedIDs[d.ID]; hit {
+				continue
+			}
+			stale = append(stale, d)
+		}
+		if len(stale) == 0 {
+			continue
+		}
+		out = append(out, missingDependentUpdateFinding(diffSHA, rec, stale))
+	}
+	return out
+}
+
+func missingDependentUpdateFinding(diffSHA string, rec *impactedRecord, stale []DependentRef) ValidationFinding {
+	subj := Subject{
+		EntityKind: "code.framework:" + rec.ProducerKind,
+		EntityID:   rec.ProducerID,
+		Qualified:  rec.ProducerQN,
+	}
+	evidence := make([]EvidenceItem, 0, len(stale))
+	for _, d := range stale {
+		evidence = append(evidence, EvidenceItem{
+			Kind:   FindingKindMissingDependentUpdate,
+			Detail: d.Kind + ":" + d.QualifiedName,
+		})
+	}
+	sev := severityForProducer(rec.ProducerKind, stale)
+	return ValidationFinding{
+		ID:       newMissingDependentUpdateID(diffSHA, rec.ProducerID),
+		Kind:     FindingKindMissingDependentUpdate,
+		Severity: sev,
+		Subject:  subj,
+		Evidence: evidence,
+		Repair:   map[string]any{},
+		FrameworkContext: &FrameworkContext{
+			TouchedKind: rec.ProducerKind,
+			TouchedSubject: EntityRef{
+				Kind:          rec.ProducerKind,
+				ID:            rec.ProducerID,
+				QualifiedName: rec.ProducerQN,
+			},
+			Dependents: stale,
+		},
+	}
+}
+
+// severityForProducer applies the plan §P2.T36 severity mapping:
+//
+//   - EventPublisher → high (any subscriber drift breaks semantics)
+//   - SchemaField    → high when reads or writes exist; info when the
+//     only dependent kinds are co-defining SchemaField rows (an
+//     addition with no consumers yet).
+//   - Route          → medium.
+//
+// Unknown kinds fall through to "medium" (defensive default; the
+// producer-kind table is closed in P2 but P3 will extend it).
+func severityForProducer(kind string, stale []DependentRef) string {
+	switch kind {
+	case "EventPublisher":
+		return "high"
+	case "SchemaField":
+		// "Addition" surfaces as a touched SchemaField with no
+		// non-SchemaField dependents (no readers/writers). Demote
+		// to info per plan §P2.T36.
+		for _, d := range stale {
+			if d.Kind != "SchemaField" {
+				return "high"
+			}
+		}
+		return "info"
+	case "Route":
+		return "medium"
+	}
+	return "medium"
+}
+
+func newMissingDependentUpdateID(diffSHA, producerID string) string {
+	h := sha256.New()
+	_, _ = h.Write([]byte(diffSHA))
+	_, _ = h.Write([]byte{0})
+	_, _ = h.Write([]byte("mdu:"))
+	_, _ = h.Write([]byte(producerID))
+	return "finding_" + hex.EncodeToString(h.Sum(nil))[:8]
+}
+
+func sortDependents(d []DependentRef) {
+	sort.SliceStable(d, func(i, j int) bool {
+		if d[i].Kind != d[j].Kind {
+			return d[i].Kind < d[j].Kind
+		}
+		if d[i].QualifiedName != d[j].QualifiedName {
+			return d[i].QualifiedName < d[j].QualifiedName
+		}
+		return d[i].ID < d[j].ID
+	})
+}
+
+func sortProducers(p []*impactedRecord) {
+	sort.SliceStable(p, func(i, j int) bool {
+		if p[i].ProducerKind != p[j].ProducerKind {
+			return p[i].ProducerKind < p[j].ProducerKind
+		}
+		if p[i].ProducerQN != p[j].ProducerQN {
+			return p[i].ProducerQN < p[j].ProducerQN
+		}
+		return p[i].ProducerID < p[j].ProducerID
+	})
+}
+
+func containsString(xs []string, x string) bool {
+	for _, s := range xs {
+		if s == x {
+			return true
+		}
+	}
+	return false
 }
 
 // Hunk is a single hunk extracted from a unified diff, keyed by file path.

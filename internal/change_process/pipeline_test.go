@@ -278,3 +278,272 @@ func TestPipeline_NoFindingsWhenResolverNil(t *testing.T) {
 		}
 	}
 }
+
+// ---------------------------------------------------------------------------
+// P2.T36 framework-edge propagation tests.
+//
+// Touch model: the test seeds a code.core Function whose qualified name
+// matches a Go function decl on the diff's added lines (so Stage 2's
+// suffix lookup finds it). A selector binding pulls in the
+// framework producer (EventPublisher / SchemaField / Route) via the
+// reverse index. Dependents share the producer's qualified_name and
+// are discovered via Store.LookupAllByQualifiedName at Stage 5.
+// ---------------------------------------------------------------------------
+
+// touchDiff builds the minimal unified diff that makes Stage 2's
+// extractFunctionNames produce `funcName` so a seeded Function entity
+// with `qualified_name = "pkg.<funcName>"` is added to the touched
+// set via LookupByQualifiedNameSuffix.
+func touchDiff(funcName string) string {
+	return "--- a/x.go\n+++ b/x.go\n@@\n+func " + funcName + "() {}\n"
+}
+
+// seedProducerWithTouch wires a touched Function + a framework producer
+// entity sharing a selector binding. Returns the producer entity ID
+// so the test can assert it shows up as the finding's subject.
+func seedProducerWithTouch(t *testing.T, store *code_core.Store,
+	funcName, producerKind, producerQN string) string {
+	t.Helper()
+	ctx := context.Background()
+
+	// Touched Function (qualified_name ends with funcName so the
+	// suffix lookup matches).
+	funcID := "fn:" + funcName
+	if err := store.PutEntity(ctx, code_core.Entity{
+		ID:            funcID,
+		Kind:          code_core.KindFunction,
+		LanguageID:    "go",
+		QualifiedName: "pkg." + funcName,
+	}, 1); err != nil {
+		t.Fatalf("PutEntity func: %v", err)
+	}
+
+	// Framework producer entity, sharing-key in qualified_name.
+	producerID := producerKind + ":" + producerQN
+	if err := store.PutEntity(ctx, code_core.Entity{
+		ID:            producerID,
+		Kind:          code_core.EntityKind(producerKind),
+		LanguageID:    "framework",
+		QualifiedName: producerQN,
+	}, 1); err != nil {
+		t.Fatalf("PutEntity producer: %v", err)
+	}
+
+	// Reverse-index binding: one selector bound to both the function
+	// and the producer entity. Stage 5 walks func → selector →
+	// producer via this hop.
+	sel := "sel:" + producerID
+	if err := store.BindSelector(ctx, funcID, sel, "", "qualified_name", 1); err != nil {
+		t.Fatalf("BindSelector func: %v", err)
+	}
+	if err := store.BindSelector(ctx, producerID, sel, "", "framework_anchor", 1); err != nil {
+		t.Fatalf("BindSelector producer: %v", err)
+	}
+	return producerID
+}
+
+// seedDependent inserts a framework dependent entity that shares the
+// producer's linking qualified_name. Stage 5 enumerates these via
+// Store.LookupAllByQualifiedName(producerQN).
+func seedDependent(t *testing.T, store *code_core.Store,
+	id, kind, qn string) {
+	t.Helper()
+	if err := store.PutEntity(context.Background(), code_core.Entity{
+		ID:            id,
+		Kind:          code_core.EntityKind(kind),
+		LanguageID:    "framework",
+		QualifiedName: qn,
+	}, 1); err != nil {
+		t.Fatalf("PutEntity dependent %s: %v", id, err)
+	}
+}
+
+// findOne returns the single finding of the named kind, failing the
+// test if zero or multiple matches exist.
+func findOne(t *testing.T, findings []ValidationFinding, kind string) ValidationFinding {
+	t.Helper()
+	var hits []ValidationFinding
+	for _, f := range findings {
+		if f.Kind == kind {
+			hits = append(hits, f)
+		}
+	}
+	if len(hits) != 1 {
+		t.Fatalf("expected exactly 1 %s finding, got %d (all=%+v)", kind, len(hits), findings)
+	}
+	return hits[0]
+}
+
+func TestPipeline_MissingDependentUpdate_EventPublisher(t *testing.T) {
+	p, store, _, _ := newTestPipeline(t)
+	producerID := seedProducerWithTouch(t, store, "PublishOrder",
+		"EventPublisher", "kafka:order.created")
+	seedDependent(t, store, "sub:svc-a", "EventSubscriber", "kafka:order.created")
+	seedDependent(t, store, "sub:svc-b", "EventSubscriber", "kafka:order.created")
+	seedDependent(t, store, "ctest:order", "ContractTest", "kafka:order.created")
+
+	res, err := p.ValidateDiff(context.Background(),
+		[]byte(touchDiff("PublishOrder")), 10)
+	if err != nil {
+		t.Fatalf("ValidateDiff: %v", err)
+	}
+	f := findOne(t, res.Findings, "missing_dependent_update")
+	if f.Subject.EntityID != producerID {
+		t.Errorf("subject.entity_id = %q, want %q", f.Subject.EntityID, producerID)
+	}
+	if f.Subject.EntityKind != "code.framework:EventPublisher" {
+		t.Errorf("subject.entity_kind = %q, want code.framework:EventPublisher", f.Subject.EntityKind)
+	}
+	if f.Severity != "high" {
+		t.Errorf("severity = %q, want high", f.Severity)
+	}
+	if len(f.Evidence) != 3 {
+		t.Errorf("evidence count = %d, want 3 (2 subscribers + 1 contract test)", len(f.Evidence))
+	}
+	// FrameworkContext (P2.T37) is populated.
+	if f.FrameworkContext == nil {
+		t.Fatal("FrameworkContext nil; P2.T37 context injection missing")
+	}
+	if f.FrameworkContext.TouchedKind != "EventPublisher" {
+		t.Errorf("framework_context.touched_kind = %q", f.FrameworkContext.TouchedKind)
+	}
+	if len(f.FrameworkContext.Dependents) != 3 {
+		t.Errorf("framework_context dependents = %d, want 3", len(f.FrameworkContext.Dependents))
+	}
+}
+
+func TestPipeline_MissingDependentUpdate_SchemaField(t *testing.T) {
+	p, store, _, _ := newTestPipeline(t)
+	producerID := seedProducerWithTouch(t, store, "UpdateEmail",
+		"SchemaField", "users.email")
+	seedDependent(t, store, "read:users.email:a", "SchemaRead", "users.email")
+	seedDependent(t, store, "read:users.email:b", "SchemaRead", "users.email")
+	seedDependent(t, store, "write:users.email:a", "SchemaWrite", "users.email")
+	seedDependent(t, store, "test:users.email", "Test", "users.email")
+
+	res, err := p.ValidateDiff(context.Background(),
+		[]byte(touchDiff("UpdateEmail")), 10)
+	if err != nil {
+		t.Fatalf("ValidateDiff: %v", err)
+	}
+	f := findOne(t, res.Findings, "missing_dependent_update")
+	if f.Subject.EntityID != producerID {
+		t.Errorf("subject.entity_id = %q, want %q", f.Subject.EntityID, producerID)
+	}
+	if f.Severity != "high" {
+		t.Errorf("severity = %q, want high (reads + writes present)", f.Severity)
+	}
+	if len(f.Evidence) != 4 {
+		t.Errorf("evidence count = %d, want 4 (2 reads + 1 write + 1 test)", len(f.Evidence))
+	}
+	// Every evidence detail is "<kind>:<qualified_name>".
+	for _, e := range f.Evidence {
+		if e.Kind != "missing_dependent_update" {
+			t.Errorf("evidence.kind = %q, want missing_dependent_update", e.Kind)
+		}
+		if !strings.Contains(e.Detail, "users.email") {
+			t.Errorf("evidence.detail = %q missing producer qn", e.Detail)
+		}
+	}
+}
+
+func TestPipeline_MissingDependentUpdate_Route(t *testing.T) {
+	p, store, _, _ := newTestPipeline(t)
+	producerID := seedProducerWithTouch(t, store, "HandleGetUser",
+		"Route", "GET /users/{id}")
+	seedDependent(t, store, "handler:get-user", "Handler", "GET /users/{id}")
+	seedDependent(t, store, "ctest:get-user", "ContractTest", "GET /users/{id}")
+
+	res, err := p.ValidateDiff(context.Background(),
+		[]byte(touchDiff("HandleGetUser")), 10)
+	if err != nil {
+		t.Fatalf("ValidateDiff: %v", err)
+	}
+	f := findOne(t, res.Findings, "missing_dependent_update")
+	if f.Subject.EntityID != producerID {
+		t.Errorf("subject.entity_id = %q, want %q", f.Subject.EntityID, producerID)
+	}
+	if f.Severity != "medium" {
+		t.Errorf("severity = %q, want medium", f.Severity)
+	}
+	if len(f.Evidence) != 2 {
+		t.Errorf("evidence count = %d, want 2 (handler + contract test)", len(f.Evidence))
+	}
+}
+
+// TestPipeline_MissingDependentUpdate_Idempotent re-runs the same
+// diff twice and asserts byte-identical finding JSON. Locks in the
+// SPEC §8.1 idempotence contract for the new finding kind.
+func TestPipeline_MissingDependentUpdate_Idempotent(t *testing.T) {
+	p, store, _, _ := newTestPipeline(t)
+	seedProducerWithTouch(t, store, "PublishOrder",
+		"EventPublisher", "kafka:order.created")
+	seedDependent(t, store, "sub:svc-a", "EventSubscriber", "kafka:order.created")
+	seedDependent(t, store, "sub:svc-b", "EventSubscriber", "kafka:order.created")
+	seedDependent(t, store, "ctest:order", "ContractTest", "kafka:order.created")
+
+	diff := []byte(touchDiff("PublishOrder"))
+	first, err := p.ValidateDiff(context.Background(), diff, 10)
+	if err != nil {
+		t.Fatalf("ValidateDiff 1: %v", err)
+	}
+	second, err := p.ValidateDiff(context.Background(), diff, 10)
+	if err != nil {
+		t.Fatalf("ValidateDiff 2: %v", err)
+	}
+	a, _ := json.Marshal(first)
+	b, _ := json.Marshal(second)
+	if string(a) != string(b) {
+		t.Errorf("idempotence violated:\nfirst=%s\nsecond=%s", a, b)
+	}
+}
+
+// TestPipeline_MissingDependentUpdate_NoFindingWhenDependentsAlsoTouched
+// confirms the stale-only filter: when every dependent is also in the
+// touched set, no finding fires. We touch the subscriber by giving its
+// underlying entity ID a matching qualified-name suffix (the Stage 2
+// lookup keys on `qualified_name`, so a touched function whose
+// qualified_name suffix is "HandleOrder" pulls in the subscriber
+// entity whose ID matches via a co-bound selector).
+func TestPipeline_MissingDependentUpdate_NoFindingWhenDependentsAlsoTouched(t *testing.T) {
+	p, store, _, _ := newTestPipeline(t)
+	producerID := seedProducerWithTouch(t, store, "PublishOrder",
+		"EventPublisher", "kafka:order.created")
+
+	// One subscriber. Bind a selector to BOTH a touched function and
+	// the subscriber so the reverse index pulls the subscriber into
+	// the touched set when the function is in the diff.
+	subID := "sub:order.handler"
+	seedDependent(t, store, subID, "EventSubscriber", "kafka:order.created")
+	subFuncID := "fn:HandleOrder"
+	if err := store.PutEntity(context.Background(), code_core.Entity{
+		ID:            subFuncID,
+		Kind:          code_core.KindFunction,
+		LanguageID:    "go",
+		QualifiedName: "pkg.HandleOrder",
+	}, 1); err != nil {
+		t.Fatalf("PutEntity touched-dependent func: %v", err)
+	}
+	subSel := "sel:sub:order.handler"
+	if err := store.BindSelector(context.Background(), subFuncID, subSel, "", "qualified_name", 1); err != nil {
+		t.Fatalf("BindSelector subfunc: %v", err)
+	}
+	if err := store.BindSelector(context.Background(), subID, subSel, "", "framework_anchor", 1); err != nil {
+		t.Fatalf("BindSelector subscriber: %v", err)
+	}
+
+	// Diff touches both the publisher's Go func AND the subscriber's
+	// Go func. The reverse index pulls both framework entities into
+	// the touched set, so no finding should fire.
+	diff := []byte(touchDiff("PublishOrder") + touchDiff("HandleOrder"))
+	res, err := p.ValidateDiff(context.Background(), diff, 10)
+	if err != nil {
+		t.Fatalf("ValidateDiff: %v", err)
+	}
+	for _, f := range res.Findings {
+		if f.Kind == "missing_dependent_update" {
+			t.Errorf("unexpected missing_dependent_update when dependent also touched: %+v", f)
+		}
+	}
+	_ = producerID
+}
