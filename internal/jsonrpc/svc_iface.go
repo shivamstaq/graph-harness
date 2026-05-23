@@ -35,6 +35,7 @@ type Consumer interface {
 	QueryParse(ctx context.Context, p QueryParseParams) (QueryParseResult, error)
 	MCPBeforeEdit(ctx context.Context, p MCPBeforeEditParams) (MCPBeforeEditResult, error)
 	MCPAfterEdit(ctx context.Context, p MCPAfterEditParams) (*change_process.ValidateDiffResult, error)
+	ImpactedFlows(ctx context.Context, p ImpactedFlowsParams) (ImpactedFlowsResult, error)
 	ReviewList(ctx context.Context, p ReviewListParams) (ReviewListResult, error)
 	ReviewGet(ctx context.Context, p ReviewIDParams) (*review_queue.Proposal, error)
 
@@ -130,6 +131,12 @@ func (s *ClientService) MCPBeforeEdit(ctx context.Context, p MCPBeforeEditParams
 func (s *ClientService) MCPAfterEdit(ctx context.Context, p MCPAfterEditParams) (*change_process.ValidateDiffResult, error) {
 	var r *change_process.ValidateDiffResult
 	return r, s.c.Call(ctx, "mcp.after_edit", p, &r)
+}
+
+// ImpactedFlows — daemon `mcp.impacted_flows` RPC (P2.T41).
+func (s *ClientService) ImpactedFlows(ctx context.Context, p ImpactedFlowsParams) (ImpactedFlowsResult, error) {
+	var r ImpactedFlowsResult
+	return r, s.c.Call(ctx, "mcp.impacted_flows", p, &r)
 }
 
 // ReviewList — daemon `review.list` RPC.
