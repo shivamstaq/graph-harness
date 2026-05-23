@@ -12,7 +12,11 @@
   "engines": {
     "vscode": "^1.86.0"
   },
-  "categories": ["Linters", "Programming Languages", "Other"],
+  "categories": [
+    "Linters",
+    "Programming Languages",
+    "Other"
+  ],
   "activationEvents": [
     "onLanguage:graph-harness",
     "onLanguage:go",
@@ -21,6 +25,7 @@
     "onLanguage:javascript",
     "onLanguage:javascriptreact",
     "onLanguage:python",
+    "onLanguage:prisma",
     "workspaceContains:**/.graph-harness"
   ],
   "main": "./dist/extension.js",
@@ -28,8 +33,13 @@
     "languages": [
       {
         "id": "graph-harness",
-        "aliases": ["Graph Harness", "gh"],
-        "extensions": [".gh"],
+        "aliases": [
+          "Graph Harness",
+          "gh"
+        ],
+        "extensions": [
+          ".gh"
+        ],
         "configuration": "./language-configuration.json"
       }
     ],
@@ -52,6 +62,10 @@
       {
         "command": "graphHarness.openStudio",
         "title": "Graph Harness: Open Studio"
+      },
+      {
+        "command": "graphHarness.framework.showDetails",
+        "title": "Graph Harness: Show framework entity details"
       }
     ],
     "configuration": {
@@ -66,6 +80,11 @@
           "type": "boolean",
           "default": true,
           "description": "Show live match-count code lenses on selector / flow declarations."
+        },
+        "graphHarness.framework.codeLens.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show 'N bound flows / N active findings' lenses above HTTP routes, event publishers, and schema fields."
         }
       }
     }
@@ -73,11 +92,14 @@
   "scripts": {
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
-    "package": "vsce package"
+    "package": "vsce package",
+    "test:types": "tsc -p ./tsconfig.test.json",
+    "test": "node --import tsx --import ./src/test/_vscode-mock.ts --test src/test/*.test.ts"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",
     "@types/vscode": "^1.86.0",
+    "tsx": "^4.22.3",
     "typescript": "^5.4.0"
   }
 }

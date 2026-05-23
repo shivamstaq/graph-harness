@@ -11,6 +11,13 @@
 import * as vscode from "vscode";
 import { exec } from "child_process";
 import { promisify } from "util";
+import * as crypto from "crypto";
+
+import { JsonRpcClient, unixSocketConnector } from "./rpc/client";
+import { discoverWorkspaceRoot, socketPath } from "./rpc/socketPath";
+import { FrameworkStore } from "./framework/store";
+import { FrameworkLensProvider } from "./framework/lensProvider";
+import { DaemonBridge } from "./framework/daemonBridge";
 
 const execAsync = promisify(exec);
 
@@ -168,12 +175,71 @@ async function runValidateDiffOnGitChanges(): Promise<void> {
 
 // --- activation ------------------------------------------------------------
 
+// Module-level handle so `deactivate` can shut down the JSON-RPC client.
+let activeClient: JsonRpcClient | null = null;
+
 export function activate(ctx: vscode.ExtensionContext) {
   const lensProvider = new GHCodeLensProvider();
   ctx.subscriptions.push(
     vscode.languages.registerCodeLensProvider({ language: "graph-harness" }, lensProvider),
     diagnostics,
   );
+
+  // --- Framework code lens + push subscription (P2.T40 / P2.T40a) ----------
+  //
+  // Spin up a JSON-RPC client per workspace folder, identify with a stable
+  // subscriber id (so cursors survive reconnect), and subscribe to the
+  // "code.framework" filter. The DaemonBridge wires push events into a
+  // FrameworkStore; the FrameworkLensProvider re-renders the affected
+  // documents via its onDidChangeCodeLenses emitter — no polling.
+  const folder = vscode.workspace.workspaceFolders?.[0];
+  if (folder) {
+    const root = discoverWorkspaceRoot(folder.uri.fsPath) ?? folder.uri.fsPath;
+    const sockPath = socketPath(root);
+    const subscriberId = "vscode:" + extensionInstanceId(ctx);
+    const bridge = new DaemonBridge({ subscriberId });
+    const store = new FrameworkStore({ query: bridge.buildQuery() });
+    bridge.attachStore(store);
+    const fwClient = new JsonRpcClient(
+      unixSocketConnector(sockPath),
+      bridge.clientOptions(),
+    );
+    bridge.setClient(fwClient);
+    activeClient = fwClient;
+    fwClient.start();
+
+    const fwLens = new FrameworkLensProvider(store);
+    ctx.subscriptions.push(
+      vscode.languages.registerCodeLensProvider(
+        [
+          { language: "go", scheme: "file" },
+          { language: "typescript", scheme: "file" },
+          { language: "typescriptreact", scheme: "file" },
+          { language: "javascript", scheme: "file" },
+          { language: "javascriptreact", scheme: "file" },
+          { language: "python", scheme: "file" },
+          { language: "prisma", scheme: "file" },
+        ],
+        fwLens,
+      ),
+      fwLens,
+      vscode.commands.registerCommand("graphHarness.framework.showDetails", (state, info) => {
+        const lines: string[] = [];
+        lines.push(`Entity: ${state?.key ?? "(unknown)"}`);
+        if (info) {
+          if (info.flow_names?.length) {
+            lines.push("Flows:");
+            for (const n of info.flow_names) lines.push(`  - ${n}`);
+          }
+          if (typeof info.bound_flows === "number") lines.push(`Bound flows: ${info.bound_flows}`);
+          if (typeof info.active_findings === "number") lines.push(`Active findings: ${info.active_findings}`);
+          if (typeof info.subscribers === "number") lines.push(`Subscribers: ${info.subscribers}`);
+        }
+        vscode.window.showInformationMessage(lines.join("\n"));
+      }),
+      { dispose: () => fwClient.stop() },
+    );
+  }
 
   ctx.subscriptions.push(
     vscode.commands.registerCommand("graphHarness.validateDiff", () => runValidateDiffOnGitChanges()),
@@ -231,4 +297,21 @@ export function activate(ctx: vscode.ExtensionContext) {
 
 export function deactivate() {
   diagnostics.dispose();
+  if (activeClient) {
+    activeClient.stop();
+    activeClient = null;
+  }
+}
+
+// Stable per-install id used as the subscriber_id suffix. Persisted in
+// workspaceState so cursor lookups survive extension reloads (the daemon
+// keys cross-restart cursors on subscriber_id + subscription_name).
+function extensionInstanceId(ctx: vscode.ExtensionContext): string {
+  const KEY = "graphHarness.instanceId";
+  let id = ctx.workspaceState.get<string>(KEY);
+  if (!id) {
+    id = crypto.randomBytes(8).toString("hex");
+    void ctx.workspaceState.update(KEY, id);
+  }
+  return id;
 }

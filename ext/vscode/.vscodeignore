@@ -7,4 +7,6 @@ src/**
 **/*.ts
 node_modules/**
 tsconfig.json
+tsconfig.test.json
+package-lock.json
 **/.DS_Store
