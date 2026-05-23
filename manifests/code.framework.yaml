@@ -2,28 +2,178 @@ apiVersion: graph-harness.kernel/v1
 kind: Layer
 metadata:
   name: code.framework
-  version: 0.1.0
+  version: 0.2.0
   depends_on:
     - code.core@^0.1.0
   description: >
-    Framework / app enrichment over code.core (Route, Handler, Mutation,
-    Event publisher/subscriber, Job, Queue consumer, Schema field, Migration,
-    Fixture, Contract test). Phase 0 ships the layer registered with no
-    extractors yet — installs cleanly, accepts no events, returns empty
-    results. Per-framework Go extractors land in P2.
+    Framework / app enrichment over code.core. P2 activates the extractor
+    plugin model and the v1 family set (routes, graphql, events, schemas,
+    tests, generated, jobs, config). Entities reference code.core via
+    selectors (SPEC §2.2 — selectors-only cross-layer references); the
+    dispatcher caches resolutions as EntityRefs for hot-path performance.
+    The dispatcher also enforces compare-before-emit (§6.21) on every
+    proposed write so re-running an extractor over an unchanged file
+    produces zero kernel events.
 
 schema:
-  entity_kinds: []
-  relation_kinds: []
+  entity_kinds:
+    - name: Route
+      attributes:
+        method:        { type: enum,         indexed: true }
+        path_pattern:  { type: string,       indexed: true }
+        framework:     { type: enum,         indexed: true }
+        anchored_to:   { type: selector,     indexed: false }
+        middleware:    { type: list<string>, indexed: false }
+        response_kind: { type: string,       indexed: false }
+    - name: Handler
+      attributes:
+        anchored_to:   { type: selector, indexed: false }
+    - name: EventPublisher
+      attributes:
+        event_name:    { type: string,   indexed: true }
+        service:       { type: string,   indexed: true }
+        transport:     { type: enum,     indexed: true }
+        anchored_to:   { type: selector, indexed: false }
+    - name: EventSubscriber
+      attributes:
+        event_name:    { type: string,   indexed: true }
+        service:       { type: string,   indexed: true }
+        transport:     { type: enum,     indexed: true }
+        anchored_to:   { type: selector, indexed: false }
+    - name: Event
+      attributes:
+        name:          { type: string, indexed: true }
+        transport:     { type: enum,   indexed: true }
+    - name: Schema
+      attributes:
+        table:         { type: string,   indexed: true }
+        dialect:       { type: enum,     indexed: true }
+        anchored_to:   { type: selector, indexed: false }
+    - name: SchemaField
+      attributes:
+        name:          { type: string,   indexed: true }
+        data_type:     { type: string,   indexed: false }
+        nullable:      { type: bool,     indexed: false }
+        schema_id:     { type: string,   indexed: true }
+        anchored_to:   { type: selector, indexed: false }
+    - name: SchemaRead
+      attributes:
+        field_id:      { type: string,   indexed: true }
+        anchored_to:   { type: selector, indexed: false }
+    - name: SchemaWrite
+      attributes:
+        field_id:      { type: string,   indexed: true }
+        anchored_to:   { type: selector, indexed: false }
+    - name: Migration
+      attributes:
+        tool:          { type: enum,     indexed: true }
+        version:       { type: string,   indexed: true }
+        anchored_to:   { type: selector, indexed: false }
+    - name: Test
+      attributes:
+        name:          { type: string,   indexed: true }
+        framework:     { type: enum,     indexed: true }
+        subject_ref:   { type: selector, indexed: false }
+        anchored_to:   { type: selector, indexed: false }
+    - name: Fixture
+      attributes:
+        anchored_to:   { type: selector, indexed: false }
+    - name: ContractTest
+      attributes:
+        topic_name:    { type: string,   indexed: true }
+        route_ref:     { type: selector, indexed: false }
+        anchored_to:   { type: selector, indexed: false }
+    - name: GraphQLOperation
+      attributes:
+        operation_type: { type: enum,     indexed: true }
+        name:           { type: string,   indexed: true }
+        return_type:    { type: string,   indexed: false }
+        resolver_ref:   { type: selector, indexed: false }
+        anchored_to:    { type: selector, indexed: false }
+    - name: Mutation
+      attributes:
+        name:          { type: string,   indexed: true }
+        resolver_ref:  { type: selector, indexed: false }
+        anchored_to:   { type: selector, indexed: false }
+    - name: Job
+      attributes:
+        name:          { type: string,   indexed: true }
+        schedule:      { type: string,   indexed: false }
+        anchored_to:   { type: selector, indexed: false }
+    - name: QueueConsumer
+      attributes:
+        queue:         { type: string,   indexed: true }
+        transport:     { type: enum,     indexed: true }
+        anchored_to:   { type: selector, indexed: false }
+    - name: ConfigKey
+      attributes:
+        key:           { type: string,   indexed: true }
+        default:       { type: string,   indexed: false }
+        anchored_to:   { type: selector, indexed: false }
+    - name: GeneratedArtifact
+      attributes:
+        path:          { type: path,     indexed: true }
+        generator:     { type: string,   indexed: true }
+        sentinel:      { type: string,   indexed: false }
+
+  relation_kinds:
+    - { name: handles,       from: Route,            to: Handler,           attributes: {} }
+    - { name: publishes,     from: EventPublisher,   to: Event,             attributes: {} }
+    - { name: subscribes_to, from: EventSubscriber,  to: Event,             attributes: {} }
+    - { name: reads,         from: SchemaRead,       to: SchemaField,       attributes: {} }
+    - { name: writes,        from: SchemaWrite,      to: SchemaField,       attributes: {} }
+    - { name: tests,         from: Test,             to: ContractTest,      attributes: {} }
+    - { name: generates,     from: GeneratedArtifact, to: GeneratedArtifact, attributes: {} }
 
 capabilities:
   - kv_lookup_by_id
   - filter_by_attribute:
-      fields: []
-      ops: [eq]
+      fields: [method, path_pattern, event_name, transport, table, name, framework, queue, key]
+      ops: [eq, prefix, glob]
+  - selector_match:
+      families: [structural, nominal, kindwise]
+  - traversal:
+      edge_kinds: [handles, publishes, subscribes_to, reads, writes, tests, generates]
+      max_depth: 4
+  - as_of_seq_read
+  - streaming_subscribe
+  - batch_ingest
 
 events:
-  emits: []                     # populated in P2 when extractors land
+  emits:
+    - RouteAdded
+    - RouteChanged
+    - RouteRemoved
+    - HandlerBound
+    - EventPublisherAdded
+    - EventPublisherRemoved
+    - EventSubscriberAdded
+    - EventSubscriberRemoved
+    - EventTopicObserved
+    - SchemaAdded
+    - SchemaRemoved
+    - SchemaFieldAdded
+    - SchemaFieldChanged
+    - SchemaFieldRemoved
+    - SchemaReadAdded
+    - SchemaWriteAdded
+    - MigrationAdded
+    - TestAdded
+    - TestChanged
+    - TestRemoved
+    - FixtureAdded
+    - ContractTestAdded
+    - ContractTestRemoved
+    - GraphQLOperationAdded
+    - GraphQLOperationChanged
+    - GraphQLOperationRemoved
+    - MutationAdded
+    - JobAdded
+    - QueueConsumerAdded
+    - ConfigKeyAdded
+    - GeneratedArtifactAdded
+    - UnverifiedGeneratedArtifact
+    - ExtractorRunFailed
 
 storage:
   adapter: sqlite
@@ -41,14 +191,14 @@ trust:
   direct_writes_from:
     - kernel_replay
     - layer:code.core
-    - extractor:framework       # plugins (P2)
+    - extractor:framework
   review_required_from: []
   forbidden_from:
     - user
     - agent
 
 sync:
-  mode: local_only              # per-workspace (SPEC §6.6)
+  mode: local_only
 
 freshness_states:
   - current

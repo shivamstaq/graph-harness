@@ -212,6 +212,16 @@ func (s *Server) registerBuiltins() {
 	RegisterVoid(s, "conflicts.list", "conflicts", svc.ConflictsList)
 	RegisterVoid(s, "health.extractors", "doctor", svc.DoctorReport)
 
+	// P2.T05 framework extractor lifecycle. List + status are
+	// read-only; enable + disable mutate the workspace TOML through
+	// the daemon's single-writer path. The dispatcher is wired by
+	// the daemon's bootstrap via Service.SetExtractors.
+	s.AddCapability("extractors")
+	RegisterVoid(s, "extractors.list", "extractors", svc.ExtractorsList)
+	Register(s, "extractors.status", "extractors", svc.ExtractorsStatus)
+	Register(s, "extractors.enable", "extractors", svc.ExtractorsEnable)
+	Register(s, "extractors.disable", "extractors", svc.ExtractorsDisable)
+
 	// SPEC §6.22 long-lived subscriber contract: kernel.identify /
 	// subscribe / ack / unsubscribe. The subscribe + identify
 	// methods need the underlying jsonrpc2.Conn so server-initiated

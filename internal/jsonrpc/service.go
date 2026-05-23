@@ -16,6 +16,7 @@ import (
 
 	"github.com/shivamstaq/graph-harness/internal/change_process"
 	"github.com/shivamstaq/graph-harness/internal/code_core"
+	"github.com/shivamstaq/graph-harness/internal/code_framework"
 	"github.com/shivamstaq/graph-harness/internal/daemon"
 	"github.com/shivamstaq/graph-harness/internal/dsl"
 	"github.com/shivamstaq/graph-harness/internal/facts"
@@ -77,6 +78,29 @@ type Service struct {
 	// zero in steady state.
 	routerOnce sync.Once
 	router     *kernel.Router
+
+	// extractors is the code.framework Dispatcher injected after
+	// construction via SetExtractors. nil-safe: extractors.list /
+	// status return descriptors from the package-level registry when
+	// the daemon hasn't wired a Dispatcher (one-shot CLI batch path).
+	extractorsMu sync.RWMutex
+	extractors   *code_framework.Dispatcher
+}
+
+// SetExtractors installs the code.framework Dispatcher on this
+// Service. Called by the daemon's bootstrap after Workspace.Open and
+// before the listener goroutine starts. Idempotent.
+func (s *Service) SetExtractors(d *code_framework.Dispatcher) {
+	s.extractorsMu.Lock()
+	s.extractors = d
+	s.extractorsMu.Unlock()
+}
+
+// Extractors returns the installed Dispatcher (may be nil).
+func (s *Service) Extractors() *code_framework.Dispatcher {
+	s.extractorsMu.RLock()
+	defer s.extractorsMu.RUnlock()
+	return s.extractors
 }
 
 // Router returns the Service's Kernel.Route surface, lazily installing

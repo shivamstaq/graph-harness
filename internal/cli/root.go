@@ -42,6 +42,7 @@ func NewRootCmd() *cobra.Command {
 		newWatchCmd(),
 		newSnapshotCmd(),
 		newHarnessesCmd(),
+		newExtractorsCmd(),
 	)
 	return root
 }
