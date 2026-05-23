@@ -1,0 +1,9 @@
+# Workspace-declared generated patterns. Anything matching one of these
+# globs is treated as authoritatively generated (confidence 1.0) by the
+# generated.manifest extractor.
+generated_patterns = [
+  "*.gen.zig",
+  "vendor/embedded/*.go",
+  "schemas/*.generated.json",
+  "i18n_translations.py",
+]
