@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"net"
 	"net/http"
@@ -99,6 +100,20 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/overlay/save", s.handle(s.apiOverlaySave))
 	s.mux.HandleFunc("/api/conflicts", s.handle(s.apiConflicts))
 	s.mux.HandleFunc("/api/entity/provenance", s.handle(s.apiEntityProvenance))
+	// P2.T38 framework-entity browser endpoints. One thin shim per
+	// framework.* JSON-RPC method so the SPA can use plain fetch();
+	// each forwards the same FrameworkListParams envelope through
+	// the Consumer adapter so in-process *Service and remote
+	// *ClientService both work without a code split.
+	s.mux.HandleFunc("/api/framework/routes", s.handle(s.apiFrameworkRoutes))
+	s.mux.HandleFunc("/api/framework/events", s.handle(s.apiFrameworkEvents))
+	s.mux.HandleFunc("/api/framework/event_publishers", s.handle(s.apiFrameworkEventPublishers))
+	s.mux.HandleFunc("/api/framework/event_subscribers", s.handle(s.apiFrameworkEventSubscribers))
+	s.mux.HandleFunc("/api/framework/schemas", s.handle(s.apiFrameworkSchemas))
+	s.mux.HandleFunc("/api/framework/schema_fields", s.handle(s.apiFrameworkSchemaFields))
+	s.mux.HandleFunc("/api/framework/tests", s.handle(s.apiFrameworkTests))
+	s.mux.HandleFunc("/api/framework/contract_tests", s.handle(s.apiFrameworkContractTests))
+	s.mux.HandleFunc("/api/framework/steps_touching", s.handle(s.apiFrameworkStepsTouching))
 	s.mux.Handle("/", http.StripPrefix("/", s.guarded(http.FileServer(http.FS(spa)))))
 }
 
@@ -194,4 +209,99 @@ func (s *Server) apiEntityProvenance(_ http.ResponseWriter, r *http.Request) (an
 		return nil, fmt.Errorf("decode: %w", err)
 	}
 	return s.svc.EntityProvenance(r.Context(), p)
+}
+
+// --- P2.T38 framework-entity browsers --------------------------------------
+
+// decodeFrameworkListParams decodes the shared list-params envelope.
+// Tolerates an empty body (no params) by returning the zero value so
+// the SPA can issue a GET-like POST with no JSON for the "list
+// everything" page.
+func decodeFrameworkListParams(r *http.Request) (jsonrpc.FrameworkListParams, error) {
+	var p jsonrpc.FrameworkListParams
+	if r.Body == nil {
+		return p, nil
+	}
+	if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
+		// Empty body is fine; everything else is a real error.
+		if errors.Is(err, io.EOF) {
+			return p, nil
+		}
+		return p, fmt.Errorf("decode: %w", err)
+	}
+	return p, nil
+}
+
+func (s *Server) apiFrameworkRoutes(_ http.ResponseWriter, r *http.Request) (any, error) {
+	p, err := decodeFrameworkListParams(r)
+	if err != nil {
+		return nil, err
+	}
+	return s.svc.FrameworkRoutes(r.Context(), p)
+}
+
+func (s *Server) apiFrameworkEvents(_ http.ResponseWriter, r *http.Request) (any, error) {
+	p, err := decodeFrameworkListParams(r)
+	if err != nil {
+		return nil, err
+	}
+	return s.svc.FrameworkEvents(r.Context(), p)
+}
+
+func (s *Server) apiFrameworkEventPublishers(_ http.ResponseWriter, r *http.Request) (any, error) {
+	p, err := decodeFrameworkListParams(r)
+	if err != nil {
+		return nil, err
+	}
+	return s.svc.FrameworkEventPublishers(r.Context(), p)
+}
+
+func (s *Server) apiFrameworkEventSubscribers(_ http.ResponseWriter, r *http.Request) (any, error) {
+	p, err := decodeFrameworkListParams(r)
+	if err != nil {
+		return nil, err
+	}
+	return s.svc.FrameworkEventSubscribers(r.Context(), p)
+}
+
+func (s *Server) apiFrameworkSchemas(_ http.ResponseWriter, r *http.Request) (any, error) {
+	p, err := decodeFrameworkListParams(r)
+	if err != nil {
+		return nil, err
+	}
+	return s.svc.FrameworkSchemas(r.Context(), p)
+}
+
+func (s *Server) apiFrameworkSchemaFields(_ http.ResponseWriter, r *http.Request) (any, error) {
+	p, err := decodeFrameworkListParams(r)
+	if err != nil {
+		return nil, err
+	}
+	return s.svc.FrameworkSchemaFields(r.Context(), p)
+}
+
+func (s *Server) apiFrameworkTests(_ http.ResponseWriter, r *http.Request) (any, error) {
+	p, err := decodeFrameworkListParams(r)
+	if err != nil {
+		return nil, err
+	}
+	return s.svc.FrameworkTests(r.Context(), p)
+}
+
+func (s *Server) apiFrameworkContractTests(_ http.ResponseWriter, r *http.Request) (any, error) {
+	p, err := decodeFrameworkListParams(r)
+	if err != nil {
+		return nil, err
+	}
+	return s.svc.FrameworkContractTests(r.Context(), p)
+}
+
+func (s *Server) apiFrameworkStepsTouching(_ http.ResponseWriter, r *http.Request) (any, error) {
+	var p jsonrpc.FrameworkStepsTouchingParams
+	if r.Body != nil {
+		if err := json.NewDecoder(r.Body).Decode(&p); err != nil && !errors.Is(err, io.EOF) {
+			return nil, fmt.Errorf("decode: %w", err)
+		}
+	}
+	return s.svc.FrameworkStepsTouching(r.Context(), p)
 }
