@@ -843,6 +843,44 @@ func (s *Store) ListEntities(ctx context.Context, f ListFilter) ([]Entity, error
 	return out, nil
 }
 
+// ListEntitiesByKind returns every entity whose `kind` column matches
+// the supplied kind, narrowed by an optional KindTag prefix (empty =
+// no prefix filter). Results are ordered by (qualified_name, id) for
+// stable cross-run iteration; limit/offset are applied as the trailing
+// LIMIT clause so the caller can paginate large tables without
+// materializing the whole result set.
+//
+// Used by Studio framework-entity browsers (Pass 2.T38): Routes,
+// Events, Schemas, etc. all live in this same code_entities table
+// under their framework Kind ("Route", "Event", "Schema", …) per the
+// Pass-0.5-A convention; the KindTag prefix narrows transport-bearing
+// rows (e.g. KindTag LIKE "topic:%" + Kind="Event" picks just the
+// topic-bound Event entities, dropping plain in-process events).
+//
+// limit<=0 means "no limit". offset<0 is clamped to 0.
+func (s *Store) ListEntitiesByKind(ctx context.Context, kind EntityKind, kindTagPrefix string, limit, offset int) ([]Entity, error) {
+	const baseQuery = `SELECT id, kind, language_id, qualified_name, receiver, path, body_hash,
+		        kind_tag, parent_id, ordinal,
+		        normalized_signature, symbol_fingerprint, ast_hash
+		 FROM code_entities WHERE kind = ?`
+	args := []any{string(kind)}
+	q := baseQuery
+	if kindTagPrefix != "" {
+		q += " AND kind_tag LIKE ?"
+		args = append(args, kindTagPrefix+"%")
+	}
+	q += " ORDER BY qualified_name ASC, id ASC"
+	if limit > 0 {
+		q += " LIMIT ?"
+		args = append(args, limit)
+		if offset > 0 {
+			q += " OFFSET ?"
+			args = append(args, offset)
+		}
+	}
+	return s.queryEntities(ctx, q, args...)
+}
+
 // CountByKind returns how many entities of a given kind are stored.
 func (s *Store) CountByKind(ctx context.Context, kind EntityKind) (int, error) {
 	row := s.db.QueryRowContext(ctx,

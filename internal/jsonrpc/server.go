@@ -222,6 +222,22 @@ func (s *Server) registerBuiltins() {
 	Register(s, "extractors.enable", "extractors", svc.ExtractorsEnable)
 	Register(s, "extractors.disable", "extractors", svc.ExtractorsDisable)
 
+	// P2.T38 framework-entity browsers — Studio's per-framework
+	// table view of Routes / Events / Schemas / Tests, all backed by
+	// code.core entity rows with their framework Kind discriminator.
+	// Read-only; gated on the "framework_browser" capability so
+	// surfaces can hide the tabs when the layer isn't installed.
+	s.AddCapability("framework_browser")
+	Register(s, "framework.routes", "framework_browser", svc.FrameworkRoutes)
+	Register(s, "framework.events", "framework_browser", svc.FrameworkEvents)
+	Register(s, "framework.event_publishers", "framework_browser", svc.FrameworkEventPublishers)
+	Register(s, "framework.event_subscribers", "framework_browser", svc.FrameworkEventSubscribers)
+	Register(s, "framework.schemas", "framework_browser", svc.FrameworkSchemas)
+	Register(s, "framework.schema_fields", "framework_browser", svc.FrameworkSchemaFields)
+	Register(s, "framework.tests", "framework_browser", svc.FrameworkTests)
+	Register(s, "framework.contract_tests", "framework_browser", svc.FrameworkContractTests)
+	Register(s, "framework.steps_touching", "framework_browser", svc.FrameworkStepsTouching)
+
 	// SPEC §6.22 long-lived subscriber contract: kernel.identify /
 	// subscribe / ack / unsubscribe. The subscribe + identify
 	// methods need the underlying jsonrpc2.Conn so server-initiated

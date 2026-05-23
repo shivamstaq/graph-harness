@@ -37,6 +37,17 @@ type Consumer interface {
 	MCPAfterEdit(ctx context.Context, p MCPAfterEditParams) (*change_process.ValidateDiffResult, error)
 	ReviewList(ctx context.Context, p ReviewListParams) (ReviewListResult, error)
 	ReviewGet(ctx context.Context, p ReviewIDParams) (*review_queue.Proposal, error)
+
+	// P2.T38 framework-entity browser surface.
+	FrameworkRoutes(ctx context.Context, p FrameworkListParams) (FrameworkEntitiesResult, error)
+	FrameworkEvents(ctx context.Context, p FrameworkListParams) (FrameworkEntitiesResult, error)
+	FrameworkEventPublishers(ctx context.Context, p FrameworkListParams) (FrameworkEntitiesResult, error)
+	FrameworkEventSubscribers(ctx context.Context, p FrameworkListParams) (FrameworkEntitiesResult, error)
+	FrameworkSchemas(ctx context.Context, p FrameworkListParams) (FrameworkEntitiesResult, error)
+	FrameworkSchemaFields(ctx context.Context, p FrameworkListParams) (FrameworkEntitiesResult, error)
+	FrameworkTests(ctx context.Context, p FrameworkListParams) (FrameworkEntitiesResult, error)
+	FrameworkContractTests(ctx context.Context, p FrameworkListParams) (FrameworkEntitiesResult, error)
+	FrameworkStepsTouching(ctx context.Context, p FrameworkStepsTouchingParams) (FrameworkStepsTouchingResult, error)
 }
 
 // ClientService adapts a *Client to the Consumer interface so
@@ -131,6 +142,60 @@ func (s *ClientService) ReviewList(ctx context.Context, p ReviewListParams) (Rev
 func (s *ClientService) ReviewGet(ctx context.Context, p ReviewIDParams) (*review_queue.Proposal, error) {
 	var r *review_queue.Proposal
 	return r, s.c.Call(ctx, "review.get", p, &r)
+}
+
+// FrameworkRoutes — daemon `framework.routes` RPC.
+func (s *ClientService) FrameworkRoutes(ctx context.Context, p FrameworkListParams) (FrameworkEntitiesResult, error) {
+	var r FrameworkEntitiesResult
+	return r, s.c.Call(ctx, "framework.routes", p, &r)
+}
+
+// FrameworkEvents — daemon `framework.events` RPC.
+func (s *ClientService) FrameworkEvents(ctx context.Context, p FrameworkListParams) (FrameworkEntitiesResult, error) {
+	var r FrameworkEntitiesResult
+	return r, s.c.Call(ctx, "framework.events", p, &r)
+}
+
+// FrameworkEventPublishers — daemon `framework.event_publishers` RPC.
+func (s *ClientService) FrameworkEventPublishers(ctx context.Context, p FrameworkListParams) (FrameworkEntitiesResult, error) {
+	var r FrameworkEntitiesResult
+	return r, s.c.Call(ctx, "framework.event_publishers", p, &r)
+}
+
+// FrameworkEventSubscribers — daemon `framework.event_subscribers` RPC.
+func (s *ClientService) FrameworkEventSubscribers(ctx context.Context, p FrameworkListParams) (FrameworkEntitiesResult, error) {
+	var r FrameworkEntitiesResult
+	return r, s.c.Call(ctx, "framework.event_subscribers", p, &r)
+}
+
+// FrameworkSchemas — daemon `framework.schemas` RPC.
+func (s *ClientService) FrameworkSchemas(ctx context.Context, p FrameworkListParams) (FrameworkEntitiesResult, error) {
+	var r FrameworkEntitiesResult
+	return r, s.c.Call(ctx, "framework.schemas", p, &r)
+}
+
+// FrameworkSchemaFields — daemon `framework.schema_fields` RPC.
+func (s *ClientService) FrameworkSchemaFields(ctx context.Context, p FrameworkListParams) (FrameworkEntitiesResult, error) {
+	var r FrameworkEntitiesResult
+	return r, s.c.Call(ctx, "framework.schema_fields", p, &r)
+}
+
+// FrameworkTests — daemon `framework.tests` RPC.
+func (s *ClientService) FrameworkTests(ctx context.Context, p FrameworkListParams) (FrameworkEntitiesResult, error) {
+	var r FrameworkEntitiesResult
+	return r, s.c.Call(ctx, "framework.tests", p, &r)
+}
+
+// FrameworkContractTests — daemon `framework.contract_tests` RPC.
+func (s *ClientService) FrameworkContractTests(ctx context.Context, p FrameworkListParams) (FrameworkEntitiesResult, error) {
+	var r FrameworkEntitiesResult
+	return r, s.c.Call(ctx, "framework.contract_tests", p, &r)
+}
+
+// FrameworkStepsTouching — daemon `framework.steps_touching` RPC.
+func (s *ClientService) FrameworkStepsTouching(ctx context.Context, p FrameworkStepsTouchingParams) (FrameworkStepsTouchingResult, error) {
+	var r FrameworkStepsTouchingResult
+	return r, s.c.Call(ctx, "framework.steps_touching", p, &r)
 }
 
 // Compile-time assertions: both backends satisfy the Consumer

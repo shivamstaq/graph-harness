@@ -14,6 +14,9 @@
       <button data-page="author">New selector</button>
       <button data-page="preview">Selector preview</button>
       <button data-page="entity">Entity drill-down</button>
+      <button data-page="routes">Routes</button>
+      <button data-page="events">Events</button>
+      <button data-page="schemas">Schemas</button>
     </nav>
     <div id="status" class="muted"></div>
   </header>
@@ -93,6 +96,59 @@ flow CheckoutValidation {
         <button id="entity-btn">Look up</button>
       </div>
       <pre id="entity-out"></pre>
+    </section>
+
+    <!-- Page: framework Routes browser (P2.T38) -->
+    <section id="page-routes" class="page">
+      <div class="row">
+        <input id="routes-framework" placeholder="framework filter (chi, express, fastapi, ...)" size="40" />
+        <button id="routes-refresh">Refresh</button>
+        <span id="routes-msg" class="muted"></span>
+      </div>
+      <table class="fw-table" id="routes-table">
+        <thead><tr><th>Method</th><th>Path</th><th>Handler (qualified_name)</th><th>Framework / KindTag</th><th>Bound steps</th></tr></thead>
+        <tbody></tbody>
+      </table>
+      <h3>Flow steps touching selected entity</h3>
+      <p class="muted">Click a row above to list every flow step whose selector binds to that route (via the Pass-0.5-A reverse selector index).</p>
+      <pre id="routes-steps"></pre>
+    </section>
+
+    <!-- Page: framework Events browser -->
+    <section id="page-events" class="page">
+      <div class="row">
+        <input id="events-framework" placeholder="transport filter (kafka, nats, amqp, sns, sqs, redis)" size="40" />
+        <button id="events-refresh">Refresh</button>
+        <span id="events-msg" class="muted"></span>
+      </div>
+      <table class="fw-table" id="events-table">
+        <thead><tr><th>Name</th><th>Transport (KindTag)</th><th>Path</th><th>Bound steps</th></tr></thead>
+        <tbody></tbody>
+      </table>
+      <h3>Publishers / Subscribers for selected event</h3>
+      <pre id="events-pubsub"></pre>
+      <h3>Flow steps touching selected event</h3>
+      <pre id="events-steps"></pre>
+    </section>
+
+    <!-- Page: framework Schemas browser -->
+    <section id="page-schemas" class="page">
+      <div class="row">
+        <input id="schemas-framework" placeholder="dialect filter (prisma, drizzle, sqlalchemy, gorm, sql)" size="40" />
+        <button id="schemas-refresh">Refresh</button>
+        <span id="schemas-msg" class="muted"></span>
+      </div>
+      <table class="fw-table" id="schemas-table">
+        <thead><tr><th>Table</th><th>Dialect (KindTag)</th><th>Path</th><th>Bound steps</th></tr></thead>
+        <tbody></tbody>
+      </table>
+      <h3>Fields for selected schema</h3>
+      <table class="fw-table" id="schema-fields-table">
+        <thead><tr><th>Field</th><th>KindTag</th><th>Path</th></tr></thead>
+        <tbody></tbody>
+      </table>
+      <h3>Flow steps touching selected schema</h3>
+      <pre id="schemas-steps"></pre>
     </section>
   </main>
 

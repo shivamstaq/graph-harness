@@ -211,3 +211,237 @@ document.getElementById("author-save").addEventListener("click", async () => {
 
 renderAnchors();
 renderGenerated();
+
+// --- framework-entity browsers (P2.T38) -----------------------------------
+//
+// Three tabs (Routes / Events / Schemas) each render a paginated table
+// of entities pulled from `framework.*` JSON-RPC handlers (via the
+// /api/framework/* HTTP shims). The "show flow steps that touch this
+// entity" drill-down lists every flow step whose selector resolves to
+// the clicked row via the Pass-0.5-A reverse selector index.
+//
+// Text-only visualization — no graph drawing in v1 per plan §2.
+
+function entityMethod(e) {
+  // For Route entities the HTTP method lives on kind_tag.
+  return e.kind_tag || "";
+}
+
+function entityHandler(e) {
+  return e.qualified_name || "";
+}
+
+async function loadStepsTouching(entityID, sink) {
+  if (!entityID) {
+    sink.textContent = "(no entity selected)";
+    return;
+  }
+  sink.textContent = "loading...";
+  try {
+    const r = await api("/api/framework/steps_touching", { entity_id: entityID });
+    if (!r.steps || r.steps.length === 0) {
+      sink.textContent =
+        `(no flow steps bind to entity ${entityID.slice(0, 12)}…)\n` +
+        `— either no selector mentions this entity yet, or the resolver hasn't run.`;
+      return;
+    }
+    const lines = r.steps.map(
+      (s) =>
+        `selector=${s.selector_id}` +
+        (s.flow_id ? `  flow=${s.flow_id}` : "") +
+        `  via=${s.via_anchor}  bound@seq=${s.bound_at_seq}`,
+    );
+    sink.textContent = `entity_id: ${r.entity_id}\n\n${lines.join("\n")}`;
+  } catch (e) {
+    sink.textContent = "error: " + e.message;
+  }
+}
+
+function rowSelectHandler(tableEl, onSelect) {
+  return (ev) => {
+    const tr = ev.target.closest("tr");
+    if (!tr || !tr.dataset.entityId) return;
+    for (const r of tableEl.querySelectorAll("tbody tr")) r.classList.remove("selected");
+    tr.classList.add("selected");
+    onSelect(tr.dataset.entityId);
+  };
+}
+
+function escapeHTML(s) {
+  return String(s || "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+// --- Routes tab -----------------------------------------------------------
+async function loadRoutes() {
+  const fw = document.getElementById("routes-framework").value.trim();
+  const msg = document.getElementById("routes-msg");
+  const tbody = document.querySelector("#routes-table tbody");
+  msg.textContent = "loading...";
+  tbody.innerHTML = "";
+  try {
+    const r = await api("/api/framework/routes", { framework: fw });
+    msg.textContent = `${r.items.length} shown (total ${r.total})`;
+    for (const e of r.items) {
+      const tr = document.createElement("tr");
+      tr.dataset.entityId = e.id;
+      tr.innerHTML =
+        `<td class="method">${escapeHTML(entityMethod(e))}</td>` +
+        `<td>${escapeHTML(e.qualified_name)}</td>` +
+        `<td class="muted">${escapeHTML(entityHandler(e))}</td>` +
+        `<td class="muted">${escapeHTML(e.kind_tag)}</td>` +
+        `<td><button data-steps="${escapeHTML(e.id)}">View steps</button></td>`;
+      tbody.appendChild(tr);
+    }
+  } catch (e) {
+    msg.textContent = "error: " + e.message;
+  }
+}
+document.getElementById("routes-refresh").addEventListener("click", loadRoutes);
+document
+  .querySelector("#routes-table")
+  .addEventListener(
+    "click",
+    rowSelectHandler(document.getElementById("routes-table"), (id) =>
+      loadStepsTouching(id, document.getElementById("routes-steps")),
+    ),
+  );
+
+// --- Events tab -----------------------------------------------------------
+async function loadEventsTable() {
+  const fw = document.getElementById("events-framework").value.trim();
+  const msg = document.getElementById("events-msg");
+  const tbody = document.querySelector("#events-table tbody");
+  msg.textContent = "loading...";
+  tbody.innerHTML = "";
+  try {
+    const r = await api("/api/framework/events", { framework: fw });
+    msg.textContent = `${r.items.length} shown (total ${r.total})`;
+    for (const e of r.items) {
+      const tr = document.createElement("tr");
+      tr.dataset.entityId = e.id;
+      tr.dataset.eventName = e.qualified_name || "";
+      tr.dataset.transport = (e.kind_tag || "").replace(/^topic:/, "");
+      tr.innerHTML =
+        `<td>${escapeHTML(e.qualified_name)}</td>` +
+        `<td class="muted">${escapeHTML(e.kind_tag)}</td>` +
+        `<td class="muted">${escapeHTML(e.path)}</td>` +
+        `<td><button data-steps="${escapeHTML(e.id)}">View steps</button></td>`;
+      tbody.appendChild(tr);
+    }
+  } catch (e) {
+    msg.textContent = "error: " + e.message;
+  }
+}
+document.getElementById("events-refresh").addEventListener("click", loadEventsTable);
+document.getElementById("events-table").addEventListener(
+  "click",
+  rowSelectHandler(document.getElementById("events-table"), async (id) => {
+    const tr = document.querySelector(`#events-table tbody tr[data-entity-id="${CSS.escape(id)}"]`);
+    const transport = tr ? tr.dataset.transport : "";
+    const sinkPubSub = document.getElementById("events-pubsub");
+    const sinkSteps = document.getElementById("events-steps");
+    // Walk the publisher + subscriber tables filtered by transport so
+    // the drill-down stays scoped to the selected event's transport.
+    sinkPubSub.textContent = "loading publishers/subscribers...";
+    try {
+      const pubs = await api("/api/framework/event_publishers", { framework: transport });
+      const subs = await api("/api/framework/event_subscribers", { framework: transport });
+      const eventName = tr ? tr.dataset.eventName : "";
+      const matching = (list) =>
+        list.items.filter((x) => !eventName || x.qualified_name === eventName);
+      const pubLines = matching(pubs).map(
+        (e) => `  pub: ${e.qualified_name}  [${e.kind_tag}]  ${e.path}`,
+      );
+      const subLines = matching(subs).map(
+        (e) => `  sub: ${e.qualified_name}  [${e.kind_tag}]  ${e.path}`,
+      );
+      sinkPubSub.textContent =
+        `transport=${transport || "(any)"}  event=${eventName}\n\n` +
+        (pubLines.length ? pubLines.join("\n") : "  (no publishers)") +
+        "\n" +
+        (subLines.length ? subLines.join("\n") : "  (no subscribers)");
+    } catch (e) {
+      sinkPubSub.textContent = "error: " + e.message;
+    }
+    loadStepsTouching(id, sinkSteps);
+  }),
+);
+
+// --- Schemas tab ----------------------------------------------------------
+async function loadSchemas() {
+  const fw = document.getElementById("schemas-framework").value.trim();
+  const msg = document.getElementById("schemas-msg");
+  const tbody = document.querySelector("#schemas-table tbody");
+  msg.textContent = "loading...";
+  tbody.innerHTML = "";
+  try {
+    const r = await api("/api/framework/schemas", { framework: fw });
+    msg.textContent = `${r.items.length} shown (total ${r.total})`;
+    for (const e of r.items) {
+      const tr = document.createElement("tr");
+      tr.dataset.entityId = e.id;
+      tr.dataset.table = e.qualified_name || "";
+      tr.innerHTML =
+        `<td>${escapeHTML(e.qualified_name)}</td>` +
+        `<td class="muted">${escapeHTML(e.kind_tag)}</td>` +
+        `<td class="muted">${escapeHTML(e.path)}</td>` +
+        `<td><button data-steps="${escapeHTML(e.id)}">View steps</button></td>`;
+      tbody.appendChild(tr);
+    }
+  } catch (e) {
+    msg.textContent = "error: " + e.message;
+  }
+}
+document.getElementById("schemas-refresh").addEventListener("click", loadSchemas);
+document.getElementById("schemas-table").addEventListener(
+  "click",
+  rowSelectHandler(document.getElementById("schemas-table"), async (id) => {
+    const tr = document.querySelector(`#schemas-table tbody tr[data-entity-id="${CSS.escape(id)}"]`);
+    const table = tr ? tr.dataset.table : "";
+    const fieldsBody = document.querySelector("#schema-fields-table tbody");
+    fieldsBody.innerHTML = "<tr><td colspan='3' class='muted'>loading...</td></tr>";
+    try {
+      // SchemaField qualified_name is "<table>.<field>"; the
+      // framework param on schema_fields is interpreted as a table-
+      // name prefix filter (see filterByTablePrefix in the daemon).
+      const r = await api("/api/framework/schema_fields", { framework: table });
+      fieldsBody.innerHTML = "";
+      if (r.items.length === 0) {
+        fieldsBody.innerHTML = "<tr><td colspan='3' class='muted'>(no fields)</td></tr>";
+      }
+      for (const f of r.items) {
+        const fieldName = (f.qualified_name || "").split(".").slice(1).join(".") || f.qualified_name;
+        const row = document.createElement("tr");
+        row.innerHTML =
+          `<td>${escapeHTML(fieldName)}</td>` +
+          `<td class="muted">${escapeHTML(f.kind_tag)}</td>` +
+          `<td class="muted">${escapeHTML(f.path)}</td>`;
+        fieldsBody.appendChild(row);
+      }
+    } catch (e) {
+      fieldsBody.innerHTML = `<tr><td colspan='3'>error: ${escapeHTML(e.message)}</td></tr>`;
+    }
+    loadStepsTouching(id, document.getElementById("schemas-steps"));
+  }),
+);
+
+// Lazy-load each browser the first time its tab activates.
+const lazyLoaders = {
+  routes: { fn: loadRoutes, loaded: false },
+  events: { fn: loadEventsTable, loaded: false },
+  schemas: { fn: loadSchemas, loaded: false },
+};
+document.querySelectorAll("nav button").forEach((b) => {
+  b.addEventListener("click", () => {
+    const tab = b.dataset.page;
+    const loader = lazyLoaders[tab];
+    if (loader && !loader.loaded) {
+      loader.loaded = true;
+      loader.fn();
+    }
+  });
+});
