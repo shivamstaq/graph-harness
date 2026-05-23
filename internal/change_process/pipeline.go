@@ -260,6 +260,114 @@ func (p *Pipeline) ValidateDiff(ctx context.Context, unified []byte, validationS
 	return res, nil
 }
 
+// ImpactedFromDiff is the P2.T41 reuse seam for surfaces that need the
+// Stage 4 + 5 impacted set (touched entities ∪ framework dependents)
+// WITHOUT the Stage 6+ finding-emission filtering. The MCP `impacted_flows`
+// tool calls this so it can enumerate every producer reached from the
+// diff — not just producers whose dependents are stale (which is what
+// `missing_dependent_update` filters to).
+//
+// Returns:
+//
+//   - touchedQNs   — qualified-name → entity_id map for entities the diff
+//     directly added text to (Stage 2 output).
+//   - touchedIDs   — touched_set after Stage 4 reverse-index expansion.
+//   - producers    — every framework producer reachable in ≤ 4 BFS hops,
+//     each with its full dependent list (NOT filtered to
+//     stale). The shape mirrors FrameworkContext so callers
+//     can render "publisher → dependents" directly.
+//
+// The pipeline still walks via the private computeImpactedSet so the
+// BFS rules stay single-sourced.
+func (p *Pipeline) ImpactedFromDiff(ctx context.Context, unified []byte) (
+	touchedQNs map[string]string,
+	touchedIDs map[string]struct{},
+	producers []FrameworkContext,
+	err error,
+) {
+	hunks := parseUnifiedDiff(unified)
+	touchedQNs = map[string]string{}
+	for _, h := range hunks {
+		for _, qn := range extractFunctionNames(h.Path, h.AddedLines) {
+			ent, lerr := p.Code.LookupByQualifiedNameSuffix(ctx, qn)
+			if lerr != nil {
+				return nil, nil, nil, lerr
+			}
+			if ent != nil {
+				touchedQNs[ent.QualifiedName] = ent.ID
+			}
+		}
+	}
+	touchedIDs, err = p.expandTouchedViaReverseIndex(ctx, touchedQNs)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	impacted, err := p.computeImpactedSet(ctx, touchedIDs)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	// Stable order: same key fn as sortProducers.
+	recs := make([]*impactedRecord, 0, len(impacted))
+	for _, r := range impacted {
+		recs = append(recs, r)
+	}
+	sortProducers(recs)
+	producers = make([]FrameworkContext, 0, len(recs))
+	for _, r := range recs {
+		producers = append(producers, FrameworkContext{
+			TouchedKind: r.ProducerKind,
+			TouchedSubject: EntityRef{
+				Kind:          r.ProducerKind,
+				ID:            r.ProducerID,
+				QualifiedName: r.ProducerQN,
+			},
+			Dependents: append([]DependentRef(nil), r.Dependents...),
+		})
+	}
+	return touchedQNs, touchedIDs, producers, nil
+}
+
+// ImpactedFromTouched is the selector-driven sibling of ImpactedFromDiff.
+// Callers that have already projected a named selector to a set of
+// touched entity IDs use this to walk the same Stage-4 + Stage-5 BFS.
+// Returns the post-reverse-index touched set + every producer reached.
+func (p *Pipeline) ImpactedFromTouched(ctx context.Context, seedEntityIDs []string) (
+	touchedIDs map[string]struct{},
+	producers []FrameworkContext,
+	err error,
+) {
+	seed := map[string]string{}
+	for _, id := range seedEntityIDs {
+		seed[id] = id // expandTouchedViaReverseIndex only uses values
+	}
+	touchedIDs, err = p.expandTouchedViaReverseIndex(ctx, seed)
+	if err != nil {
+		return nil, nil, err
+	}
+	impacted, err := p.computeImpactedSet(ctx, touchedIDs)
+	if err != nil {
+		return nil, nil, err
+	}
+	recs := make([]*impactedRecord, 0, len(impacted))
+	for _, r := range impacted {
+		recs = append(recs, r)
+	}
+	sortProducers(recs)
+	producers = make([]FrameworkContext, 0, len(recs))
+	for _, r := range recs {
+		producers = append(producers, FrameworkContext{
+			TouchedKind: r.ProducerKind,
+			TouchedSubject: EntityRef{
+				Kind:          r.ProducerKind,
+				ID:            r.ProducerID,
+				QualifiedName: r.ProducerQN,
+			},
+			Dependents: append([]DependentRef(nil), r.Dependents...),
+		})
+	}
+	return touchedIDs, producers, nil
+}
+
 // collectSymbolDisambiguationFindings reads code.core.SymbolDisambiguation
 // events in the log up through validation_seq and emits one finding per
 // event. The event's payload (per the unifier) carries the canonical key

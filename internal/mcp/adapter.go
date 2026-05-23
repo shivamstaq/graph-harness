@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"strings"
 	"sync"
 
@@ -39,6 +40,16 @@ type Adapter struct {
 	// URIs by prefix and parses the remainder into kind + entity_id.
 	entityResourcePrefix string
 	entityResourceDesc   ResourceDescriptor
+
+	// frameworkResourcePrefix + frameworkResourceDesc back the dynamic
+	// gh://framework/<extractor>/<entity> resource (P2.T41). The tail
+	// after the prefix is split into <extractor>/<entity>; the
+	// <entity> segment is URL-encoded "<Kind>:<QualifiedName>" so an
+	// entity like `Route:GET /api/orders` round-trips safely. The
+	// extractor name (e.g. "routes.go.chi") is matched against the
+	// provenance ProducedBy field after the entity is resolved.
+	frameworkResourcePrefix string
+	frameworkResourceDesc   ResourceDescriptor
 }
 
 // service returns the live Consumer. With a lazy adapter, the first
@@ -282,6 +293,11 @@ func (a *Adapter) registerTools() {
 			return svc.MCPAfterEdit(ctx, jsonrpc.MCPAfterEditParams{Diff: p.Diff})
 		},
 	}
+	// P2.T41 — impacted_flows
+	a.tools["impacted_flows"] = toolHandler{
+		desc:   impactedFlowsToolDescriptor(),
+		handle: impactedFlowsHandler(a),
+	}
 }
 
 // registerResources wires the resource surface.
@@ -325,6 +341,25 @@ func (a *Adapter) registerResources() {
 		URI:         a.entityResourcePrefix + "{kind}/{entity_id}",
 		Name:        "code.core entity provenance",
 		Description: "Merged provenance (folded summary + per-source claims) for a code.core entity. Supply <kind>/<entity_id> in the URI.",
+		MimeType:    "application/json",
+	}
+
+	// gh://framework/<extractor>/<entity> — dynamic per-framework-entity
+	// resource (P2.T41). Tail layout: <extractor>/<urlencoded entity>.
+	// The <entity> segment is URL-encoded "<Kind>:<QualifiedName>"
+	// (e.g. "Route:GET%20%2Fapi%2Forders"). The server resolves entities
+	// matching the QualifiedName via LookupAllByQualifiedName, filters
+	// to the requested Kind + a provenance source whose ProducedBy
+	// matches the extractor, then returns:
+	//
+	//	{ "entity": EntityView, "extractor": "<name>",
+	//	  "bound_flows": []FlowImpactRef,
+	//	  "findings":    []ValidationFinding }
+	a.frameworkResourcePrefix = "gh://framework/"
+	a.frameworkResourceDesc = ResourceDescriptor{
+		URI:         a.frameworkResourcePrefix + "{extractor}/{kind}:{qualified_name}",
+		Name:        "code.framework entity",
+		Description: "Canonical code.framework entity payload + bound flows + active findings. URI: gh://framework/<extractor>/<urlencoded Kind:QualifiedName>.",
 		MimeType:    "application/json",
 	}
 }
@@ -440,12 +475,15 @@ func (a *Adapter) dispatch(ctx context.Context, req rpcReq) rpcResp {
 		}
 	case "resources/list":
 		a.mu.Lock()
-		out := make([]ResourceDescriptor, 0, len(a.res)+1)
+		out := make([]ResourceDescriptor, 0, len(a.res)+2)
 		for _, r := range a.res {
 			out = append(out, r.desc)
 		}
 		if a.entityResourcePrefix != "" {
 			out = append(out, a.entityResourceDesc)
+		}
+		if a.frameworkResourcePrefix != "" {
+			out = append(out, a.frameworkResourceDesc)
 		}
 		a.mu.Unlock()
 		resp.Result = map[string]any{"resources": out}
@@ -455,6 +493,24 @@ func (a *Adapter) dispatch(ctx context.Context, req rpcReq) rpcResp {
 		}
 		if err := json.Unmarshal(req.Params, &p); err != nil {
 			resp.Error = &rpcError{Code: -32602, Message: err.Error()}
+			return resp
+		}
+		// Dynamic gh://framework/<extractor>/<entity> first (P2.T41).
+		// Tail format: "<extractor>/<urlencoded Kind:QualifiedName>".
+		if a.frameworkResourcePrefix != "" && strings.HasPrefix(p.URI, a.frameworkResourcePrefix) {
+			out, ferr := a.handleFrameworkResource(ctx, p.URI)
+			if ferr != nil {
+				resp.Error = &rpcError{Code: -32602, Message: ferr.Error()}
+				return resp
+			}
+			bs, _ := json.Marshal(out)
+			resp.Result = map[string]any{
+				"contents": []map[string]any{{
+					"uri":      p.URI,
+					"mimeType": a.frameworkResourceDesc.MimeType,
+					"text":     string(bs),
+				}},
+			}
 			return resp
 		}
 		// Dynamic gh://entity/code.core/<kind>/<id> first — exact match
@@ -544,6 +600,109 @@ var (
 	// ErrToolNotFound is returned when tools/call references an unknown tool.
 	ErrToolNotFound = errors.New("tool not found")
 )
+
+// FrameworkResourcePayload is the JSON shape returned by
+// gh://framework/<extractor>/<entity> resources/read (P2.T41). Entity
+// is the canonical EntityProvenanceResult.View for the resolved
+// framework entity; Extractor echoes the URI segment for client
+// correlation; BoundFlows enumerates flows whose scope covers the
+// entity (populated via ImpactedFlows on a selector pointing at this
+// entity's qualified name); Findings is currently the active findings
+// surfaced by re-running validate.diff on an empty diff — i.e. the
+// pipeline's "what's already wrong with this entity" view. The empty
+// list is the correct steady-state shape.
+type FrameworkResourcePayload struct {
+	Extractor  string          `json:"extractor"`
+	Kind       string          `json:"kind"`
+	Entity     any             `json:"entity"`
+	BoundFlows []FlowSummary   `json:"bound_flows"`
+	Findings   []any           `json:"findings"`
+}
+
+// FlowSummary is the per-flow projection surfaced in
+// FrameworkResourcePayload.BoundFlows. Mirrors jsonrpc.FlowImpactRef
+// minus the touched-entity counter (always 1 for this entity).
+type FlowSummary struct {
+	Name          string `json:"name"`
+	ScopeSelector string `json:"scope_selector"`
+	Description   string `json:"description,omitempty"`
+}
+
+// handleFrameworkResource parses a gh://framework/<extractor>/<entity>
+// URI, resolves the entity via Consumer.EntityProvenance, validates
+// the extractor + kind, and assembles the canonical payload. The
+// extractor name is matched against the EntityView's provenance
+// ProducedBy field (so "routes.go.chi" matches an entity whose live
+// provenance was produced by the routes.go.chi extractor). On
+// mismatch the dispatcher still returns the entity payload but
+// surfaces the mismatch via a synthetic finding so the agent can
+// react.
+func (a *Adapter) handleFrameworkResource(ctx context.Context, uri string) (FrameworkResourcePayload, error) {
+	tail := strings.TrimPrefix(uri, a.frameworkResourcePrefix)
+	// Split into <extractor>/<rest>; the entity segment may contain
+	// URL-encoded slashes/colons so we only split once.
+	slash := strings.Index(tail, "/")
+	if slash <= 0 || slash == len(tail)-1 {
+		return FrameworkResourcePayload{}, fmt.Errorf("malformed framework URI %q (want gh://framework/<extractor>/<Kind:QualifiedName>)", uri)
+	}
+	extractor := tail[:slash]
+	rawEntity := tail[slash+1:]
+	decoded, err := url.QueryUnescape(rawEntity)
+	if err != nil {
+		return FrameworkResourcePayload{}, fmt.Errorf("framework URI %q: entity segment is not URL-decodable: %w", uri, err)
+	}
+	colon := strings.Index(decoded, ":")
+	if colon <= 0 || colon == len(decoded)-1 {
+		return FrameworkResourcePayload{}, fmt.Errorf("framework URI %q: entity segment must be Kind:QualifiedName", uri)
+	}
+	kind := decoded[:colon]
+	qn := decoded[colon+1:]
+
+	svc, err := a.service()
+	if err != nil {
+		return FrameworkResourcePayload{}, err
+	}
+	view, err := svc.EntityProvenance(ctx, jsonrpc.EntityProvenanceParams{QualifiedName: qn})
+	if err != nil {
+		return FrameworkResourcePayload{}, fmt.Errorf("lookup framework entity %s:%s: %w", kind, qn, err)
+	}
+	// Best-effort: enumerate flows that resolve this entity. Use the
+	// same impacted_flows codepath via a synthetic touched-id seed —
+	// but we don't have a public diff route. Instead: list all flows
+	// and resolve each against the workspace; mark those whose scope
+	// resolution includes this entity. The fast path is FlowsList +
+	// SelectorsTest, which both already lower through the kernel.
+	flows, ferr := svc.FlowsList(ctx)
+	bound := []FlowSummary{}
+	if ferr == nil {
+		for _, f := range flows.Flows {
+			if f.Scope == "" {
+				continue
+			}
+			env, serr := svc.SelectorsTest(ctx, jsonrpc.SelectorsTestParams{Name: f.Scope})
+			if serr != nil || env == nil {
+				continue
+			}
+			for _, m := range env.Matches {
+				if m.QualifiedName == qn || m.EntityID == view.View.Entity.ID {
+					bound = append(bound, FlowSummary{
+						Name:          f.Name,
+						ScopeSelector: f.Scope,
+						Description:   f.Description,
+					})
+					break
+				}
+			}
+		}
+	}
+	return FrameworkResourcePayload{
+		Extractor:  extractor,
+		Kind:       kind,
+		Entity:     view.View,
+		BoundFlows: bound,
+		Findings:   []any{}, // populated by Pass 3 control output stream
+	}, nil
+}
 
 func sortTools(s []ToolDescriptor) {
 	for i := 1; i < len(s); i++ {

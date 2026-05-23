@@ -783,6 +783,132 @@ func (s *Service) MCPAfterEdit(ctx context.Context, p MCPAfterEditParams) (*chan
 	return s.ValidateDiff(ctx, ValidateDiffParams(p))
 }
 
+// ImpactedFlowsParams is the mcp.impacted_flows / impacted_flows tool input.
+// Exactly one of Diff or Selector must be non-empty. Diff is a unified-diff
+// blob (same shape as validate.diff); Selector is a named selector from the
+// workspace overlay. (P2.T41)
+type ImpactedFlowsParams struct {
+	Diff     string `json:"diff,omitempty"`
+	Selector string `json:"selector,omitempty"`
+}
+
+// FlowImpactRef is one flow surfaced by impacted_flows. TouchedEntityCount
+// counts entities in the flow's resolved scope that overlap with the
+// impacted set (touched + framework dependents).
+type FlowImpactRef struct {
+	Name                string `json:"name"`
+	ScopeSelector       string `json:"scope_selector"`
+	TouchedEntityCount  int    `json:"touched_entity_count"`
+	Description         string `json:"description,omitempty"`
+}
+
+// ImpactedFlowsResult is the mcp.impacted_flows reply. Flows is the
+// filtered, deterministically-ordered list of flows whose scope
+// resolution overlaps the impacted set; Evidence carries the full
+// framework-context records (producer + dependents) for every reachable
+// producer in BFS order. (P2.T41)
+type ImpactedFlowsResult struct {
+	ResolvedAtKernelSeq uint64                            `json:"resolved_at_kernel_seq"`
+	Flows               []FlowImpactRef                   `json:"flows"`
+	Evidence            []change_process.FrameworkContext `json:"evidence"`
+}
+
+// ImpactedFlows handles mcp.impacted_flows (P2.T41). For diff input, runs
+// the Stage 1-5 pipeline path to produce touched + impacted sets; for
+// selector input, projects the selector to entity IDs and walks the same
+// BFS. Then enumerates overlay flows and reports those whose declared
+// scope contains any impacted entity.
+//
+// Reuse: the BFS lives entirely in change_process.Pipeline.ImpactedFromDiff
+// / ImpactedFromTouched. This handler is a pure orchestrator.
+func (s *Service) ImpactedFlows(ctx context.Context, p ImpactedFlowsParams) (ImpactedFlowsResult, error) {
+	diffSet := strings.TrimSpace(p.Diff) != ""
+	selSet := strings.TrimSpace(p.Selector) != ""
+	if diffSet == selSet {
+		return ImpactedFlowsResult{}, errors.New("exactly one of diff or selector required")
+	}
+	atSeq := s.Log.LastSeq()
+	overlay := s.Overlay()
+	pipe := &change_process.Pipeline{Overlay: overlay, Code: s.Code}
+
+	var (
+		touchedIDs map[string]struct{}
+		producers  []change_process.FrameworkContext
+		err        error
+	)
+	if diffSet {
+		_, touchedIDs, producers, err = pipe.ImpactedFromDiff(ctx, []byte(p.Diff))
+		if err != nil {
+			return ImpactedFlowsResult{ResolvedAtKernelSeq: atSeq}, err
+		}
+	} else {
+		env, rerr := overlay.Resolve(ctx, p.Selector, s.Code, atSeq)
+		if rerr != nil {
+			return ImpactedFlowsResult{ResolvedAtKernelSeq: atSeq}, rerr
+		}
+		seeds := make([]string, 0, len(env.Matches))
+		for _, m := range env.Matches {
+			if m.EntityID != "" {
+				seeds = append(seeds, m.EntityID)
+			}
+		}
+		touchedIDs, producers, err = pipe.ImpactedFromTouched(ctx, seeds)
+		if err != nil {
+			return ImpactedFlowsResult{ResolvedAtKernelSeq: atSeq}, err
+		}
+	}
+
+	// impactedIDs = touched ∪ every dependent producer + dep id reached.
+	impactedIDs := map[string]struct{}{}
+	for id := range touchedIDs {
+		impactedIDs[id] = struct{}{}
+	}
+	for _, fc := range producers {
+		if fc.TouchedSubject.ID != "" {
+			impactedIDs[fc.TouchedSubject.ID] = struct{}{}
+		}
+		for _, d := range fc.Dependents {
+			if d.ID != "" {
+				impactedIDs[d.ID] = struct{}{}
+			}
+		}
+	}
+
+	// Enumerate flows whose scope resolves to any entity in impactedIDs.
+	flows := make([]FlowImpactRef, 0, len(overlay.Flows))
+	for name, fl := range overlay.Flows {
+		if fl == nil || fl.Scope == "" {
+			continue
+		}
+		env, rerr := overlay.Resolve(ctx, fl.Scope, s.Code, atSeq)
+		if rerr != nil || env == nil {
+			continue
+		}
+		hits := 0
+		for _, m := range env.Matches {
+			if _, ok := impactedIDs[m.EntityID]; ok {
+				hits++
+			}
+		}
+		if hits == 0 {
+			continue
+		}
+		flows = append(flows, FlowImpactRef{
+			Name:               name,
+			ScopeSelector:      fl.Scope,
+			TouchedEntityCount: hits,
+			Description:        fl.Description,
+		})
+	}
+	sort.Slice(flows, func(i, j int) bool { return flows[i].Name < flows[j].Name })
+
+	return ImpactedFlowsResult{
+		ResolvedAtKernelSeq: atSeq,
+		Flows:               flows,
+		Evidence:            producers,
+	}, nil
+}
+
 // ConflictsListResult is the conflicts.list reply (P1.I — TUI Conflicts panel).
 type ConflictsListResult struct {
 	Conflicts []ConflictRecord `json:"conflicts"`

@@ -208,6 +208,7 @@ func (s *Server) registerBuiltins() {
 
 	Register(s, "mcp.before_edit", "mcp", svc.MCPBeforeEdit)
 	Register(s, "mcp.after_edit", "mcp", svc.MCPAfterEdit)
+	Register(s, "mcp.impacted_flows", "mcp", svc.ImpactedFlows)
 
 	RegisterVoid(s, "conflicts.list", "conflicts", svc.ConflictsList)
 	RegisterVoid(s, "health.extractors", "doctor", svc.DoctorReport)
