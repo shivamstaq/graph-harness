@@ -1,0 +1,29 @@
+import pytest
+
+from app.orders import OrderService
+
+
+@pytest.fixture
+def order_service():
+    return OrderService()
+
+
+@pytest.fixture(scope="module")
+def order_payload():
+    return {"id": "1", "topic": "order.created"}
+
+
+def test_place_order(order_service, order_payload):
+    order_service.place(order_payload)
+
+
+def test_cancel_order(order_service):
+    order_service.cancel("1")
+
+
+def test_order_created_event(order_payload):
+    assert order_payload["topic"] == "order.created"
+
+
+def helper_not_a_test():
+    pass

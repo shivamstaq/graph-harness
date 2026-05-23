@@ -1,0 +1,23 @@
+import { describe, it, test, beforeEach, expect } from "vitest";
+import { CheckoutService } from "../src/checkout_service";
+
+describe("CheckoutService", () => {
+  beforeEach(() => {
+    // setup
+  });
+
+  it("computes total", () => {
+    const svc = new CheckoutService();
+    expect(svc.total([1, 2, 3])).toBe(6);
+  });
+
+  test("rejects empty cart", () => {
+    const svc = new CheckoutService();
+    expect(() => svc.checkout([])).toThrow();
+  });
+
+  it("emits checkout.created", () => {
+    const topic = "checkout.created";
+    expect(topic).toBe("checkout.created");
+  });
+});
