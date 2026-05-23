@@ -97,6 +97,18 @@ func Registry() map[string]Evaluator {
 		"call_neighborhood":  CallNeighborhood{},
 		"path_glob":          PathGlob{},
 		"language_id":        LanguageID{},
+		// Framework anchor kinds (Pass 0.5 — code.framework entities are
+		// produced by Pass 1 extractors; the evaluators here match
+		// against whatever the candidate set carries via Lookup.
+		// Anchor-kind string vocabulary is fixed: see SPEC §3.1 / plan
+		// 02-framework-extractors.md §3.
+		"entity_kind":   Kindwise{},
+		"route_pattern": RoutePattern{},
+		"route_method":  RouteMethod{},
+		"event_name":    EventName{},
+		"schema_field":  SchemaField{},
+		"schema_table":  SchemaTable{},
+		"topic_name":    TopicName{},
 	}
 }
 

@@ -66,16 +66,20 @@ func tsCollectFunctions(n *tree_sitter.Node, src []byte, module, classCtx string
 			}
 		case "class_declaration", "abstract_class_declaration":
 			name := tsNamedField(c, "name", src)
+			qn := tsQualifiedName(module, classCtx, name)
+			pf.TypeDecls = append(pf.TypeDecls, tsExtractTypeDecl(c, src, qn, name, TypeDeclKindClass))
 			body := c.ChildByFieldName("body")
 			if body != nil {
 				tsCollectClassMembers(body, src, module, joinDotted(classCtx, name), pf)
 			}
 		case "interface_declaration":
-			// Interfaces declare method signatures only — no executable
-			// bodies, so we surface them as TypeDecl-only via a
-			// zero-body Function entry skipped by the upstream
-			// FunctionDecl pipeline. (TypeDecl materialization happens
-			// in code.core / SCIP.)
+			name := tsNamedField(c, "name", src)
+			qn := tsQualifiedName(module, classCtx, name)
+			pf.TypeDecls = append(pf.TypeDecls, tsExtractTypeDecl(c, src, qn, name, TypeDeclKindInterface))
+			// Interface method signatures have no executable bodies; the
+			// FunctionDecl pipeline intentionally skips them. We still
+			// emit the interface itself as a TypeDecl so the selector
+			// resolver and code.core can address it.
 		case "internal_module", "module", "namespace_declaration":
 			name := tsNamedField(c, "name", src)
 			body := c.ChildByFieldName("body")
@@ -195,6 +199,28 @@ func tsExtractArrowField(arrow *tree_sitter.Node, src []byte, module, classCtx, 
 		StartLine:     uint32(startPos.Row+1) & 0xffffffff, //nolint:gosec
 		EndLine:       uint32(endPos.Row+1) & 0xffffffff,   //nolint:gosec
 		BodyHash:      hashBytes(body),
+	}
+}
+
+// tsExtractTypeDecl builds a TypeDeclDecl for a class_declaration /
+// abstract_class_declaration / interface_declaration node. BodyHash is
+// the sha256 of the declaration's full source span — there is no
+// per-class "body bytes" distinct from its span the way functions
+// have, but a span hash still satisfies the body_hash anchor's
+// "identical text → identical id" property.
+func tsExtractTypeDecl(n *tree_sitter.Node, src []byte, qn, name string, kind TypeDeclKind) TypeDeclDecl {
+	startPos := n.StartPosition()
+	endPos := n.EndPosition()
+	bytes := n.Utf8Text(src)
+	return TypeDeclDecl{
+		QualifiedName: qn,
+		Name:          name,
+		Kind:          kind,
+		StartByte:     uint32(n.StartByte()),               //nolint:gosec
+		EndByte:       uint32(n.EndByte()),                 //nolint:gosec
+		StartLine:     uint32(startPos.Row+1) & 0xffffffff, //nolint:gosec
+		EndLine:       uint32(endPos.Row+1) & 0xffffffff,   //nolint:gosec
+		BodyHash:      hashBytes([]byte(bytes)),
 	}
 }
 

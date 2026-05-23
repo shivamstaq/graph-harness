@@ -66,14 +66,37 @@ func pyCollect(n *tree_sitter.Node, src []byte, module, classCtx string, pf *Par
 
 // pyHandleClass extracts a class's methods (recursively, since Python
 // allows nested classes) and recurses to keep top-level functions
-// emitted from any nested function bodies.
+// emitted from any nested function bodies. Also emits the class itself
+// as a TypeDeclDecl — Python has no separate Interface concept, so all
+// type declarations carry TypeDeclKindClass.
 func pyHandleClass(class *tree_sitter.Node, src []byte, module, classCtx string, pf *ParsedFile) {
 	name := pyNamedField(class, "name", src)
+	qn := pyQualifiedName(module, classCtx, name)
+	pf.TypeDecls = append(pf.TypeDecls, pyExtractTypeDecl(class, src, qn, name))
 	body := class.ChildByFieldName("body")
 	if body == nil {
 		return
 	}
 	pyCollect(body, src, module, joinDotted(classCtx, name), pf)
+}
+
+// pyExtractTypeDecl builds a TypeDeclDecl for a class_definition node.
+// BodyHash hashes the full declaration span — see tsExtractTypeDecl for
+// the rationale.
+func pyExtractTypeDecl(n *tree_sitter.Node, src []byte, qn, name string) TypeDeclDecl {
+	startPos := n.StartPosition()
+	endPos := n.EndPosition()
+	bytes := n.Utf8Text(src)
+	return TypeDeclDecl{
+		QualifiedName: qn,
+		Name:          name,
+		Kind:          TypeDeclKindClass,
+		StartByte:     uint32(n.StartByte()),               //nolint:gosec
+		EndByte:       uint32(n.EndByte()),                 //nolint:gosec
+		StartLine:     uint32(startPos.Row+1) & 0xffffffff, //nolint:gosec
+		EndLine:       uint32(endPos.Row+1) & 0xffffffff,   //nolint:gosec
+		BodyHash:      hashBytes([]byte(bytes)),
+	}
 }
 
 // pyHandleDecorated unwraps a decorated_definition (function or class)

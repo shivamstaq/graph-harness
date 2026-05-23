@@ -57,6 +57,7 @@ type Selector struct {
 // keyword used in source (`anchor` or `fallback`); both forms are preserved
 // to keep round-trip rendering byte-stable.
 type Anchor struct {
+	Pos    lexer.Position
 	Marker string       `@("anchor" | "fallback")`
 	Kind   string       `@Ident`
 	Value  *AnchorValue `( @@ )?`
@@ -202,6 +203,7 @@ type InlineSelector struct {
 
 // InlineAnchor is a `<kind> <value>` inside an inline selector body.
 type InlineAnchor struct {
+	Pos   lexer.Position
 	Kind  string       `@Ident`
 	Value *AnchorValue `@@`
 }
@@ -262,6 +264,9 @@ func ParseString(name, source string) (*File, error) {
 		return nil, err
 	}
 	if err := validateSurface(f); err != nil {
+		return nil, err
+	}
+	if err := validateAnchorKinds(f); err != nil {
 		return nil, err
 	}
 	return f, nil

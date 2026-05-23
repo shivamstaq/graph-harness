@@ -85,6 +85,54 @@ func TestParsePythonFile_NestedClass(t *testing.T) {
 	}
 }
 
+func TestParsePythonFile_ClassTypeDecls(t *testing.T) {
+	src := []byte(`class Foo:
+    def bar(self):
+        return 1
+
+class Outer:
+    class Inner:
+        pass
+`)
+	pf, err := ParsePythonFile("shapes.py", src)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	wantTypes := map[string]bool{
+		"shapes.Foo":         false,
+		"shapes.Outer":       false,
+		"shapes.Outer.Inner": false,
+	}
+	for _, td := range pf.TypeDecls {
+		if _, ok := wantTypes[td.QualifiedName]; !ok {
+			t.Errorf("unexpected typedecl %q", td.QualifiedName)
+			continue
+		}
+		if td.Kind != TypeDeclKindClass {
+			t.Errorf("typedecl %s kind = %q, want Class", td.QualifiedName, td.Kind)
+		}
+		if td.BodyHash == "" {
+			t.Errorf("typedecl %s missing body hash", td.QualifiedName)
+		}
+		wantTypes[td.QualifiedName] = true
+	}
+	for qn, seen := range wantTypes {
+		if !seen {
+			t.Errorf("missing typedecl %q", qn)
+		}
+	}
+	// Method still emitted alongside.
+	foundMethod := false
+	for _, fn := range pf.Functions {
+		if fn.QualifiedName == "shapes.Foo.bar" {
+			foundMethod = true
+		}
+	}
+	if !foundMethod {
+		t.Errorf("expected method shapes.Foo.bar; got %+v", pf.Functions)
+	}
+}
+
 func TestParsePythonFile_EmptyInput(t *testing.T) {
 	pf, err := ParsePythonFile("empty.py", []byte{})
 	if err != nil {

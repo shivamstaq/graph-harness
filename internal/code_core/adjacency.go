@@ -68,6 +68,9 @@ func NewStore(db *sql.DB) (*Store, error) {
 	if err := s.initSchema(); err != nil {
 		return nil, err
 	}
+	if err := s.initSelectorIndexSchema(); err != nil {
+		return nil, err
+	}
 	return s, nil
 }
 

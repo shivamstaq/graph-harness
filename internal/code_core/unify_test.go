@@ -371,6 +371,63 @@ func dedupCount(ids []string) int {
 	return len(seen)
 }
 
+// TestUnifier_ProjectsClassAndInterfaceSymbols guards the v1 contract
+// that tree-sitter Class / Interface symbols flow through to code.core
+// as first-class Entity rows with the matching EntityKind. The
+// resolver's entity_kind anchor selects on Kind, so a regression that
+// downgraded Class to Symbol (the §6.12 catch-all) would silently
+// break harnesses targeting class taxonomies.
+func TestUnifier_ProjectsClassAndInterfaceSymbols(t *testing.T) {
+	t.Parallel()
+	store := newTestStore(t)
+	u := &Unifier{Store: store}
+	ctx := context.Background()
+
+	classSym := source_live.Symbol{
+		Name:          "Foo",
+		QualifiedName: "shapes.Foo",
+		Kind:          source_live.SymbolKindClass,
+		Range:         source_live.Range{StartByte: 0, EndByte: 10, StartLine: 1, EndLine: 2},
+		LanguageID:    "typescript",
+		Path:          "shapes.ts",
+		BodyHash:      "class-body-hash",
+		SourceClass:   source_live.SourceClassTreesitter,
+		ProducedBy:    "extractor:treesitter",
+		Confidence:    0.95,
+	}
+	ifaceSym := source_live.Symbol{
+		Name:          "Baz",
+		QualifiedName: "shapes.Baz",
+		Kind:          source_live.SymbolKindInterface,
+		Range:         source_live.Range{StartByte: 20, EndByte: 40, StartLine: 4, EndLine: 6},
+		LanguageID:    "typescript",
+		Path:          "shapes.ts",
+		BodyHash:      "iface-body-hash",
+		SourceClass:   source_live.SourceClassTreesitter,
+		ProducedBy:    "extractor:treesitter",
+		Confidence:    0.95,
+	}
+	if _, err := u.Unify(ctx, []source_live.Symbol{classSym, ifaceSym}, 1); err != nil {
+		t.Fatalf("Unify: %v", err)
+	}
+
+	got, err := store.LookupByQualifiedName(ctx, "shapes.Foo")
+	if err != nil || got == nil {
+		t.Fatalf("LookupByQualifiedName shapes.Foo: %v", err)
+	}
+	if got.Kind != KindClass {
+		t.Errorf("Foo kind = %q, want %q", got.Kind, KindClass)
+	}
+
+	got, err = store.LookupByQualifiedName(ctx, "shapes.Baz")
+	if err != nil || got == nil {
+		t.Fatalf("LookupByQualifiedName shapes.Baz: %v", err)
+	}
+	if got.Kind != KindInterface {
+		t.Errorf("Baz kind = %q, want %q", got.Kind, KindInterface)
+	}
+}
+
 // TestUnifier_PersistsNormalizedSignature is the round-trip guard for
 // the anchor-evaluator columns added in support of T-dsl-pipeline's
 // function_signature evaluator. Storing the canonical signature

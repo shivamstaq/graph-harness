@@ -6,6 +6,7 @@ package semantic_overlay
 
 import (
 	"context"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -114,7 +115,23 @@ type ResolutionEnvelope struct {
 // SymbolMoved / SymbolRenamed / SignatureChanged / SymbolDeleted events.
 func (o *Overlay) Resolve(ctx context.Context, name string, store *code_core.Store, atSeq uint64) (*ResolutionEnvelope, error) {
 	env, _, err := o.ResolveWithTrace(ctx, name, store, atSeq)
-	return env, err
+	if err != nil {
+		return env, err
+	}
+	// Reverse-index hookup (P2.T35a / P2.M03): for each match in a
+	// `bound` (or future `reanchored`) outcome, write a row to
+	// entity_selector_index so hover surfaces can answer
+	// "entity → selectors" in O(1). Best-effort: log on failure, do
+	// not fail the resolve. The resolver is synchronous per-call,
+	// no new goroutines.
+	if env != nil && env.Outcome == OutcomeBound {
+		for _, m := range env.Matches {
+			if err := store.BindSelector(ctx, m.EntityID, name, "", m.ViaAnchor, atSeq); err != nil {
+				log.Printf("semantic_overlay: BindSelector(%s,%s) failed: %v", m.EntityID, name, err)
+			}
+		}
+	}
+	return env, nil
 }
 
 // ResolveWithTrace is like [Resolve] but also returns the per-anchor

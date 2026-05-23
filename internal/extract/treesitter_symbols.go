@@ -67,7 +67,7 @@ func ParsedFileToSymbols(pf *source_live.ParsedFile) []source_live.Symbol {
 	if pf == nil {
 		return nil
 	}
-	out := make([]source_live.Symbol, 0, len(pf.Functions))
+	out := make([]source_live.Symbol, 0, len(pf.Functions)+len(pf.TypeDecls))
 	for _, fn := range pf.Functions {
 		kind := source_live.SymbolKindFunction
 		if fn.Receiver != "" {
@@ -90,6 +90,34 @@ func ParsedFileToSymbols(pf *source_live.ParsedFile) []source_live.Symbol {
 			BodyHash:          fn.BodyHash,
 			SymbolFingerprint: computeSymbolFingerprint(pf.Language, fn.QualifiedName, fn.Receiver, fn.Signature),
 			ASTHash:           computeASTHash(pf.Language, fn.Receiver, fn.Signature, fn.BodyHash),
+			SourceClass:       source_live.SourceClassTreesitter,
+			ProducedBy:        "extractor:treesitter",
+			Confidence:        0.95,
+		})
+	}
+	for _, td := range pf.TypeDecls {
+		kind := source_live.SymbolKindClass
+		if td.Kind == source_live.TypeDeclKindInterface {
+			kind = source_live.SymbolKindInterface
+		}
+		out = append(out, source_live.Symbol{
+			Name:          td.Name,
+			QualifiedName: td.QualifiedName,
+			Kind:          kind,
+			Range: source_live.Range{
+				StartByte: td.StartByte,
+				EndByte:   td.EndByte,
+				StartLine: td.StartLine,
+				EndLine:   td.EndLine,
+			},
+			LanguageID: pf.Language,
+			Path:       pf.Path,
+			BodyHash:   td.BodyHash,
+			// Classes/interfaces have no signature; fingerprints derive
+			// from the same identity inputs the resolver expects so the
+			// symbol_fingerprint / ast_hash anchors still bind.
+			SymbolFingerprint: computeSymbolFingerprint(pf.Language, td.QualifiedName, "", ""),
+			ASTHash:           computeASTHash(pf.Language, "", "", td.BodyHash),
 			SourceClass:       source_live.SourceClassTreesitter,
 			ProducedBy:        "extractor:treesitter",
 			Confidence:        0.95,

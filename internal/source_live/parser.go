@@ -17,6 +17,12 @@ type ParsedFile struct {
 	Language  string
 	BodyHash  string
 	Functions []FunctionDecl
+	// TypeDecls carries class/interface declarations recovered from the
+	// AST. Tree-sitter parsers emit one entry per syntactic class /
+	// interface; the upstream Symbol/Entity projection (extract.
+	// ParsedFileToSymbols → code_core.entityFromSymbol) maps them to
+	// SymbolKindClass / SymbolKindInterface and the matching EntityKind.
+	TypeDecls []TypeDeclDecl
 }
 
 // FunctionDecl is one Go function or method extracted from the AST.
@@ -25,6 +31,37 @@ type FunctionDecl struct {
 	Receiver      string // empty for plain funcs
 	Name          string
 	Signature     string // raw signature substring
+	StartByte     uint32
+	EndByte       uint32
+	StartLine     uint32 // 1-based
+	EndLine       uint32 // 1-based
+	BodyHash      string
+}
+
+// TypeDeclKind discriminates the tree-sitter type-declaration variants
+// the parsers recover. The string values match source_live.SymbolKind*
+// so the upstream symbol projection is a 1:1 rename.
+type TypeDeclKind string
+
+// Type-declaration kinds emitted by tree-sitter parsers. Add new
+// variants here when adding language-specific syntactic forms (e.g.
+// enums); both the Symbol projection and code.core entity formula
+// must be updated in lockstep — see SPEC §6.12.
+const (
+	TypeDeclKindClass     TypeDeclKind = "Class"
+	TypeDeclKindInterface TypeDeclKind = "Interface"
+)
+
+// TypeDeclDecl is one class or interface extracted from the AST. The
+// class/interface itself has no body hash distinct from its source
+// span; BodyHash is the sha256 of the declaration span so identical
+// declarations across files / commits collapse for the body_hash
+// anchor evaluator. Receiver is unused (classes/interfaces ARE the
+// receiver) and intentionally omitted.
+type TypeDeclDecl struct {
+	QualifiedName string
+	Name          string
+	Kind          TypeDeclKind
 	StartByte     uint32
 	EndByte       uint32
 	StartLine     uint32 // 1-based

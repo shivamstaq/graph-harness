@@ -73,6 +73,52 @@ func TestParseTypeScriptFile_EmptyInput(t *testing.T) {
 	}
 }
 
+func TestParseTypeScriptFile_ClassAndInterfaceTypeDecls(t *testing.T) {
+	src := []byte(`export class Foo {
+  bar(): number { return 1; }
+}
+
+export interface Baz {
+  qux(): number;
+}
+`)
+	pf, err := ParseTypeScriptFile("shapes.ts", src)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	wantTypes := map[string]TypeDeclKind{
+		"shapes.Foo": TypeDeclKindClass,
+		"shapes.Baz": TypeDeclKindInterface,
+	}
+	if len(pf.TypeDecls) != len(wantTypes) {
+		t.Fatalf("got %d type decls, want %d: %+v", len(pf.TypeDecls), len(wantTypes), pf.TypeDecls)
+	}
+	for _, td := range pf.TypeDecls {
+		want, ok := wantTypes[td.QualifiedName]
+		if !ok {
+			t.Errorf("unexpected typedecl %q", td.QualifiedName)
+			continue
+		}
+		if td.Kind != want {
+			t.Errorf("kind for %s = %q, want %q", td.QualifiedName, td.Kind, want)
+		}
+		if td.BodyHash == "" {
+			t.Errorf("typedecl %s missing body hash", td.QualifiedName)
+		}
+		delete(wantTypes, td.QualifiedName)
+	}
+	// Confirm the class's method still surfaces as a FunctionDecl.
+	foundMethod := false
+	for _, fn := range pf.Functions {
+		if fn.QualifiedName == "shapes.Foo.bar" && fn.Receiver == "Foo" {
+			foundMethod = true
+		}
+	}
+	if !foundMethod {
+		t.Errorf("expected method shapes.Foo.bar with receiver=Foo; got %+v", pf.Functions)
+	}
+}
+
 func TestParseTypeScriptFile_TolerantOfSyntaxError(t *testing.T) {
 	src := []byte(`export function ok(): void {}
 this is not TypeScript`)
