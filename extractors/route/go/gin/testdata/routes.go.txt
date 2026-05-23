@@ -1,0 +1,40 @@
+// Synthetic gin routes fixture; .txt prevents compilation.
+
+package routes
+
+import (
+	"github.com/gin-gonic/gin"
+)
+
+// RegisterRoutes wires the application's gin routes.
+func RegisterRoutes(r *gin.Engine) {
+	r.GET("/v1/orders/:id", GetOrder)
+	r.POST("/v1/orders", CreateOrder)
+	r.PUT("/v1/orders/:id", UpdateOrder)
+	r.PATCH("/v1/orders/:id", PatchOrder)
+	r.DELETE("/v1/orders/:id", DeleteOrder)
+	r.HEAD("/v1/health", HealthHead)
+	r.OPTIONS("/v1/health", HealthOpts)
+	r.Any("/v1/wild", WildHandler)
+	r.Handle("PROPFIND", "/v1/dav", DavHandler)
+	r.GET("/v1/anonymous", func(c *gin.Context) {
+		c.String(200, "inline")
+	})
+	r.GET("/v1/with-mw", AuthMiddleware, GetWithMW)
+
+	api := r.Group("/api")
+	api.GET("/orders", ListOrders)
+}
+
+func GetOrder(c *gin.Context)       {}
+func CreateOrder(c *gin.Context)    {}
+func UpdateOrder(c *gin.Context)    {}
+func PatchOrder(c *gin.Context)     {}
+func DeleteOrder(c *gin.Context)    {}
+func HealthHead(c *gin.Context)     {}
+func HealthOpts(c *gin.Context)     {}
+func WildHandler(c *gin.Context)    {}
+func DavHandler(c *gin.Context)     {}
+func AuthMiddleware(c *gin.Context) {}
+func GetWithMW(c *gin.Context)      {}
+func ListOrders(c *gin.Context)     {}

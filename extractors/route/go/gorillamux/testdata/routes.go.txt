@@ -1,0 +1,32 @@
+// Synthetic gorilla/mux routes fixture. .txt extension keeps the file
+// out of `go build`; the extractor parses via tree-sitter regardless of
+// extension.
+
+package routes
+
+import (
+	"net/http"
+
+	"github.com/gorilla/mux"
+)
+
+// RegisterRoutes wires the application's gorilla/mux routes.
+func RegisterRoutes(r *mux.Router) {
+	r.HandleFunc("/v1/orders/{id}", GetOrder).Methods("GET")
+	r.HandleFunc("/v1/orders", CreateOrder).Methods("POST")
+	r.Handle("/v1/health", healthHandler).Methods("GET", "HEAD")
+	r.HandleFunc("/v1/anonymous", func(w http.ResponseWriter, req *http.Request) {
+		_, _ = w.Write([]byte("inline"))
+	}).Methods("GET")
+	r.HandleFunc("/v1/match-all", AnyHandler)
+
+	sub := r.PathPrefix("/api").Subrouter()
+	sub.HandleFunc("/orders", ListOrders).Methods("GET")
+}
+
+func GetOrder(w http.ResponseWriter, req *http.Request)    {}
+func CreateOrder(w http.ResponseWriter, req *http.Request) {}
+func AnyHandler(w http.ResponseWriter, req *http.Request)  {}
+func ListOrders(w http.ResponseWriter, req *http.Request)  {}
+
+var healthHandler http.HandlerFunc

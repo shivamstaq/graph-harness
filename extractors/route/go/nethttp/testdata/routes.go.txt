@@ -1,0 +1,41 @@
+// Synthetic net/http routes fixture; .txt prevents compilation.
+
+package routes
+
+import "net/http"
+
+// RegisterRoutes wires the application's net/http routes.
+func RegisterRoutes() {
+	// Pre-Go-1.22 patterns (no leading verb).
+	http.HandleFunc("/v1/health", healthHandler)
+	http.Handle("/v1/static", staticHandler)
+
+	// Go 1.22+ method-prefixed patterns.
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /v1/orders/{id}", getOrder)
+	mux.HandleFunc("POST /v1/orders", createOrder)
+	mux.Handle("PUT /v1/orders/{id}", putHandler)
+	mux.HandleFunc("DELETE /v1/orders/{id}", deleteOrder)
+	mux.HandleFunc("/v1/wild", wildHandler) // no leading verb → ANY
+
+	// Anonymous closure handler.
+	mux.HandleFunc("GET /v1/anonymous", func(w http.ResponseWriter, req *http.Request) {
+		_, _ = w.Write([]byte("inline"))
+	})
+
+	// Path starting with a word that looks like a verb but isn't —
+	// must not be split. (Confidence: "FOO" isn't in httpVerbs.)
+	mux.HandleFunc("FOO /v1/bogus", bogusHandler)
+}
+
+func healthHandler(w http.ResponseWriter, req *http.Request) {}
+func getOrder(w http.ResponseWriter, req *http.Request)      {}
+func createOrder(w http.ResponseWriter, req *http.Request)   {}
+func deleteOrder(w http.ResponseWriter, req *http.Request)   {}
+func wildHandler(w http.ResponseWriter, req *http.Request)   {}
+func bogusHandler(w http.ResponseWriter, req *http.Request)  {}
+
+var (
+	staticHandler http.Handler
+	putHandler    http.Handler
+)
