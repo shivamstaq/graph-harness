@@ -55,6 +55,16 @@ func newBenchCmdReal() *cobra.Command {
 				return err
 			}
 
+			// Scenario 2 has a fundamentally different shape from
+			// scenario 1 (polyglot single-tree fixture + per-diff
+			// missing_dependent_update scoring) so it's dispatched
+			// through its own runner. The per-language flag is
+			// ignored for scenario 2 — the polyglot fixture is run
+			// as a single unit.
+			if scenarioID == 2 {
+				return runBenchScenario2(cmd, scenarioRoot, regime)
+			}
+
 			languages := []string{}
 			if languageFlag != "" && languageFlag != "all" {
 				languages = []string{languageFlag}
@@ -127,6 +137,78 @@ func resolveScenarioRoot(flag string, scenarioID int) (string, error) {
 		}
 	}
 	return "", fmt.Errorf("locate scenario %d: pass --scenario-root or run from a tree containing tests/testdata/bench/scenario%d/", scenarioID, scenarioID)
+}
+
+// runBenchScenario2 dispatches the polyglot scenario-2 fixture
+// (Pass-2 carryover for plan §P2.T42-T44). Layout:
+//
+//	tests/testdata/bench/scenario2/
+//	  oracle.json   — Scenario2Oracle (per-diff missing_dependent_update expects)
+//	  seed.json     — Scenario2Seed (framework producer + dependents + selector binding)
+//	  diffs/<diff_id>.diff — one target diff per oracle entry
+//	  .graph-harness/overlay/order_event.gh — the OrderCreatedPropagation flow
+//	  services/order, apps/web, pipelines/audit, tests/contract — parsed sources
+//
+// Flow: open as a workspace → daemon.Open indexes the Go/TS/Py source
+// trees through tree-sitter → ApplySeed pre-writes the framework
+// producer + dependents + reverse-index binding the change.process
+// pipeline walks at Stage 4 + 5 → Run iterates every target diff and
+// scores `missing_dependent_update` findings per dependent language.
+//
+// The runner is gated by min(per-language detection-axis score) ≥
+// bench.Scenario2Gate (0.7). The CLI surfaces the full per-diff +
+// scenario-level fold as JSON.
+func runBenchScenario2(cmd *cobra.Command, scenarioRoot, regime string) error {
+	ctx := cmd.Context()
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	fx, err := bench.LoadScenario2(scenarioRoot)
+	if err != nil {
+		return fmt.Errorf("load scenario 2: %w", err)
+	}
+	if fx.Oracle.Regime == "" {
+		fx.Oracle.Regime = regime
+	}
+
+	ws, err := daemon.From(scenarioRoot)
+	if err != nil {
+		return fmt.Errorf("workspace: %w", err)
+	}
+	if !ws.IsInitialized() {
+		return fmt.Errorf("scenario 2 root %s missing .graph-harness/ — re-stage the fixture", scenarioRoot)
+	}
+	if _, err := os.Stat(ws.ConfigPath); os.IsNotExist(err) {
+		if err := os.WriteFile(ws.ConfigPath, []byte("# bench fixture (synthesized)\n"), 0o600); err != nil {
+			return fmt.Errorf("synthesize config: %w", err)
+		}
+	}
+	res, err := daemon.Open(ctx, ws)
+	if err != nil {
+		return fmt.Errorf("open: %w", err)
+	}
+	defer func() { _ = res.Close() }()
+
+	pipeline := &change_process.Pipeline{Overlay: res.Overlay, Code: res.Code}
+	runner := &bench.Scenario2Runner{
+		Pipeline:      pipeline,
+		Store:         res.Code,
+		ValidationSeq: res.Log.LastSeq(),
+	}
+	if err := runner.ApplySeed(ctx, fx.Seed); err != nil {
+		return fmt.Errorf("apply seed: %w", err)
+	}
+	scoreRes, err := runner.Run(ctx, fx)
+	if err != nil {
+		return fmt.Errorf("run scenario 2: %w", err)
+	}
+	out := cmd.OutOrStdout()
+	b, _ := scoreRes.AsJSON()
+	_, _ = fmt.Fprintln(out, string(b))
+	if !scoreRes.PassesGate {
+		return fmt.Errorf("scenario 2 detection axis below %0.2f gate", bench.Scenario2Gate)
+	}
+	return nil
 }
 
 // runVariant opens a single language variant as a workspace, runs the

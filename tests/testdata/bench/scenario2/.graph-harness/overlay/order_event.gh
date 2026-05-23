@@ -1,0 +1,15 @@
+selector OrderCreatedEvent {
+  unique
+  anchor event_name "order.created"
+  anchor topic_transport "kafka"
+  anchor entity_kind "Event"
+}
+
+flow OrderCreatedPropagation {
+  description "order.created event propagates Go publisher -> TS consumer + Py audit + Jest contract test"
+  scope OrderCreatedEvent
+  step Publish      targets selector { qualified_name "order.PublishOrderCreated" }
+  step ConsumeApp   targets selector { qualified_name "order_consumer.handleOrderCreated" }
+  step ConsumeAudit targets selector { qualified_name "consumer.handle_order_created" }
+  step ContractTest targets selector { qualified_name "order_created_spec.order_created_contract" }
+}

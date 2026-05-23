@@ -1,0 +1,52 @@
+{
+  "comment": "Pre-seeds framework producer + dependents + reverse-index binding for the polyglot order.created propagation. Applied after tree-sitter ingestion, before validate-diff. Producer kind = EventPublisher (shared linking key kafka:order.created). Dependents: 2x EventSubscriber + 1x ContractTest, each tagged with the language whose source file owns it. The reverse-index selector binds the Go PublishOrderCreated function to the EventPublisher so a touched function pulls the producer into the touched set.",
+  "scenario_id": 2,
+  "shared_linking_key": "kafka:order.created",
+  "transport": "kafka",
+  "entities": [
+    {
+      "id": "evt:kafka:order.created",
+      "kind": "Event",
+      "language_id": "framework",
+      "qualified_name": "kafka:order.created"
+    },
+    {
+      "id": "pub:order.PublishOrderCreated",
+      "kind": "EventPublisher",
+      "language_id": "go",
+      "qualified_name": "kafka:order.created"
+    },
+    {
+      "id": "sub:web.order_consumer",
+      "kind": "EventSubscriber",
+      "language_id": "typescript",
+      "qualified_name": "kafka:order.created"
+    },
+    {
+      "id": "sub:audit.consumer",
+      "kind": "EventSubscriber",
+      "language_id": "python",
+      "qualified_name": "kafka:order.created"
+    },
+    {
+      "id": "ctest:order_created_spec",
+      "kind": "ContractTest",
+      "language_id": "typescript",
+      "qualified_name": "kafka:order.created"
+    }
+  ],
+  "selector_bindings": [
+    {
+      "comment": "Bind both the Go publisher function and the EventPublisher to one selector so a touched function (Stage 2) pulls the EventPublisher into the touched set via the reverse index (Stage 4 expandTouchedViaReverseIndex). Identical pattern to pipeline_test.go::seedProducerWithTouch.",
+      "selector_id": "sel:pub:order.PublishOrderCreated",
+      "via_anchor": "qualified_name",
+      "function_target": {
+        "id": "fn:order.PublishOrderCreated",
+        "kind": "Function",
+        "language_id": "go",
+        "qualified_name": "order.PublishOrderCreated"
+      },
+      "producer_target_id": "pub:order.PublishOrderCreated"
+    }
+  ]
+}
