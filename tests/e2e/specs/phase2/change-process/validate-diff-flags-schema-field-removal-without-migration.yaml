@@ -1,0 +1,81 @@
+# yaml-language-server: $schema=https://github.com/shivamstaq/gotit/raw/main/schema/spec.schema.json
+spec_version: 1
+#
+# KNOWN_LIMITATIONS:
+#   The finding kind `schema_field_removal_without_migration` is NOT yet
+#   a real FindingKind* constant in internal/change_process/pipeline.go
+#   (Pass-2 ships only `missing_dependent_update` plus the P1 kinds).
+#   This spec is gated behind
+#   `feature:p2-schema-field-removal-finding` (default false) so it
+#   remains authored ahead of the finding kind landing. When the kind
+#   ships, flip the flag in tests/e2e/features.yaml.
+#
+name: p2-validate-diff-flags-schema-field-removal-without-migration
+description: >-
+  Pass-2 change.process (future finding kind): a diff that drops a
+  SchemaField from a model but does NOT add a corresponding migration
+  file must fire `schema_field_removal_without_migration`. Gated behind
+  `feature:p2-schema-field-removal-finding` until the kind lands.
+tags: [phase2, change-process, validate-diff, schemas, schema-field-removal, p2-framework-extractors]
+order: 262
+requires:
+  - feature:p2-framework-extractors
+  - feature:p2-schema-field-removal-finding
+repo:
+  helper: go-module-empty
+
+setup:
+  - name: init_workspace
+    command: graph-harness init
+    assert:
+      - { type: exit_code, expected: 0 }
+
+  - name: write_prisma_baseline
+    command: |
+      sh -c 'mkdir -p prisma && cat > prisma/schema.prisma <<"PRISMAEOF"
+      datasource db {
+        provider = "postgresql"
+        url      = env("DATABASE_URL")
+      }
+
+      generator client {
+        provider = "prisma-client-js"
+      }
+
+      model User {
+        id        Int      @id @default(autoincrement())
+        email     String   @unique
+        name      String?
+        createdAt DateTime @default(now())
+      }
+      PRISMAEOF'
+    assert:
+      - { type: exit_code, expected: 0 }
+
+  - name: write_field_removal_diff
+    command: |
+      sh -c 'cat > remove_field.diff <<"DIFFEOF"
+      --- a/prisma/schema.prisma
+      +++ b/prisma/schema.prisma
+      @@ -11,5 +11,4 @@ model User {
+         id        Int      @id @default(autoincrement())
+         email     String   @unique
+      -  name      String?
+         createdAt DateTime @default(now())
+       }
+      DIFFEOF'
+    assert:
+      - { type: exit_code, expected: 0 }
+
+  - name: commit_fixture
+    command: sh -c "git add -A && git -c user.email=ci@example.com -c user.name=ci commit -m 'schema-field-removal fixture' >/dev/null"
+    assert:
+      - { type: exit_code, expected: 0 }
+
+steps:
+  - name: validate_diff_emits_schema_field_removal_finding
+    command: graph-harness validate-diff --diff remove_field.diff --json
+    assert:
+      - { type: exit_code, expected: 0 }
+      - { type: contains, value: "schema_field_removal_without_migration" }
+      - { type: contains, value: "name" }

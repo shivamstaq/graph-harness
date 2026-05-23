@@ -1,0 +1,73 @@
+# yaml-language-server: $schema=https://github.com/shivamstaq/gotit/raw/main/schema/spec.schema.json
+spec_version: 1
+name: p2-extractor-handles-route-prefix-groups
+description: >-
+  Pass-2 routes/go/chi: nested route groups (`r.Route("/api", ...)`) are
+  observed by the extractor — the inner `r.Get(...)` / `r.Post(...)`
+  calls inside the group closure produce Route rows. Per
+  extractors/route/go/README.md, prefix joining ("/api" + "/users" →
+  "/api/users") is deferred to Pass-2 enrichment with code.core
+  group-context tracking. This spec asserts the RAW nested paths
+  surface; the joined-prefix companion spec
+  (`extractor-handles-route-prefix-groups-joined.yaml`) is gated behind
+  `feature:p2-route-prefix-joining` (flag = false until enrichment ships).
+tags: [phase2, extractors, routes, chi, prefix-groups, p2-framework-extractors]
+order: 214
+requires:
+  - feature:p2-framework-extractors
+repo:
+  helper: go-module-empty
+
+setup:
+  - name: init_workspace
+    command: graph-harness init
+    assert:
+      - { type: exit_code, expected: 0 }
+
+  - name: write_chi_grouped_routes
+    command: |
+      sh -c 'mkdir -p internal/api && cat > internal/api/routes.go <<"GOEOF"
+      package api
+
+      import (
+        "net/http"
+
+        "github.com/go-chi/chi/v5"
+      )
+
+      // RegisterRoutes uses r.Route("/api", ...) to scope two inner routes
+      // under the /api prefix. Pass-1 chi extractor observes the inner
+      // calls but does NOT prepend "/api" — joining is deferred to Pass-2.
+      func RegisterRoutes(r chi.Router) {
+        r.Route("/api", func(r chi.Router) {
+          r.Get("/users", ListUsers)
+          r.Post("/users", CreateUser)
+        })
+      }
+
+      func ListUsers(w http.ResponseWriter, req *http.Request)  {}
+      func CreateUser(w http.ResponseWriter, req *http.Request) {}
+      GOEOF'
+    assert:
+      - { type: exit_code, expected: 0 }
+
+  - name: commit_fixture
+    command: sh -c "git add -A && git -c user.email=ci@example.com -c user.name=ci commit -m 'chi grouped routes fixture' >/dev/null"
+    assert:
+      - { type: exit_code, expected: 0 }
+
+steps:
+  - name: code_list_emits_inner_routes_raw_paths
+    # Per extractors/route/go/README.md (chi/, paragraph 2): the
+    # extractor recovers nested r.Get(...) calls inside r.Route(...)
+    # but emits the *raw* nested paths ("/users"), not the prefix-joined
+    # variant ("/api/users"). This is the contract until P2 enrichment.
+    command: graph-harness code list --batch --json --no-lsp
+    assert:
+      - { type: exit_code, expected: 0 }
+      - { type: contains, value: "\"kind\":\"Route\"" }
+      # Raw nested paths surface — `/users` literal appears in the
+      # group-inner registrations.
+      - { type: contains, value: "/users" }
+      - { type: contains, value: "GET" }
+      - { type: contains, value: "POST" }

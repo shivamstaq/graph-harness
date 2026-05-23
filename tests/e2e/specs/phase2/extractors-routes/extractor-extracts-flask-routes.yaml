@@ -1,0 +1,83 @@
+# yaml-language-server: $schema=https://github.com/shivamstaq/gotit/raw/main/schema/spec.schema.json
+spec_version: 1
+name: p2-extractor-extracts-flask-routes
+description: >-
+  Pass-2 routes/py/flask: a Flask app with `@app.route` decorators
+  indexes to Route entities under code.framework. We assert via
+  `code list --json` that the rows materialize with method + path and
+  framework=flask. Mirrors extractors/route/py/flask/testdata/app.py.
+tags: [phase2, extractors, routes, flask, p2-framework-extractors]
+order: 212
+requires:
+  - feature:p2-framework-extractors
+repo:
+  helper: go-module-empty
+
+setup:
+  - name: init_workspace
+    command: graph-harness init
+    assert:
+      - { type: exit_code, expected: 0 }
+
+  - name: write_flask_routes_fixture
+    command: |
+      sh -c 'mkdir -p api && cat > api/app.py <<"PYEOF"
+      """Flask app fixture."""
+
+      from flask import Flask
+
+      app = Flask(__name__)
+
+
+      @app.route("/health")
+      def health():
+          return "ok"
+
+
+      @app.route("/login", methods=["POST"])
+      def login():
+          return {"token": "xxx"}
+
+
+      @app.route("/orders", methods=["GET", "POST"])
+      def orders():
+          return []
+
+
+      @app.route("/orders/<int:order_id>", methods=["GET", "PUT", "PATCH"])
+      def get_order(order_id):
+          return {"id": order_id}
+      PYEOF
+      cat > api/pyproject.toml <<"TOML"
+      [project]
+      name = "flask-fixture"
+      version = "0.1.0"
+      TOML'
+    assert:
+      - { type: exit_code, expected: 0 }
+
+  - name: commit_fixture
+    command: sh -c "git add -A && git -c user.email=ci@example.com -c user.name=ci commit -m 'flask routes fixture' >/dev/null"
+    assert:
+      - { type: exit_code, expected: 0 }
+
+steps:
+  - name: code_list_reports_flask_route_rows
+    command: graph-harness code list --batch --json --no-lsp
+    assert:
+      - { type: exit_code, expected: 0 }
+      - { type: contains, value: "\"kind\":\"Route\"" }
+      - { type: contains, value: "/health" }
+      - { type: contains, value: "/login" }
+      - { type: contains, value: "/orders" }
+      - { type: contains, value: "GET" }
+      - { type: contains, value: "POST" }
+      - { type: contains, value: "PUT" }
+      - { type: contains, value: "PATCH" }
+
+  - name: extractors_list_includes_flask
+    command: graph-harness extractors list
+    assert:
+      - { type: exit_code, expected: 0 }
+      - { type: contains, value: "flask" }
+      - { type: contains, value: "routes" }

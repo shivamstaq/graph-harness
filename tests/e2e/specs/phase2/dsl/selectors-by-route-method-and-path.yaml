@@ -1,0 +1,83 @@
+# yaml-language-server: $schema=https://github.com/shivamstaq/gotit/raw/main/schema/spec.schema.json
+spec_version: 1
+name: p2-selectors-by-route-method-and-path
+description: >-
+  Pass-2 DSL kindwise anchors: a selector with `anchor route_method
+  "POST"` + `anchor route_pattern "/api/checkout/**"` resolves against
+  the extracted Route entities. Asserts the DSL parses the new
+  framework anchors (P2.T33 closed enum in
+  internal/dsl/anchor_kinds.go) and `selectors test` resolves the
+  authored selector to the matching chi Route row.
+tags: [phase2, dsl, selectors, framework-anchors, p2-framework-extractors]
+order: 250
+requires:
+  - feature:p2-framework-extractors
+repo:
+  helper: go-module-empty
+
+setup:
+  - name: init_workspace
+    command: graph-harness init
+    assert:
+      - { type: exit_code, expected: 0 }
+
+  - name: write_chi_routes_fixture
+    command: |
+      sh -c 'mkdir -p internal/api && cat > internal/api/routes.go <<"GOEOF"
+      package api
+
+      import (
+        "net/http"
+
+        "github.com/go-chi/chi/v5"
+      )
+
+      func RegisterRoutes(r chi.Router) {
+        r.Post("/api/checkout/start", StartCheckout)
+        r.Get("/api/checkout/status", CheckoutStatus)
+      }
+
+      func StartCheckout(w http.ResponseWriter, req *http.Request)  {}
+      func CheckoutStatus(w http.ResponseWriter, req *http.Request) {}
+      GOEOF'
+    assert:
+      - { type: exit_code, expected: 0 }
+
+  - name: write_selector_overlay
+    command: |
+      sh -c 'mkdir -p .graph-harness/overlay && cat > .graph-harness/overlay/checkout.gh <<"GHEOF"
+      selector CheckoutStart {
+        anchor route_method "POST"
+        anchor route_pattern "/api/checkout/start"
+      }
+      GHEOF'
+    assert:
+      - { type: exit_code, expected: 0 }
+
+  - name: commit_fixture
+    command: sh -c "git add -A && git -c user.email=ci@example.com -c user.name=ci commit -m 'route selector fixture' >/dev/null"
+    assert:
+      - { type: exit_code, expected: 0 }
+
+steps:
+  - name: dsl_query_parses_route_anchors
+    # The DSL must accept the framework-anchor vocabulary at parse
+    # time — P2.T33 added `route_method` / `route_pattern` to the
+    # closed enum in internal/dsl/anchor_kinds.go.
+    command: graph-harness query 'selector S { anchor route_method "POST" anchor route_pattern "/api/checkout/**" }'
+    assert:
+      - { type: exit_code, expected: 0 }
+      - { type: contains, value: "route_method" }
+      - { type: contains, value: "route_pattern" }
+      - { type: contains, value: "POST" }
+      - { type: contains, value: "/api/checkout/**" }
+
+  - name: selectors_test_resolves_to_route_row
+    command: graph-harness selectors test CheckoutStart --batch --json --no-lsp
+    assert:
+      - { type: exit_code, expected: 0 }
+      - { type: contains, value: "CheckoutStart" }
+      # Outcome must be a bound/reanchored state — we do not require
+      # an exact word so the assertion is robust to envelope label
+      # tweaks. The match list carries the resolved Route.
+      - { type: contains, value: "/api/checkout/start" }

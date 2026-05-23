@@ -1,0 +1,74 @@
+# yaml-language-server: $schema=https://github.com/shivamstaq/gotit/raw/main/schema/spec.schema.json
+spec_version: 1
+name: p2-extractor-extracts-gorm-fields
+description: >-
+  Pass-2 schema/gorm: a Go file with two GORM model structs (User with
+  4 mapped columns, Post with 3) indexes to two Schema entities and
+  seven SchemaField entities under code.framework. The Internal column
+  tagged `gorm:"-"` is skipped per the extractor contract; the User
+  type's TableName() override produces table="users". Pointer field
+  detection (Nullable=true for *string) is asserted on the `name` column.
+tags: [phase2, extractors, schemas, gorm, p2-framework-extractors]
+order: 231
+requires:
+  - feature:p2-framework-extractors
+repo:
+  helper: go-module-empty
+
+setup:
+  - name: init_workspace
+    command: graph-harness init
+    assert:
+      - { type: exit_code, expected: 0 }
+
+  - name: write_gorm_models_fixture
+    command: |
+      sh -c 'mkdir -p models && cat > models/models.go <<"GOEOF"
+      package models
+
+      import "time"
+
+      type User struct {
+        ID        uint      `gorm:"primaryKey"`
+        Email     string    `gorm:"column:email;not null"`
+        Name      *string   `gorm:"column:name"`
+        CreatedAt time.Time `gorm:"column:created_at"`
+        Internal  string    `gorm:"-"`
+      }
+
+      func (User) TableName() string { return "users" }
+
+      type Post struct {
+        ID       uint   `gorm:"primaryKey"`
+        Title    string `gorm:"not null"`
+        AuthorID uint   `gorm:"column:author_id"`
+      }
+      GOEOF'
+    assert:
+      - { type: exit_code, expected: 0 }
+
+  - name: commit_fixture
+    command: sh -c "git add -A && git -c user.email=ci@example.com -c user.name=ci commit -m 'gorm models fixture' >/dev/null"
+    assert:
+      - { type: exit_code, expected: 0 }
+
+steps:
+  - name: code_list_emits_schema_and_field_rows
+    command: graph-harness code list --batch --json --no-lsp
+    assert:
+      - { type: exit_code, expected: 0 }
+      - { type: contains, value: "\"kind\":\"Schema\"" }
+      - { type: contains, value: "\"kind\":\"SchemaField\"" }
+      # User maps via TableName() to "users"; Post defaults to "posts".
+      - { type: contains, value: "users" }
+      - { type: contains, value: "posts" }
+      - { type: contains, value: "email" }
+      - { type: contains, value: "name" }
+      - { type: contains, value: "title" }
+
+  - name: extractors_list_includes_gorm
+    command: graph-harness extractors list
+    assert:
+      - { type: exit_code, expected: 0 }
+      - { type: contains, value: "gorm" }
+      - { type: contains, value: "schemas" }

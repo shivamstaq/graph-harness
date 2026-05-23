@@ -18,7 +18,42 @@ enabled:
   # code list, and code events so build-order-tolerance specs can
   # exercise single-source modes.
   p1-extractor-wiring:     true
+  # P2 framework extractors: Pass 0/0.5/1/2/3/4 have all landed —
+  # extractor packages register via init(), the dispatcher is wired
+  # into daemon serve (with cold-state CatchUp), the change.process
+  # pipeline emits `missing_dependent_update`, surfaces consume the
+  # framework_browser RPCs, and bench scenario 2 passes its gate.
+  # Flag stays FALSE because a Pass-5/6 prerequisite is still open:
+  # framework events emitted by the dispatcher are not yet read back
+  # into queryable rows (the pipeline's BFS expects entities under
+  # code.core per the Pass-0.5-A convention, but the dispatcher only
+  # writes kernel events). Closing that loop — either a dedicated
+  # code.framework Store consumer of the bus, or having extractors
+  # write to code_core.Store directly — is the remaining gate. Specs
+  # under tests/e2e/specs/phase2/ are authored and gated SKIP until
+  # then; the bench (which seeds entities directly) is the only
+  # green end-to-end exercise of the missing_dependent_update path.
   p2-framework-extractors: false
+  # OpenAPI extractor is post-v1 per plan/02-framework-extractors.md §6
+  # ("Beyond the v1 extractor set ... — post-v1"). Spec authored ahead
+  # under tests/e2e/specs/phase2/extractors-schemas/ — flip to true
+  # when the OpenAPI parser lands.
+  p2-openapi:              false
+  # Prefix joining for chi/gin/gorilla group routes ("/api" + "/users"
+  # → "/api/users") is deferred to Pass-2 enrichment with code.core
+  # group-context tracking per extractors/route/go/README.md. Today
+  # extractors emit the raw nested paths; the joined-paths companion
+  # spec is gated behind this flag.
+  p2-route-prefix-joining: false
+  # The change.process pipeline ships
+  # `missing_dependent_update` in Pass-2; the per-producer-kind
+  # specialized finding kinds below are authored ahead of their
+  # FindingKind* constants landing in
+  # internal/change_process/pipeline.go. Flip each when the
+  # corresponding kind ships.
+  p2-route-missing-test-finding:    false
+  p2-event-orphaned-finding:        false
+  p2-schema-field-removal-finding:  false
   p3-rule-engine:          false
   p3-repair-instructions:  false
   p4-full-review-states:   false

@@ -12,8 +12,11 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/shivamstaq/graph-harness/internal/code_core"
+	"github.com/shivamstaq/graph-harness/internal/code_framework"
 	"github.com/shivamstaq/graph-harness/internal/daemon"
 	"github.com/shivamstaq/graph-harness/internal/extract"
+	"github.com/shivamstaq/graph-harness/internal/facts"
 	"github.com/shivamstaq/graph-harness/internal/jsonrpc"
 )
 
@@ -593,6 +596,64 @@ func newDaemonServeCmd() *cobra.Command {
 
 			svc := jsonrpc.NewService(ws, res.Log, res.Code, res.Queue, res.Registry, res.Overlay)
 			srv := jsonrpc.NewServer(svc)
+
+			// P2.T03 — wire the code.framework Dispatcher into the
+			// daemon serve loop so extractors registered via
+			// `extractors/all/all.go` actually consume `code.core`
+			// drift events + materialize framework entities.
+			// Construction order matters:
+			//   1. Build Dispatcher with Facts + EventLog handles.
+			//   2. svc.SetExtractors before Start so extractors.list
+			//      / status RPCs see live counters once they fire.
+			//   3. disp.Start subscribes to the kernel bus (forward
+			//      only).
+			//   4. disp.CatchUp replays the cold-sweep state: for
+			//      every File entity already in code.core (written
+			//      by daemon.OpenWithOptions's cold sweep above),
+			//      synthesize a FileChanged event so extractors see
+			//      the workspace's current state.
+			// After CatchUp, any future fsnotify-driven re-extract
+			// flows through Start's subscription naturally.
+			extractorCfg, _ := code_framework.LoadConfig(ws.Root)
+			disp, err := code_framework.NewDispatcher(code_framework.DispatcherConfig{
+				Workspace: ws.Root,
+				Facts:     facts.NewEventLogFacts(res.Log, "code.framework"),
+				EventLog:  res.Log,
+				Config:    extractorCfg,
+				Logf: func(format string, args ...any) {
+					fmt.Fprintf(cmd.ErrOrStderr(), "[extractors] "+format+"\n", args...)
+				},
+			})
+			if err != nil {
+				return fmt.Errorf("code_framework dispatcher: %w", err)
+			}
+			svc.SetExtractors(disp)
+			if err := disp.Start(ctx); err != nil {
+				return fmt.Errorf("dispatcher start: %w", err)
+			}
+			defer func() { _ = disp.Stop(context.Background()) }()
+			// Cold-state catch-up — enumerate File entities and
+			// route synthetic FileChanged events through the
+			// dispatcher. Best-effort; logged but non-fatal.
+			if files, err := res.Code.ListEntities(ctx, code_core.ListFilter{}); err == nil {
+				paths := make([]string, 0, len(files))
+				seen := map[string]struct{}{}
+				for _, e := range files {
+					if e.Kind != code_core.KindFile || e.Path == "" {
+						continue
+					}
+					if _, dup := seen[e.Path]; dup {
+						continue
+					}
+					seen[e.Path] = struct{}{}
+					paths = append(paths, e.Path)
+				}
+				if catchErr := disp.CatchUp(ctx, paths); catchErr != nil {
+					fmt.Fprintf(cmd.ErrOrStderr(), "[extractors] CatchUp: %v\n", catchErr)
+				}
+			} else {
+				fmt.Fprintf(cmd.ErrOrStderr(), "[extractors] ListEntities for catch-up: %v\n", err)
+			}
 
 			// idle-timeout watcher
 			go daemon.IdleWatcher(ctx, daemon.Options{IdleTimeout: idle, Logger: nil}, svc.LastActive, cancel)

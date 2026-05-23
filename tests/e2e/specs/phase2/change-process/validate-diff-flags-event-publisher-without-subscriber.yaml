@@ -1,0 +1,84 @@
+# yaml-language-server: $schema=https://github.com/shivamstaq/gotit/raw/main/schema/spec.schema.json
+spec_version: 1
+#
+# KNOWN_LIMITATIONS:
+#   The finding kind `event_orphaned` is NOT yet a real FindingKind*
+#   constant in internal/change_process/pipeline.go (Pass-2 ships only
+#   `missing_dependent_update` plus the P1 kinds). This spec is gated
+#   behind `feature:p2-event-orphaned-finding` (default false) so it
+#   remains authored ahead of the finding kind landing. When the kind
+#   ships, flip the flag in tests/e2e/features.yaml.
+#
+name: p2-validate-diff-flags-event-publisher-without-subscriber
+description: >-
+  Pass-2 change.process (future finding kind): a diff that introduces a
+  new EventPublisher for a topic that has no EventSubscriber in the
+  workspace must fire `event_orphaned`. Gated behind
+  `feature:p2-event-orphaned-finding` until the finding kind lands.
+tags: [phase2, change-process, validate-diff, events, event-orphaned, p2-framework-extractors]
+order: 261
+requires:
+  - feature:p2-framework-extractors
+  - feature:p2-event-orphaned-finding
+repo:
+  helper: go-module-empty
+
+setup:
+  - name: init_workspace
+    command: graph-harness init
+    assert:
+      - { type: exit_code, expected: 0 }
+
+  - name: write_publisher_baseline
+    command: |
+      sh -c 'mkdir -p services/order && cat > services/order/publisher.go <<"GOEOF"
+      package order
+
+      import (
+        "context"
+
+        "github.com/segmentio/kafka-go"
+      )
+
+      func PublishOrderCreated(ctx context.Context, w *kafka.Writer) error {
+        return w.WriteMessages(ctx, kafka.Message{
+          Topic: "order.created",
+          Value: []byte("v"),
+        })
+      }
+      GOEOF'
+    assert:
+      - { type: exit_code, expected: 0 }
+
+  - name: write_new_publisher_diff
+    command: |
+      sh -c 'cat > add_publisher.diff <<"DIFFEOF"
+      --- a/services/order/publisher.go
+      +++ b/services/order/publisher.go
+      @@ -11,3 +11,11 @@ func PublishOrderCreated(ctx context.Context, w *kafka.Writer) error {
+           Value: []byte("v"),
+         })
+       }
+      +
+      +func PublishOrderCancelled(ctx context.Context, w *kafka.Writer) error {
+      +  return w.WriteMessages(ctx, kafka.Message{
+      +    Topic: "order.cancelled_isolated_topic",
+      +    Value: []byte("v"),
+      +  })
+      +}
+      DIFFEOF'
+    assert:
+      - { type: exit_code, expected: 0 }
+
+  - name: commit_fixture
+    command: sh -c "git add -A && git -c user.email=ci@example.com -c user.name=ci commit -m 'event-orphaned fixture' >/dev/null"
+    assert:
+      - { type: exit_code, expected: 0 }
+
+steps:
+  - name: validate_diff_emits_event_orphaned_finding
+    command: graph-harness validate-diff --diff add_publisher.diff --json
+    assert:
+      - { type: exit_code, expected: 0 }
+      - { type: contains, value: "event_orphaned" }
+      - { type: contains, value: "order.cancelled_isolated_topic" }

@@ -1,0 +1,79 @@
+# yaml-language-server: $schema=https://github.com/shivamstaq/gotit/raw/main/schema/spec.schema.json
+spec_version: 1
+name: p2-extractor-extracts-chi-routes
+description: >-
+  Pass-2 routes/go/chi: a small fixture with five chi route registrations
+  (GET / POST / PUT / PATCH / DELETE on /api/orders…) indexes to five
+  Route entities under code.framework. We assert via `code list --json`
+  that the rows materialize with method (KindTag) + path (QualifiedName)
+  and framework=chi.
+tags: [phase2, extractors, routes, chi, p2-framework-extractors]
+order: 210
+requires:
+  - feature:p2-framework-extractors
+repo:
+  helper: go-module-empty
+
+setup:
+  - name: init_workspace
+    command: graph-harness init
+    assert:
+      - { type: exit_code, expected: 0 }
+
+  - name: write_chi_routes_fixture
+    command: |
+      sh -c 'mkdir -p internal/api && cat > internal/api/routes.go <<"GOEOF"
+      package api
+
+      import (
+        "net/http"
+
+        "github.com/go-chi/chi/v5"
+      )
+
+      func RegisterRoutes(r chi.Router) {
+        r.Get("/api/orders/{id}", GetOrder)
+        r.Post("/api/orders", CreateOrder)
+        r.Put("/api/orders/{id}", UpdateOrder)
+        r.Patch("/api/orders/{id}", PatchOrder)
+        r.Delete("/api/orders/{id}", DeleteOrder)
+      }
+
+      func GetOrder(w http.ResponseWriter, req *http.Request)    {}
+      func CreateOrder(w http.ResponseWriter, req *http.Request) {}
+      func UpdateOrder(w http.ResponseWriter, req *http.Request) {}
+      func PatchOrder(w http.ResponseWriter, req *http.Request)  {}
+      func DeleteOrder(w http.ResponseWriter, req *http.Request) {}
+      GOEOF'
+    assert:
+      - { type: exit_code, expected: 0 }
+
+  - name: commit_fixture
+    command: sh -c "git add -A && git -c user.email=ci@example.com -c user.name=ci commit -m 'chi routes fixture' >/dev/null"
+    assert:
+      - { type: exit_code, expected: 0 }
+
+steps:
+  - name: code_list_reports_route_rows
+    # --batch triggers a fresh in-process index so the chi extractor
+    # runs against the fixture before the listing is rendered. JSON
+    # output lets us grep on method/path/framework fields.
+    command: graph-harness code list --batch --json --no-lsp
+    assert:
+      - { type: exit_code, expected: 0 }
+      # Five Route entities — paths in QualifiedName, methods in KindTag.
+      - { type: contains, value: "\"kind\":\"Route\"" }
+      - { type: contains, value: "/api/orders" }
+      # Methods surface via kind_tag.
+      - { type: contains, value: "GET" }
+      - { type: contains, value: "POST" }
+      - { type: contains, value: "PUT" }
+      - { type: contains, value: "PATCH" }
+      - { type: contains, value: "DELETE" }
+
+  - name: extractors_list_includes_chi
+    command: graph-harness extractors list
+    assert:
+      - { type: exit_code, expected: 0 }
+      - { type: contains, value: "chi" }
+      - { type: contains, value: "routes" }

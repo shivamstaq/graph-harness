@@ -1,0 +1,83 @@
+# yaml-language-server: $schema=https://github.com/shivamstaq/gotit/raw/main/schema/spec.schema.json
+spec_version: 1
+name: p2-extractor-extracts-kafka-publishers
+description: >-
+  Pass-2 events/kafka/go: a Go service that publishes to three Kafka
+  topics (segmentio/kafka-go + confluent producer + writer-pinned topic)
+  indexes to EventPublisher entities under code.framework. Asserts the
+  rows materialize with event_name populated and transport=kafka.
+tags: [phase2, extractors, events, kafka, publishers, p2-framework-extractors]
+order: 220
+requires:
+  - feature:p2-framework-extractors
+repo:
+  helper: go-module-empty
+
+setup:
+  - name: init_workspace
+    command: graph-harness init
+    assert:
+      - { type: exit_code, expected: 0 }
+
+  - name: write_go_kafka_publisher_fixture
+    command: |
+      sh -c 'mkdir -p services/orderpub && cat > services/orderpub/publisher.go <<"GOEOF"
+      package orderpub
+
+      import (
+        "context"
+
+        "github.com/segmentio/kafka-go"
+        confkafka "github.com/confluentinc/confluent-kafka-go/v2/kafka"
+      )
+
+      // PublishOrder publishes order.created via segmentio/kafka-go.
+      func PublishOrder(ctx context.Context, w *kafka.Writer) error {
+        return w.WriteMessages(ctx, kafka.Message{
+          Topic: "order.created",
+          Value: []byte("v"),
+        })
+      }
+
+      // MakeWriter pins inventory.updated as the writer topic.
+      func MakeWriter() *kafka.Writer {
+        return kafka.NewWriter(kafka.WriterConfig{
+          Topic:   "inventory.updated",
+          Brokers: []string{"broker:9092"},
+        })
+      }
+
+      // PublishConfluent emits payment.captured via the confluent client.
+      func PublishConfluent(p *confkafka.Producer) error {
+        topic := "payment.captured"
+        return p.Produce(&confkafka.Message{
+          TopicPartition: confkafka.TopicPartition{Topic: &topic},
+          Value:          []byte("v"),
+        }, nil)
+      }
+      GOEOF'
+    assert:
+      - { type: exit_code, expected: 0 }
+
+  - name: commit_fixture
+    command: sh -c "git add -A && git -c user.email=ci@example.com -c user.name=ci commit -m 'kafka publisher fixture' >/dev/null"
+    assert:
+      - { type: exit_code, expected: 0 }
+
+steps:
+  - name: code_list_emits_event_publisher_rows
+    command: graph-harness code list --batch --json --no-lsp
+    assert:
+      - { type: exit_code, expected: 0 }
+      - { type: contains, value: "\"kind\":\"EventPublisher\"" }
+      # Three topics surface as EventPublisher rows.
+      - { type: contains, value: "order.created" }
+      - { type: contains, value: "inventory.updated" }
+      - { type: contains, value: "payment.captured" }
+
+  - name: extractors_list_includes_kafka
+    command: graph-harness extractors list
+    assert:
+      - { type: exit_code, expected: 0 }
+      - { type: contains, value: "kafka" }
+      - { type: contains, value: "events" }

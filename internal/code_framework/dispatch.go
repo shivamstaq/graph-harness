@@ -200,6 +200,43 @@ func (d *Dispatcher) Start(ctx context.Context) error {
 	return nil
 }
 
+// CatchUp synthesizes a `code.core.FileChanged` event for every path
+// in paths and routes it through the enabled extractors directly
+// (bypassing the event log). Used at daemon startup to ensure
+// extractors process the workspace's current cold-sweep state — the
+// EventLog subscription opened by Start is forward-only, so without
+// CatchUp the framework layer would stay empty until a file changes.
+//
+// Synthetic events are tagged `produced_by: kernel_replay` so any
+// downstream auditor can distinguish replay events from live ones.
+// Idempotent: re-running CatchUp over the same paths produces no
+// new code.framework events because compare-before-emit suppresses
+// already-stored content.
+func (d *Dispatcher) CatchUp(ctx context.Context, paths []string) error {
+	if !d.started.Load() {
+		return fmt.Errorf("dispatcher: CatchUp called before Start")
+	}
+	for _, path := range paths {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+		payload, err := json.Marshal(map[string]string{"path": path})
+		if err != nil {
+			continue
+		}
+		ev := kernel.Event{
+			Layer:      "code.core",
+			Kind:       "FileChanged",
+			Payload:    payload,
+			ProducedBy: kernel.SourceKernelReplay,
+		}
+		d.routeOne(ctx, ev)
+	}
+	return nil
+}
+
 // Stop shuts down the dispatcher. Idempotent.
 func (d *Dispatcher) Stop(_ context.Context) error {
 	if !d.started.Load() {

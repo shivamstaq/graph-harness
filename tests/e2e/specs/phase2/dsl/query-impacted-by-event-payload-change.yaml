@@ -1,0 +1,38 @@
+# yaml-language-server: $schema=https://github.com/shivamstaq/gotit/raw/main/schema/spec.schema.json
+spec_version: 1
+name: p2-query-impacted-by-event-payload-change
+description: >-
+  Pass-2 DSL §11.2 (SPEC.md): exercises the canonical "list-impacted-by-
+  payment-event-payload-change" query example end-to-end via
+  `graph-harness query`. The query references `publishes_event` /
+  `consumes_event` relations and filters on event name; the DSL parser
+  must accept the Cypher-style match/where/return shape and lower
+  through Mangle. We assert the parser accepts the shape — exact result
+  cardinality depends on richer relation indexing that the Pass-2
+  Surfaces deepening lands.
+tags: [phase2, dsl, query, cypher, p2-framework-extractors]
+order: 252
+requires:
+  - feature:p2-framework-extractors
+repo:
+  helper: go-module-empty
+
+setup:
+  - name: init_workspace
+    command: graph-harness init
+    assert:
+      - { type: exit_code, expected: 0 }
+
+steps:
+  - name: query_parses_cypher_event_payload_change_shape
+    # SPEC.md §11.2 surface-form example, simplified to focus on the
+    # parser + lowering contract. The actual graph traversal is
+    # exercised by the validate-diff specs below; this one guards the
+    # DSL surface.
+    command: |
+      graph-harness query 'query "list-impacted-by-event-payload-change" { match (f:Function)-[:publishes_event]->(e:Event) where e.name = "order.created" return f }'
+    assert:
+      - { type: exit_code, expected: 0 }
+      - { type: contains, value: "list-impacted-by-event-payload-change" }
+      - { type: contains, value: "publishes_event" }
+      - { type: contains, value: "order.created" }

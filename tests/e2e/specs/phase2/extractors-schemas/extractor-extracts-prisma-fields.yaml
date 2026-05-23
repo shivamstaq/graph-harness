@@ -1,0 +1,78 @@
+# yaml-language-server: $schema=https://github.com/shivamstaq/gotit/raw/main/schema/spec.schema.json
+spec_version: 1
+name: p2-extractor-extracts-prisma-fields
+description: >-
+  Pass-2 schema/prisma: a `schema.prisma` file with two models (User
+  with 4 scalar fields, Post with 3) indexes to two Schema entities and
+  seven SchemaField entities under code.framework. Field count and
+  nullability are asserted via `code list --json`.
+tags: [phase2, extractors, schemas, prisma, p2-framework-extractors]
+order: 230
+requires:
+  - feature:p2-framework-extractors
+repo:
+  helper: go-module-empty
+
+setup:
+  - name: init_workspace
+    command: graph-harness init
+    assert:
+      - { type: exit_code, expected: 0 }
+
+  - name: write_prisma_schema_fixture
+    command: |
+      sh -c 'mkdir -p prisma && cat > prisma/schema.prisma <<"PRISMAEOF"
+      // Prisma schema fixture
+      datasource db {
+        provider = "postgresql"
+        url      = env("DATABASE_URL")
+      }
+
+      generator client {
+        provider = "prisma-client-js"
+      }
+
+      model User {
+        id        Int      @id @default(autoincrement())
+        email     String   @unique
+        name      String?
+        createdAt DateTime @default(now())
+        posts     Post[]
+      }
+
+      model Post {
+        id       Int    @id @default(autoincrement())
+        title    String
+        authorId Int
+      }
+      PRISMAEOF'
+    assert:
+      - { type: exit_code, expected: 0 }
+
+  - name: commit_fixture
+    command: sh -c "git add -A && git -c user.email=ci@example.com -c user.name=ci commit -m 'prisma schema fixture' >/dev/null"
+    assert:
+      - { type: exit_code, expected: 0 }
+
+steps:
+  - name: code_list_emits_schema_and_field_rows
+    command: graph-harness code list --batch --json --no-lsp
+    assert:
+      - { type: exit_code, expected: 0 }
+      # Two Schema rows (one per model). The relation field `posts`
+      # on User is skipped per the extractor's contract.
+      - { type: contains, value: "\"kind\":\"Schema\"" }
+      - { type: contains, value: "\"kind\":\"SchemaField\"" }
+      # Model + field names surface in qualified_name.
+      - { type: contains, value: "User" }
+      - { type: contains, value: "Post" }
+      - { type: contains, value: "email" }
+      - { type: contains, value: "title" }
+      - { type: contains, value: "authorId" }
+
+  - name: extractors_list_includes_prisma
+    command: graph-harness extractors list
+    assert:
+      - { type: exit_code, expected: 0 }
+      - { type: contains, value: "prisma" }
+      - { type: contains, value: "schemas" }

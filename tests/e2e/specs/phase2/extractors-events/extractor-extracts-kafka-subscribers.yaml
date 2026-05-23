@@ -1,0 +1,69 @@
+# yaml-language-server: $schema=https://github.com/shivamstaq/gotit/raw/main/schema/spec.schema.json
+spec_version: 1
+name: p2-extractor-extracts-kafka-subscribers
+description: >-
+  Pass-2 events/kafka/ts: a TypeScript service that subscribes to two
+  Kafka topics via kafkajs indexes to EventSubscriber entities under
+  code.framework. Asserts the rows materialize with event_name populated
+  and transport=kafka.
+tags: [phase2, extractors, events, kafka, subscribers, p2-framework-extractors]
+order: 221
+requires:
+  - feature:p2-framework-extractors
+repo:
+  helper: go-module-empty
+
+setup:
+  - name: init_workspace
+    command: graph-harness init
+    assert:
+      - { type: exit_code, expected: 0 }
+
+  - name: write_ts_kafka_consumer_fixture
+    command: |
+      sh -c 'mkdir -p apps/web/src && cat > apps/web/src/consumer.ts <<"TSEOF"
+      import { Kafka } from "kafkajs";
+
+      const kafka = new Kafka({ clientId: "web", brokers: ["broker:9092"] });
+
+      export async function subscribeOrders() {
+        const consumer = kafka.consumer({ groupId: "web-orders" });
+        await consumer.subscribe({ topic: "order.created", fromBeginning: true });
+      }
+
+      export async function subscribeAudit() {
+        const consumer = kafka.consumer({ groupId: "audit" });
+        await consumer.subscribe({ topics: ["audit.events", "user.signed_in"] });
+      }
+      TSEOF
+      cat > apps/web/package.json <<"JSON"
+      { "name": "web", "version": "0.1.0", "private": true }
+      JSON
+      cat > apps/web/tsconfig.json <<"TSC"
+      { "compilerOptions": { "target": "ES2022", "module": "commonjs", "strict": true } }
+      TSC'
+    assert:
+      - { type: exit_code, expected: 0 }
+
+  - name: commit_fixture
+    command: sh -c "git add -A && git -c user.email=ci@example.com -c user.name=ci commit -m 'kafka subscriber fixture' >/dev/null"
+    assert:
+      - { type: exit_code, expected: 0 }
+
+steps:
+  - name: code_list_emits_event_subscriber_rows
+    command: graph-harness code list --batch --json --no-lsp
+    assert:
+      - { type: exit_code, expected: 0 }
+      - { type: contains, value: "\"kind\":\"EventSubscriber\"" }
+      # Three subscriptions surface — one explicit + two from a topics[] list.
+      - { type: contains, value: "order.created" }
+      - { type: contains, value: "audit.events" }
+      - { type: contains, value: "user.signed_in" }
+
+  - name: extractors_list_includes_kafka_ts
+    command: graph-harness extractors list
+    assert:
+      - { type: exit_code, expected: 0 }
+      - { type: contains, value: "kafka" }
+      - { type: contains, value: "events" }

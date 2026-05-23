@@ -1,0 +1,74 @@
+# yaml-language-server: $schema=https://github.com/shivamstaq/gotit/raw/main/schema/spec.schema.json
+spec_version: 1
+name: p2-extractor-extracts-express-routes
+description: >-
+  Pass-2 routes/ts/express: a small Express.js fixture with
+  GET / POST / PUT / DELETE handlers indexes to Route entities under
+  code.framework. We assert via `code list --json` that the rows
+  materialize with method + path and framework=express.
+tags: [phase2, extractors, routes, express, p2-framework-extractors]
+order: 211
+requires:
+  - feature:p2-framework-extractors
+repo:
+  helper: go-module-empty
+
+setup:
+  - name: init_workspace
+    command: graph-harness init
+    assert:
+      - { type: exit_code, expected: 0 }
+
+  - name: write_express_routes_fixture
+    command: |
+      sh -c 'mkdir -p web/src && cat > web/src/app.ts <<"TSEOF"
+      import express from "express";
+
+      const app = express();
+
+      function listUsers(_req: any, res: any) { res.json([]); }
+      function getUser(_req: any, res: any)   { res.json({}); }
+      function createUser(_req: any, res: any) { res.status(201).json({}); }
+      function updateUser(_req: any, res: any) { res.json({}); }
+      function deleteUser(_req: any, res: any) { res.status(204).end(); }
+
+      app.get("/api/users", listUsers);
+      app.get("/api/users/:id", getUser);
+      app.post("/api/users", createUser);
+      app.put("/api/users/:id", updateUser);
+      app.delete("/api/users/:id", deleteUser);
+
+      export { app };
+      TSEOF
+      mkdir -p web && cat > web/package.json <<"JSON"
+      { "name": "express-fixture", "version": "0.1.0", "private": true }
+      JSON
+      cat > web/tsconfig.json <<"TSC"
+      { "compilerOptions": { "target": "ES2022", "module": "commonjs", "strict": true } }
+      TSC'
+    assert:
+      - { type: exit_code, expected: 0 }
+
+  - name: commit_fixture
+    command: sh -c "git add -A && git -c user.email=ci@example.com -c user.name=ci commit -m 'express routes fixture' >/dev/null"
+    assert:
+      - { type: exit_code, expected: 0 }
+
+steps:
+  - name: code_list_reports_express_route_rows
+    command: graph-harness code list --batch --json --no-lsp
+    assert:
+      - { type: exit_code, expected: 0 }
+      - { type: contains, value: "\"kind\":\"Route\"" }
+      - { type: contains, value: "/api/users" }
+      - { type: contains, value: "GET" }
+      - { type: contains, value: "POST" }
+      - { type: contains, value: "PUT" }
+      - { type: contains, value: "DELETE" }
+
+  - name: extractors_list_includes_express
+    command: graph-harness extractors list
+    assert:
+      - { type: exit_code, expected: 0 }
+      - { type: contains, value: "express" }
+      - { type: contains, value: "routes" }

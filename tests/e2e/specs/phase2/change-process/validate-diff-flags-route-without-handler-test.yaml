@@ -1,0 +1,81 @@
+# yaml-language-server: $schema=https://github.com/shivamstaq/gotit/raw/main/schema/spec.schema.json
+spec_version: 1
+#
+# KNOWN_LIMITATIONS:
+#   The finding kind `route_missing_test` is NOT yet a real
+#   FindingKind* constant in internal/change_process/pipeline.go (Pass-2
+#   ships only `missing_dependent_update` plus the P1 kinds). This spec
+#   is gated behind `feature:p2-route-missing-test-finding` (default
+#   false) so it remains authored ahead of the finding kind landing.
+#   When the kind ships, flip the flag in tests/e2e/features.yaml.
+#
+name: p2-validate-diff-flags-route-without-handler-test
+description: >-
+  Pass-2 change.process (future finding kind): a diff that adds a new
+  Route to the workspace but no accompanying contract / handler test
+  must fire `route_missing_test`. Gated behind
+  `feature:p2-route-missing-test-finding` until the finding kind lands.
+tags: [phase2, change-process, validate-diff, routes, route-missing-test, p2-framework-extractors]
+order: 260
+requires:
+  - feature:p2-framework-extractors
+  - feature:p2-route-missing-test-finding
+repo:
+  helper: go-module-empty
+
+setup:
+  - name: init_workspace
+    command: graph-harness init
+    assert:
+      - { type: exit_code, expected: 0 }
+
+  - name: write_chi_baseline
+    command: |
+      sh -c 'mkdir -p internal/api && cat > internal/api/routes.go <<"GOEOF"
+      package api
+
+      import (
+        "net/http"
+
+        "github.com/go-chi/chi/v5"
+      )
+
+      func RegisterRoutes(r chi.Router) {
+        r.Get("/v1/orders/{id}", GetOrder)
+      }
+
+      func GetOrder(w http.ResponseWriter, req *http.Request) {}
+      GOEOF'
+    assert:
+      - { type: exit_code, expected: 0 }
+
+  - name: write_new_route_diff
+    command: |
+      sh -c 'cat > add_route.diff <<"DIFFEOF"
+      --- a/internal/api/routes.go
+      +++ b/internal/api/routes.go
+      @@ -10,4 +10,5 @@ import (
+       func RegisterRoutes(r chi.Router) {
+         r.Get("/v1/orders/{id}", GetOrder)
+      +  r.Post("/v1/orders", CreateOrder)
+       }
+
+      @@ -15,3 +16,4 @@ func RegisterRoutes(r chi.Router) {
+       func GetOrder(w http.ResponseWriter, req *http.Request) {}
+      +func CreateOrder(w http.ResponseWriter, req *http.Request) {}
+      DIFFEOF'
+    assert:
+      - { type: exit_code, expected: 0 }
+
+  - name: commit_fixture
+    command: sh -c "git add -A && git -c user.email=ci@example.com -c user.name=ci commit -m 'route-missing-test fixture' >/dev/null"
+    assert:
+      - { type: exit_code, expected: 0 }
+
+steps:
+  - name: validate_diff_emits_route_missing_test_finding
+    command: graph-harness validate-diff --diff add_route.diff --json
+    assert:
+      - { type: exit_code, expected: 0 }
+      - { type: contains, value: "route_missing_test" }
+      - { type: contains, value: "CreateOrder" }

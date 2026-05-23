@@ -1,0 +1,78 @@
+# yaml-language-server: $schema=https://github.com/shivamstaq/gotit/raw/main/schema/spec.schema.json
+spec_version: 1
+name: p2-extractor-detects-contract-tests
+description: >-
+  Pass-2 test extractors: a Go test file that references a Kafka topic
+  string (`"order.created"`) emits both a Test entity AND a ContractTest
+  entity. The ContractTest's `topic_name` field links the test back to
+  the EventPublisher / EventSubscriber rows that share the topic, so the
+  pipeline can walk Test → Event in stage 5. Asserts both Test and
+  ContractTest rows surface and the topic name appears.
+tags: [phase2, extractors, tests, gotest, contract-tests, p2-framework-extractors]
+order: 240
+requires:
+  - feature:p2-framework-extractors
+repo:
+  helper: go-module-empty
+
+setup:
+  - name: init_workspace
+    command: graph-harness init
+    assert:
+      - { type: exit_code, expected: 0 }
+
+  - name: write_go_contract_test_fixture
+    command: |
+      sh -c 'mkdir -p tests/contracts && cat > tests/contracts/order_created_test.go <<"GOEOF"
+      package contracts
+
+      import "testing"
+
+      // TestOrderCreatedContract exercises the order.created Kafka topic
+      // payload contract — the literal string in the body anchors the
+      // ContractTest extractor to the topic.
+      func TestOrderCreatedContract(t *testing.T) {
+        topic := "order.created"
+        if topic == "" {
+          t.Fatalf("empty topic")
+        }
+      }
+
+      // TestPaymentRouteContract exercises the POST /api/payments route
+      // contract — the literal route string anchors the ContractTest to
+      // the matching Route entity.
+      func TestPaymentRouteContract(t *testing.T) {
+        route := "/api/payments"
+        if route == "" {
+          t.Fatalf("empty route")
+        }
+      }
+      GOEOF'
+    assert:
+      - { type: exit_code, expected: 0 }
+
+  - name: commit_fixture
+    command: sh -c "git add -A && git -c user.email=ci@example.com -c user.name=ci commit -m 'contract test fixture' >/dev/null"
+    assert:
+      - { type: exit_code, expected: 0 }
+
+steps:
+  - name: code_list_emits_test_and_contract_test_rows
+    command: graph-harness code list --batch --json --no-lsp
+    assert:
+      - { type: exit_code, expected: 0 }
+      # Two Test rows (one per top-level Test function).
+      - { type: contains, value: "\"kind\":\"Test\"" }
+      - { type: contains, value: "TestOrderCreatedContract" }
+      - { type: contains, value: "TestPaymentRouteContract" }
+      # ContractTest rows are emitted alongside whenever a topic / route
+      # literal anchors the test (extractors/test/go/gotest/extractor.go).
+      - { type: contains, value: "\"kind\":\"ContractTest\"" }
+      - { type: contains, value: "order.created" }
+
+  - name: extractors_list_includes_gotest
+    command: graph-harness extractors list
+    assert:
+      - { type: exit_code, expected: 0 }
+      - { type: contains, value: "go" }
+      - { type: contains, value: "tests" }

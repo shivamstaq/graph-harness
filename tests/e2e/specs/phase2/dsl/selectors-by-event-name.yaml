@@ -1,0 +1,72 @@
+# yaml-language-server: $schema=https://github.com/shivamstaq/gotit/raw/main/schema/spec.schema.json
+spec_version: 1
+name: p2-selectors-by-event-name
+description: >-
+  Pass-2 DSL kindwise anchors: a selector with `anchor event_name
+  "order.created"` resolves against the extracted EventPublisher /
+  EventSubscriber entities. Asserts the DSL parses the new event_name
+  anchor (P2.T33 closed enum) and `selectors test` resolves to all
+  matching rows (Go publisher + any subscriber sharing the topic).
+tags: [phase2, dsl, selectors, framework-anchors, events, p2-framework-extractors]
+order: 251
+requires:
+  - feature:p2-framework-extractors
+repo:
+  helper: go-module-empty
+
+setup:
+  - name: init_workspace
+    command: graph-harness init
+    assert:
+      - { type: exit_code, expected: 0 }
+
+  - name: write_kafka_publisher
+    command: |
+      sh -c 'mkdir -p services/order && cat > services/order/publisher.go <<"GOEOF"
+      package order
+
+      import (
+        "context"
+
+        "github.com/segmentio/kafka-go"
+      )
+
+      func PublishOrderCreated(ctx context.Context, w *kafka.Writer) error {
+        return w.WriteMessages(ctx, kafka.Message{
+          Topic: "order.created",
+          Value: []byte("v"),
+        })
+      }
+      GOEOF'
+    assert:
+      - { type: exit_code, expected: 0 }
+
+  - name: write_selector_overlay
+    command: |
+      sh -c 'mkdir -p .graph-harness/overlay && cat > .graph-harness/overlay/order.gh <<"GHEOF"
+      selector OrderCreatedEvent {
+        anchor event_name "order.created"
+      }
+      GHEOF'
+    assert:
+      - { type: exit_code, expected: 0 }
+
+  - name: commit_fixture
+    command: sh -c "git add -A && git -c user.email=ci@example.com -c user.name=ci commit -m 'event selector fixture' >/dev/null"
+    assert:
+      - { type: exit_code, expected: 0 }
+
+steps:
+  - name: dsl_query_parses_event_name_anchor
+    command: graph-harness query 'selector S { anchor event_name "order.created" }'
+    assert:
+      - { type: exit_code, expected: 0 }
+      - { type: contains, value: "event_name" }
+      - { type: contains, value: "order.created" }
+
+  - name: selectors_test_resolves_to_publisher_row
+    command: graph-harness selectors test OrderCreatedEvent --batch --json --no-lsp
+    assert:
+      - { type: exit_code, expected: 0 }
+      - { type: contains, value: "OrderCreatedEvent" }
+      - { type: contains, value: "order.created" }

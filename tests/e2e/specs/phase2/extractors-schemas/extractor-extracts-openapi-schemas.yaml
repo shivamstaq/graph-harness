@@ -1,0 +1,85 @@
+# yaml-language-server: $schema=https://github.com/shivamstaq/gotit/raw/main/schema/spec.schema.json
+spec_version: 1
+name: p2-extractor-extracts-openapi-schemas
+description: >-
+  Pass-2 schema/openapi (deferred): an `openapi.yaml` with two component
+  schemas (User, Post) indexes to two Schema entities and N SchemaField
+  entities under code.framework. Gated behind `feature:p2-openapi`
+  (flag = false today) — the OpenAPI extractor is explicitly out of
+  scope for Pass-2 wave per `plan/02-framework-extractors.md` §6 +
+  Pass-5 inventory. Spec is authored ahead so the wave gate flips
+  green when the extractor lands.
+tags: [phase2, extractors, schemas, openapi, p2-openapi]
+order: 232
+requires:
+  - feature:p2-framework-extractors
+  - feature:p2-openapi
+repo:
+  helper: go-module-empty
+
+setup:
+  - name: init_workspace
+    command: graph-harness init
+    assert:
+      - { type: exit_code, expected: 0 }
+
+  - name: write_openapi_schema_fixture
+    command: |
+      sh -c 'mkdir -p api && cat > api/openapi.yaml <<"YAMLEOF"
+      openapi: 3.0.0
+      info:
+        title: Sample API
+        version: 1.0.0
+      paths:
+        /users:
+          get:
+            responses:
+              "200":
+                description: ok
+      components:
+        schemas:
+          User:
+            type: object
+            required: [id, email]
+            properties:
+              id:
+                type: integer
+              email:
+                type: string
+              name:
+                type: string
+          Post:
+            type: object
+            required: [id, title]
+            properties:
+              id:
+                type: integer
+              title:
+                type: string
+              authorId:
+                type: integer
+      YAMLEOF'
+    assert:
+      - { type: exit_code, expected: 0 }
+
+  - name: commit_fixture
+    command: sh -c "git add -A && git -c user.email=ci@example.com -c user.name=ci commit -m 'openapi schema fixture' >/dev/null"
+    assert:
+      - { type: exit_code, expected: 0 }
+
+steps:
+  - name: code_list_emits_openapi_schema_rows
+    command: graph-harness code list --batch --json --no-lsp
+    assert:
+      - { type: exit_code, expected: 0 }
+      - { type: contains, value: "\"kind\":\"Schema\"" }
+      - { type: contains, value: "\"kind\":\"SchemaField\"" }
+      - { type: contains, value: "User" }
+      - { type: contains, value: "Post" }
+      - { type: contains, value: "email" }
+
+  - name: extractors_list_includes_openapi
+    command: graph-harness extractors list
+    assert:
+      - { type: exit_code, expected: 0 }
+      - { type: contains, value: "openapi" }

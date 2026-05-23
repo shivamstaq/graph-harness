@@ -1,0 +1,60 @@
+# yaml-language-server: $schema=https://github.com/shivamstaq/gotit/raw/main/schema/spec.schema.json
+spec_version: 1
+name: p2-extractor-handles-route-prefix-groups-joined
+description: >-
+  Pass-2 routes/go/chi enrichment companion: once code.core
+  group-context tracking ships, `r.Route("/api", ...)` prefix joining
+  produces canonical full paths ("/api/users") on the inner Route rows.
+  Gated behind `feature:p2-route-prefix-joining` (flag = false today)
+  per extractors/route/go/README.md — the raw-paths variant lives in
+  `extractor-handles-route-prefix-groups.yaml`.
+tags: [phase2, extractors, routes, chi, prefix-groups, p2-framework-extractors, p2-route-prefix-joining]
+order: 215
+requires:
+  - feature:p2-framework-extractors
+  - feature:p2-route-prefix-joining
+repo:
+  helper: go-module-empty
+
+setup:
+  - name: init_workspace
+    command: graph-harness init
+    assert:
+      - { type: exit_code, expected: 0 }
+
+  - name: write_chi_grouped_routes
+    command: |
+      sh -c 'mkdir -p internal/api && cat > internal/api/routes.go <<"GOEOF"
+      package api
+
+      import (
+        "net/http"
+
+        "github.com/go-chi/chi/v5"
+      )
+
+      func RegisterRoutes(r chi.Router) {
+        r.Route("/api", func(r chi.Router) {
+          r.Get("/users", ListUsers)
+          r.Post("/users", CreateUser)
+        })
+      }
+
+      func ListUsers(w http.ResponseWriter, req *http.Request)  {}
+      func CreateUser(w http.ResponseWriter, req *http.Request) {}
+      GOEOF'
+    assert:
+      - { type: exit_code, expected: 0 }
+
+  - name: commit_fixture
+    command: sh -c "git add -A && git -c user.email=ci@example.com -c user.name=ci commit -m 'chi grouped routes fixture' >/dev/null"
+    assert:
+      - { type: exit_code, expected: 0 }
+
+steps:
+  - name: joined_prefix_path_surfaces
+    command: graph-harness code list --batch --json --no-lsp --qualified-name "/api/users"
+    assert:
+      - { type: exit_code, expected: 0 }
+      - { type: contains, value: "/api/users" }
+      - { type: contains, value: "\"kind\":\"Route\"" }

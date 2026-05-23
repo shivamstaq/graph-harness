@@ -1,0 +1,80 @@
+# yaml-language-server: $schema=https://github.com/shivamstaq/gotit/raw/main/schema/spec.schema.json
+spec_version: 1
+name: p2-extractor-route-handler-relation-resolves
+description: >-
+  Pass-2 routes: each Route extracted by an HTTP-framework extractor is
+  paired with a Handler entity via the SelectorRef anchor list (SPEC
+  §2.2 — selectors are the only legal cross-layer reference). This spec
+  asserts the framework emits BOTH a Route row AND a Handler row for
+  each registration in the chi fixture, so the route → handler binding
+  is observable in `code list`.
+tags: [phase2, extractors, routes, chi, relations, p2-framework-extractors]
+order: 213
+requires:
+  - feature:p2-framework-extractors
+repo:
+  helper: go-module-empty
+
+setup:
+  - name: init_workspace
+    command: graph-harness init
+    assert:
+      - { type: exit_code, expected: 0 }
+
+  - name: write_chi_routes_with_named_handlers
+    command: |
+      sh -c 'mkdir -p internal/api && cat > internal/api/routes.go <<"GOEOF"
+      package api
+
+      import (
+        "net/http"
+
+        "github.com/go-chi/chi/v5"
+      )
+
+      // RegisterRoutes wires three routes, each bound to a named handler
+      // so the Handler entity anchors on a discoverable qualified_name.
+      func RegisterRoutes(r chi.Router) {
+        r.Get("/v1/users/{id}", GetUser)
+        r.Post("/v1/users", CreateUser)
+        r.Delete("/v1/users/{id}", DeleteUser)
+      }
+
+      func GetUser(w http.ResponseWriter, req *http.Request)    {}
+      func CreateUser(w http.ResponseWriter, req *http.Request) {}
+      func DeleteUser(w http.ResponseWriter, req *http.Request) {}
+      GOEOF'
+    assert:
+      - { type: exit_code, expected: 0 }
+
+  - name: commit_fixture
+    command: sh -c "git add -A && git -c user.email=ci@example.com -c user.name=ci commit -m 'route+handler fixture' >/dev/null"
+    assert:
+      - { type: exit_code, expected: 0 }
+
+steps:
+  - name: code_list_emits_both_route_and_handler_rows
+    command: graph-harness code list --batch --json --no-lsp
+    assert:
+      - { type: exit_code, expected: 0 }
+      # Route rows carry the path pattern in qualified_name.
+      - { type: contains, value: "\"kind\":\"Route\"" }
+      - { type: contains, value: "/v1/users" }
+      # Handler rows are emitted as their own entity per
+      # `HandlerBound` (extractors/route/go/common/common.go:343).
+      - { type: contains, value: "\"kind\":\"Handler\"" }
+      # The handler functions appear as code.core Function entities
+      # so the route's anchor can resolve to them via SelectorRef.
+      - { type: contains, value: "GetUser" }
+      - { type: contains, value: "CreateUser" }
+      - { type: contains, value: "DeleteUser" }
+
+  - name: route_qualified_name_carries_path_for_reverse_lookup
+    # The reverse index (entity → bound_selectors[]) flows via P2.M03;
+    # at minimum the Route row's qualified_name must equal the path
+    # pattern so a `code list --qualified-name "/v1/users/{id}"`
+    # filter finds the Route by path.
+    command: graph-harness code list --batch --qualified-name "/v1/users/{id}" --json --no-lsp
+    assert:
+      - { type: exit_code, expected: 0 }
+      - { type: contains, value: "/v1/users/{id}" }

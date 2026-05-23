@@ -1,0 +1,217 @@
+# yaml-language-server: $schema=https://github.com/shivamstaq/gotit/raw/main/schema/spec.schema.json
+spec_version: 1
+name: p2-tracer-framework-demo
+description: >-
+  Pass-2 capstone wave-gate spec. Mirrors the §4 demo script in
+  `plan/02-framework-extractors.md`: a polyglot fixture with a Go Kafka
+  publisher (order.created), a TypeScript subscriber, a Python audit
+  subscriber, and a Jest contract test. We define the
+  OrderCreatedPropagation flow once via an overlay, then verify (a) the
+  selector binds across all four entity rows, (b) a payload-change diff
+  fires three `missing_dependent_update` findings — one per dependent —
+  with FrameworkContext.Dependents populated. This is the "is the wave
+  green?" spec: when `feature:p2-framework-extractors` flips true this
+  spec MUST pass.
+tags: [phase2, capstone, framework-extractors, polyglot, kafka, demo, p2-framework-extractors]
+order: 290
+requires:
+  - feature:p2-framework-extractors
+repo:
+  helper: go-module-empty
+
+setup:
+  - name: init_workspace
+    command: graph-harness init
+    assert:
+      - { type: exit_code, expected: 0 }
+
+  - name: write_go_publisher
+    command: |
+      sh -c 'mkdir -p services/order && cat > services/order/event.go <<"GOEOF"
+      package order
+
+      type OrderCreated struct {
+        OrderID    string
+        CustomerID string
+        Amount     float64
+      }
+      GOEOF
+      cat > services/order/publisher.go <<"GOEOF"
+      package order
+
+      import (
+        "context"
+        "encoding/json"
+
+        "github.com/segmentio/kafka-go"
+      )
+
+      func PublishOrderCreated(ctx context.Context, w *kafka.Writer, ev OrderCreated) error {
+        payload, err := json.Marshal(ev)
+        if err != nil {
+          return err
+        }
+        return w.WriteMessages(ctx, kafka.Message{
+          Topic: "order.created",
+          Value: payload,
+        })
+      }
+      GOEOF'
+    assert:
+      - { type: exit_code, expected: 0 }
+
+  - name: write_ts_consumer
+    command: |
+      sh -c 'mkdir -p apps/web/src && cat > apps/web/src/order_consumer.ts <<"TSEOF"
+      import { Kafka } from "kafkajs";
+
+      export type OrderCreatedPayload = {
+        OrderID: string;
+        CustomerID: string;
+        Amount: number;
+      };
+
+      export async function handleOrderCreated(p: OrderCreatedPayload) {
+        if (!p.OrderID) throw new Error("missing OrderID");
+        if (!p.CustomerID) throw new Error("missing CustomerID");
+        if (p.Amount <= 0) throw new Error("non-positive amount");
+      }
+
+      export async function runOrderConsumer() {
+        const kafka = new Kafka({ clientId: "web", brokers: ["broker:9092"] });
+        const consumer = kafka.consumer({ groupId: "web-order-consumer" });
+        await consumer.subscribe({ topic: "order.created", fromBeginning: false });
+      }
+      TSEOF
+      cat > apps/web/package.json <<"JSON"
+      { "name": "web", "version": "0.1.0", "private": true }
+      JSON
+      cat > apps/web/tsconfig.json <<"TSC"
+      { "compilerOptions": { "target": "ES2022", "module": "commonjs", "strict": true } }
+      TSC'
+    assert:
+      - { type: exit_code, expected: 0 }
+
+  - name: write_py_audit
+    command: |
+      sh -c 'mkdir -p pipelines/audit && cat > pipelines/audit/consumer.py <<"PYEOF"
+      """Audit consumer for the order.created Kafka topic."""
+
+      from confluent_kafka import Consumer
+
+
+      def handle_order_created(payload):
+          if not payload.get("OrderID"):
+              raise ValueError("missing OrderID")
+
+
+      def run_audit_consumer():
+          consumer = Consumer({"bootstrap.servers": "localhost:9092",
+                               "group.id": "audit-order-consumer"})
+          consumer.subscribe(["order.created"])
+      PYEOF
+      cat > pipelines/audit/pyproject.toml <<"TOML"
+      [project]
+      name = "audit"
+      version = "0.1.0"
+      TOML'
+    assert:
+      - { type: exit_code, expected: 0 }
+
+  - name: write_jest_contract_test
+    command: |
+      sh -c 'mkdir -p tests/contract && cat > tests/contract/order_created.spec.ts <<"JESTEOF"
+      import { describe, it, expect } from "@jest/globals";
+
+      describe("order_created_contract", () => {
+        it("validates the OrderCreated payload shape for order.created", () => {
+          const sample = { OrderID: "o1", CustomerID: "c1", Amount: 19.95 };
+          expect(sample.OrderID).toBe("o1");
+        });
+      });
+      JESTEOF'
+    assert:
+      - { type: exit_code, expected: 0 }
+
+  - name: write_overlay
+    command: |
+      sh -c 'mkdir -p .graph-harness/overlay && cat > .graph-harness/overlay/order_event.gh <<"GHEOF"
+      selector OrderCreatedEvent {
+        unique
+        anchor event_name "order.created"
+      }
+
+      flow OrderCreatedPropagation {
+        description "order.created event propagation"
+        scope OrderCreatedEvent
+        step Publish      targets selector { event_name "order.created" entity_kind "EventPublisher" }
+        step ConsumeApp   targets selector { event_name "order.created" entity_kind "EventSubscriber" }
+        step ContractTest targets selector { topic_name "order.created" entity_kind "ContractTest" }
+      }
+      GHEOF'
+    assert:
+      - { type: exit_code, expected: 0 }
+
+  - name: write_payload_diff
+    command: |
+      sh -c 'cat > payload.diff <<"DIFFEOF"
+      --- a/services/order/event.go
+      +++ b/services/order/event.go
+      @@ -1,7 +1,8 @@
+       package order
+
+       type OrderCreated struct {
+         OrderID    string
+      +  TransactionID string
+         CustomerID string
+         Amount     float64
+       }
+      DIFFEOF'
+    assert:
+      - { type: exit_code, expected: 0 }
+
+  - name: commit_fixture
+    command: sh -c "git add -A && git -c user.email=ci@example.com -c user.name=ci commit -m 'phase2 capstone fixture' >/dev/null"
+    assert:
+      - { type: exit_code, expected: 0 }
+
+steps:
+  - name: selector_resolves_across_languages
+    # §4 step 3: `selectors test OrderCreatedEvent` binds across all
+    # the order.created rows (Go publisher, TS subscriber, Py audit,
+    # Jest contract test). The unique anchor on event_name pins the
+    # selector to that topic; all four rows match.
+    command: graph-harness selectors test OrderCreatedEvent --batch --json --no-lsp
+    assert:
+      - { type: exit_code, expected: 0 }
+      - { type: contains, value: "OrderCreatedEvent" }
+      - { type: contains, value: "order.created" }
+
+  - name: validate_diff_emits_three_dependent_findings
+    # §4 step 5: a diff that adds a field to the Go payload fires
+    # `missing_dependent_update` for each downstream dependent that
+    # didn't touch the same diff — TS subscriber, Py audit, Jest test.
+    command: graph-harness validate-diff --diff payload.diff --json
+    assert:
+      - { type: exit_code, expected: 0 }
+      - { type: contains, value: "missing_dependent_update" }
+      # FrameworkContext.Dependents lists each missing dependent file.
+      - { type: contains, value: "apps/web/src/order_consumer.ts" }
+      - { type: contains, value: "pipelines/audit/consumer.py" }
+      - { type: contains, value: "tests/contract/order_created.spec.ts" }
+      # FrameworkContext payload contract (per
+      # internal/change_process/pipeline.go ~80).
+      - { type: contains, value: "framework_context" }
+      - { type: contains, value: "dependents" }
+
+  - name: framework_extractors_registered_at_runtime
+    # §4 implicit: `extractors list` shows the registered set, proving
+    # the blank-import aggregator wired every extractor family.
+    command: graph-harness extractors list
+    assert:
+      - { type: exit_code, expected: 0 }
+      - { type: contains, value: "chi" }
+      - { type: contains, value: "kafka" }
+      - { type: contains, value: "prisma" }
+      - { type: contains, value: "routes" }
+      - { type: contains, value: "events" }

@@ -1,0 +1,108 @@
+# yaml-language-server: $schema=https://github.com/shivamstaq/gotit/raw/main/schema/spec.schema.json
+spec_version: 1
+name: p2-extractor-publish-subscribe-relation
+description: >-
+  Pass-2 events/kafka cross-language: a Go publisher emits
+  `order.created`, a TypeScript consumer subscribes, and a Python
+  consumer subscribes. The shared event_name string is the join key —
+  asserting on `code list --json` confirms a single Event row exists
+  paired with both an EventPublisher (Go) and two EventSubscribers
+  (TS + Py) that share the topic. Fixture is inlined (compact mirror of
+  tests/testdata/bench/scenario2/).
+tags: [phase2, extractors, events, kafka, pubsub-relation, polyglot, p2-framework-extractors]
+order: 222
+requires:
+  - feature:p2-framework-extractors
+repo:
+  helper: go-module-empty
+
+setup:
+  - name: init_workspace
+    command: graph-harness init
+    assert:
+      - { type: exit_code, expected: 0 }
+
+  - name: write_go_publisher
+    command: |
+      sh -c 'mkdir -p services/order && cat > services/order/publisher.go <<"GOEOF"
+      package order
+
+      import (
+        "context"
+
+        "github.com/segmentio/kafka-go"
+      )
+
+      func PublishOrderCreated(ctx context.Context, w *kafka.Writer) error {
+        return w.WriteMessages(ctx, kafka.Message{
+          Topic: "order.created",
+          Value: []byte("v"),
+        })
+      }
+      GOEOF'
+    assert:
+      - { type: exit_code, expected: 0 }
+
+  - name: write_ts_consumer
+    command: |
+      sh -c 'mkdir -p apps/web/src && cat > apps/web/src/order_consumer.ts <<"TSEOF"
+      import { Kafka } from "kafkajs";
+
+      const kafka = new Kafka({ clientId: "web", brokers: ["broker:9092"] });
+
+      export async function runOrderConsumer() {
+        const consumer = kafka.consumer({ groupId: "web-order-consumer" });
+        await consumer.subscribe({ topic: "order.created", fromBeginning: false });
+      }
+      TSEOF
+      cat > apps/web/package.json <<"JSON"
+      { "name": "web", "version": "0.1.0", "private": true }
+      JSON
+      cat > apps/web/tsconfig.json <<"TSC"
+      { "compilerOptions": { "target": "ES2022", "module": "commonjs", "strict": true } }
+      TSC'
+    assert:
+      - { type: exit_code, expected: 0 }
+
+  - name: write_py_consumer
+    command: |
+      sh -c 'mkdir -p pipelines/audit && cat > pipelines/audit/consumer.py <<"PYEOF"
+      """Audit consumer for the order.created Kafka topic."""
+
+      from confluent_kafka import Consumer
+
+
+      def run_audit_consumer():
+          consumer = Consumer({"bootstrap.servers": "localhost:9092",
+                               "group.id": "audit-order-consumer"})
+          consumer.subscribe(["order.created"])
+      PYEOF
+      cat > pipelines/audit/pyproject.toml <<"TOML"
+      [project]
+      name = "audit"
+      version = "0.1.0"
+      TOML'
+    assert:
+      - { type: exit_code, expected: 0 }
+
+  - name: commit_fixture
+    command: sh -c "git add -A && git -c user.email=ci@example.com -c user.name=ci commit -m 'polyglot kafka fixture' >/dev/null"
+    assert:
+      - { type: exit_code, expected: 0 }
+
+steps:
+  - name: code_list_emits_publisher_and_subscribers
+    # All three language extractors must emit rows for the SAME topic.
+    # The shared event_name string is the join key the pipeline walks
+    # via the framework-edge graph traversal (P2.T35).
+    command: graph-harness code list --batch --json --no-lsp
+    assert:
+      - { type: exit_code, expected: 0 }
+      - { type: contains, value: "\"kind\":\"EventPublisher\"" }
+      - { type: contains, value: "\"kind\":\"EventSubscriber\"" }
+      # The shared topic surfaces on all three rows.
+      - { type: contains, value: "order.created" }
+      # All three languages are represented.
+      - { type: contains, value: "\"language_id\":\"go\"" }
+      - { type: contains, value: "\"language_id\":\"typescript\"" }
+      - { type: contains, value: "\"language_id\":\"python\"" }

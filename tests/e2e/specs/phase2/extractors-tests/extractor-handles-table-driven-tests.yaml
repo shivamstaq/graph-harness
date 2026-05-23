@@ -1,0 +1,69 @@
+# yaml-language-server: $schema=https://github.com/shivamstaq/gotit/raw/main/schema/spec.schema.json
+spec_version: 1
+name: p2-extractor-handles-table-driven-tests
+description: >-
+  Pass-2 tests/go/gotest: Go table-driven tests using `t.Run("subcase",
+  ...)` produce a Test entity per top-level Test function PLUS one
+  sub-Test entity per literal sub-case name. Three sub-cases in the
+  fixture's TestCancelOrder produce three sub-Test rows in addition to
+  the parent. Mirrors the contract in
+  extractors/test/go/gotest/extractor.go::findGoTests.
+tags: [phase2, extractors, tests, gotest, table-driven, p2-framework-extractors]
+order: 241
+requires:
+  - feature:p2-framework-extractors
+repo:
+  helper: go-module-empty
+
+setup:
+  - name: init_workspace
+    command: graph-harness init
+    assert:
+      - { type: exit_code, expected: 0 }
+
+  - name: write_table_driven_test_fixture
+    command: |
+      sh -c 'mkdir -p orders && cat > orders/cancel_test.go <<"GOEOF"
+      package orders
+
+      import "testing"
+
+      // TestCancelOrder is a classic Go table-driven test. Each t.Run
+      // sub-case must surface as its own Test row per the gotest
+      // extractor contract.
+      func TestCancelOrder(t *testing.T) {
+        cases := []struct {
+          name string
+        }{
+          {name: "happy"},
+          {name: "already-cancelled"},
+          {name: "not-found"},
+        }
+        for _, tc := range cases {
+          t.Run(tc.name, func(t *testing.T) {
+            _ = tc.name
+          })
+        }
+      }
+      GOEOF'
+    assert:
+      - { type: exit_code, expected: 0 }
+
+  - name: commit_fixture
+    command: sh -c "git add -A && git -c user.email=ci@example.com -c user.name=ci commit -m 'table-driven test fixture' >/dev/null"
+    assert:
+      - { type: exit_code, expected: 0 }
+
+steps:
+  - name: code_list_emits_parent_plus_subcase_rows
+    command: graph-harness code list --batch --json --no-lsp
+    assert:
+      - { type: exit_code, expected: 0 }
+      - { type: contains, value: "\"kind\":\"Test\"" }
+      # Parent test name surfaces.
+      - { type: contains, value: "TestCancelOrder" }
+      # All three literal sub-case names are recovered as their own
+      # Test rows (see findGoTests sub-test attribution comment).
+      - { type: contains, value: "happy" }
+      - { type: contains, value: "already-cancelled" }
+      - { type: contains, value: "not-found" }
