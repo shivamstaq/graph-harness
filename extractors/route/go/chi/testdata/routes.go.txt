@@ -1,0 +1,38 @@
+// Synthetic chi routes fixture. .txt extension keeps `go build` and
+// `go vet` from compiling it as a real package (the imports below are
+// fictional; the extractor only ever parses the file via tree-sitter,
+// never compiles it). Tree-sitter-go is grammar-only and parses the
+// file regardless of the .txt extension.
+
+package routes
+
+import (
+	"net/http"
+
+	"github.com/go-chi/chi/v5"
+)
+
+// RegisterRoutes wires the application's chi routes.
+func RegisterRoutes(r chi.Router) {
+	r.Get("/v1/orders/{id}", GetOrder)
+	r.Post("/v1/orders", CreateOrder)
+	r.Put("/v1/orders/{id}", UpdateOrder)
+	r.Patch("/v1/orders/{id}", PatchOrder)
+	r.Delete("/v1/orders/{id}", DeleteOrder)
+	r.Handle("/v1/health", healthHandler)
+	r.Method("CONNECT", "/v1/tunnel", connectHandler)
+	r.Get("/v1/anonymous", func(w http.ResponseWriter, req *http.Request) {
+		_, _ = w.Write([]byte("inline"))
+	})
+}
+
+func GetOrder(w http.ResponseWriter, req *http.Request)    {}
+func CreateOrder(w http.ResponseWriter, req *http.Request) {}
+func UpdateOrder(w http.ResponseWriter, req *http.Request) {}
+func PatchOrder(w http.ResponseWriter, req *http.Request)  {}
+func DeleteOrder(w http.ResponseWriter, req *http.Request) {}
+
+var (
+	healthHandler  http.HandlerFunc
+	connectHandler http.HandlerFunc
+)
