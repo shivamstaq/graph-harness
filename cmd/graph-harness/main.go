@@ -11,6 +11,11 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/shivamstaq/graph-harness/internal/cli"
+
+	// P2.T03 — activate every compiled-in framework extractor by
+	// blank-importing the aggregator. Extractor packages register
+	// themselves with the code.framework registry via init().
+	_ "github.com/shivamstaq/graph-harness/extractors/all"
 )
 
 func main() {
