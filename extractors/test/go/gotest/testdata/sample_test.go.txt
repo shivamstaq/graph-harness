@@ -1,0 +1,38 @@
+package orders
+
+import (
+	"testing"
+
+	"example.com/app/orders"
+)
+
+func TestPlaceOrder(t *testing.T) {
+	o := orders.NewPlaceOrder()
+	if err := o.Run(); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+}
+
+func TestCancelOrder(t *testing.T) {
+	cases := []struct {
+		name string
+	}{
+		{name: "happy"},
+		{name: "already-cancelled"},
+		{name: "not-found"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_ = orders.CancelOrder(tc.name)
+		})
+	}
+}
+
+func TestOrderCreatedEvent(t *testing.T) {
+	// Contract test for the "order.created" topic.
+	_ = "order.created"
+}
+
+func helperFunc() {
+	// Not a test — should not be picked up.
+}
