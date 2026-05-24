@@ -104,8 +104,12 @@ type DispatcherConfig struct {
 	EventLog  EventEmitter
 	State     StateReader
 	Resolver  SelectorResolver
-	Config    *Config // nil = treat as everything enabled
-	Logf      func(string, ...any)
+	// Writer projects emitted framework events into queryable
+	// code_core.Entity rows. nil = skip projection (kernel events
+	// are still durable; only the queryable side is dark).
+	Writer EntityWriter
+	Config *Config // nil = treat as everything enabled
+	Logf   func(string, ...any)
 }
 
 // Dispatcher routes input events to enabled extractors and appends
@@ -359,6 +363,23 @@ func (d *Dispatcher) invokeOne(ctx context.Context, e *dispatchedEntry, in kerne
 			hash, id, kindStr := payloadHashFor(p)
 			if hash != "" && id != "" {
 				sw.Put(p.Layer, kindStr, id, hash)
+			}
+		}
+	}
+	// Project each stamped event into a queryable code_core.Entity
+	// row via the EntityWriter so the change.process pipeline's BFS
+	// (which walks code.core by Kind+QN per Pass-0.5-A) can reach
+	// framework entities. Skipped silently when no writer wired.
+	if d.cfg.Writer != nil {
+		for _, p := range stamped {
+			if err := d.cfg.Writer.WriteFromEvent(ctx, EmittedEvent{
+				Kind:     p.Kind,
+				Payload:  p.Payload,
+				Tx:       p.Tx,
+				Producer: string(p.ProducedBy),
+				Seq:      in.Seq,
+			}); err != nil {
+				d.cfg.Logf("extractor %s WriteFromEvent: %v", e.desc.Name, err)
 			}
 		}
 	}

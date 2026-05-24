@@ -619,6 +619,7 @@ func newDaemonServeCmd() *cobra.Command {
 				Workspace: ws.Root,
 				Facts:     facts.NewEventLogFacts(res.Log, "code.framework"),
 				EventLog:  res.Log,
+				Writer:    code_framework.NewEntityWriter(res.Code),
 				Config:    extractorCfg,
 				Logf: func(format string, args ...any) {
 					fmt.Fprintf(cmd.ErrOrStderr(), "[extractors] "+format+"\n", args...)

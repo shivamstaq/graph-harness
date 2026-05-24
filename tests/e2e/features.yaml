@@ -23,7 +23,26 @@ enabled:
   # into daemon serve (with cold-state CatchUp), the change.process
   # pipeline emits `missing_dependent_update`, surfaces consume the
   # framework_browser RPCs, and bench scenario 2 passes its gate.
-  # Flag stays FALSE because a Pass-5/6 prerequisite is still open:
+  # Pass 6 closed the writer gap (extractor emissions → queryable
+  # code_core rows via the dispatcher's EntityWriter); when the
+  # daemon path is used, framework entities materialize on startup
+  # via the dispatcher's CatchUp pass. Verified manually: a Go
+  # publisher.go fixture produces EventPublisher + Event rows in
+  # `code list` after `daemon serve`.
+  #
+  # Flag stays FALSE pending one more gap — change.process Stage 2
+  # (extractFunctionNames in internal/change_process/pipeline.go)
+  # only extracts touched function names from diff added-lines.
+  # A diff that touches a struct field (the canonical
+  # event-payload-mutation case) returns no touched functions →
+  # reverse-index walk has nothing to expand →
+  # missing_dependent_update never fires for payload-only changes.
+  # The bench scenario 2 works around this by including `func` lines
+  # in its diffs; the smoke spec doesn't, so it stays SKIP.
+  # Closing it = teach Stage 2 to detect struct/class declarations
+  # whose fields changed + reverse-walk to their producers.
+  #
+  # Historical note (pre-Pass 6): Flag stayed FALSE because:
   # framework events emitted by the dispatcher are not yet read back
   # into queryable rows (the pipeline's BFS expects entities under
   # code.core per the Pass-0.5-A convention, but the dispatcher only
