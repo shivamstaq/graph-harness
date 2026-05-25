@@ -18,40 +18,25 @@ enabled:
   # code list, and code events so build-order-tolerance specs can
   # exercise single-source modes.
   p1-extractor-wiring:     true
-  # P2 framework extractors: Pass 0/0.5/1/2/3/4 have all landed —
-  # extractor packages register via init(), the dispatcher is wired
-  # into daemon serve (with cold-state CatchUp), the change.process
-  # pipeline emits `missing_dependent_update`, surfaces consume the
-  # framework_browser RPCs, and bench scenario 2 passes its gate.
-  # Pass 6 closed the writer gap (extractor emissions → queryable
-  # code_core rows via the dispatcher's EntityWriter); when the
-  # daemon path is used, framework entities materialize on startup
-  # via the dispatcher's CatchUp pass. Verified manually: a Go
-  # publisher.go fixture produces EventPublisher + Event rows in
-  # `code list` after `daemon serve`.
-  #
-  # Flag stays FALSE pending one more gap — change.process Stage 2
-  # (extractFunctionNames in internal/change_process/pipeline.go)
-  # only extracts touched function names from diff added-lines.
-  # A diff that touches a struct field (the canonical
-  # event-payload-mutation case) returns no touched functions →
-  # reverse-index walk has nothing to expand →
-  # missing_dependent_update never fires for payload-only changes.
-  # The bench scenario 2 works around this by including `func` lines
-  # in its diffs; the smoke spec doesn't, so it stays SKIP.
-  # Closing it = teach Stage 2 to detect struct/class declarations
-  # whose fields changed + reverse-walk to their producers.
-  #
-  # Historical note (pre-Pass 6): Flag stayed FALSE because:
-  # framework events emitted by the dispatcher are not yet read back
-  # into queryable rows (the pipeline's BFS expects entities under
-  # code.core per the Pass-0.5-A convention, but the dispatcher only
-  # writes kernel events). Closing that loop — either a dedicated
-  # code.framework Store consumer of the bus, or having extractors
-  # write to code_core.Store directly — is the remaining gate. Specs
-  # under tests/e2e/specs/phase2/ are authored and gated SKIP until
-  # then; the bench (which seeds entities directly) is the only
-  # green end-to-end exercise of the missing_dependent_update path.
+  # P2 framework extractors — SHIPPED and wave-green. The full chain
+  # works end-to-end in both daemon and batch modes:
+  #   * 37 extractors register via init() (extractors/all aggregator);
+  #   * the code.framework Dispatcher runs in `daemon serve` AND in the
+  #     batch index path (internal/cli/workspace.go), so
+  #     `code list` / `validate-diff` / `selectors test` materialize
+  #     framework entities with or without a running daemon;
+  #   * the EntityWriter projects extractor emissions into queryable
+  #     code_core rows (transport-prefixed event keys, composite
+  #     "<METHOD> <path>" route keys) + reverse-index bindings;
+  #   * change.process Stage 2 marks framework producers in a touched
+  #     directory, so an event-payload struct change fires
+  #     `missing_dependent_update` listing the cross-language
+  #     subscribers + contract test with their file paths (plan §4);
+  #   * the kindwise / route_pattern / event_name / topic_name /
+  #     schema_field anchors resolve against the materialized rows.
+  # All 17 ungated phase2 specs under tests/e2e/specs/phase2/ assert
+  # the exact extracted entity set and pass; the 5 specs below stay
+  # gated on features that are genuinely post-P2.
   p2-framework-extractors: true
   # OpenAPI extractor is post-v1 per plan/02-framework-extractors.md §6
   # ("Beyond the v1 extractor set ... — post-v1"). Spec authored ahead
