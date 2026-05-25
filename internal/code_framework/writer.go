@@ -116,6 +116,38 @@ func (w *codeCoreWriter) WriteFromEvent(ctx context.Context, ev EmittedEvent) er
 		return nil
 	}
 	languageID := languageForProducer(ev.Producer, kind)
+	seq := ev.Seq
+	if seq == 0 {
+		seq = 1
+	}
+
+	// Path: prefer the extractor-provided path_glob/file anchor — it
+	// is the UNAMBIGUOUS file the extractor actually found this entity
+	// in. Resolving the qualified_name anchor instead would be
+	// ambiguous when two files declare a function with the same suffix
+	// (e.g. a TS consumer and a Py consumer both named `run` would
+	// both resolve to whichever `run` the suffix lookup returns first,
+	// stamping both subscribers with the wrong file). The path becomes
+	// the framework entity's Path so the change.process Stage-2
+	// file-scoped walk marks this producer touched when its declaring
+	// file is in a diff (the event-payload-mutation case).
+	anchorPath := anchoredPath(generic)
+
+	// Resolve the anchored code.core function for the reverse-index
+	// binding (so a diff touching the function body reaches the
+	// producer with function-level precision). Scope the lookup to the
+	// anchor's file when known so the `run`-collision above doesn't
+	// bind to the wrong file's function.
+	var anchorEntity *code_core.Entity
+	if anchorQN := anchoredQualifiedName(generic); anchorQN != "" {
+		suffix := anchorQN
+		if i := strings.LastIndexByte(suffix, '.'); i >= 0 {
+			suffix = suffix[i+1:]
+		}
+		if suffix != "" {
+			anchorEntity = w.resolveAnchorFunction(ctx, suffix, anchorPath)
+		}
+	}
 
 	entity := code_core.Entity{
 		ID:            id,
@@ -123,36 +155,58 @@ func (w *codeCoreWriter) WriteFromEvent(ctx context.Context, ev EmittedEvent) er
 		LanguageID:    languageID,
 		QualifiedName: qn,
 	}
+	switch {
+	case anchorPath != "":
+		entity.Path = anchorPath
+	case anchorEntity != nil:
+		entity.Path = anchorEntity.Path
+	}
 	// kind_tag carries auxiliary discriminators (method for Route,
 	// transport for Event, service for Publisher/Subscriber).
 	entity.KindTag = kindTagFor(kind, generic)
 
-	if err := w.store.PutEntity(ctx, entity, ev.Seq); err != nil {
+	if err := w.store.PutEntity(ctx, entity, seq); err != nil {
 		return fmt.Errorf("framework writer PutEntity %s: %w", id, err)
 	}
 
-	// Selector binding: link this framework entity to the function
-	// it anchors via a synthetic selector ID so the pipeline's
-	// reverse-index walk reaches it from a touched function.
-	if anchorQN := anchoredQualifiedName(generic); anchorQN != "" {
+	// Selector binding: link this framework entity to the function it
+	// anchors via a synthetic selector ID so the pipeline's
+	// reverse-index walk reaches it from a touched function (same shape
+	// ApplySeed uses in internal/bench/scenario2_runner.go).
+	if anchorEntity != nil {
 		selID := "framework:" + id
-		seq := ev.Seq
-		if seq == 0 {
-			seq = 1
-		}
-		// Bind the framework entity itself.
 		_ = w.store.BindSelector(ctx, id, selID, "", "framework_anchor", seq)
-		// Bind the function entity (resolved by suffix lookup, same
-		// shape ApplySeed uses in internal/bench/scenario2_runner.go).
-		suffix := anchorQN
-		if i := strings.LastIndexByte(suffix, '.'); i >= 0 {
-			suffix = suffix[i+1:]
-		}
-		if suffix != "" {
-			if fn, err := w.store.LookupByQualifiedNameSuffix(ctx, suffix); err == nil && fn != nil {
-				_ = w.store.BindSelector(ctx, fn.ID, selID, "", "qualified_name", seq)
+		_ = w.store.BindSelector(ctx, anchorEntity.ID, selID, "", "qualified_name", seq)
+	}
+	return nil
+}
+
+// resolveAnchorFunction finds the code.core function entity the
+// framework entity anchors to. When path is non-empty it scopes the
+// search to that file (disambiguating same-named functions across
+// files — e.g. a TS `run` and a Py `run`); otherwise it falls back to
+// a workspace-wide suffix lookup.
+func (w *codeCoreWriter) resolveAnchorFunction(ctx context.Context, suffix, path string) *code_core.Entity {
+	if path != "" {
+		ents, err := w.store.ListEntitiesByPath(ctx, path)
+		if err == nil {
+			for i := range ents {
+				e := ents[i]
+				if e.Kind == code_core.KindFile {
+					continue
+				}
+				qn := e.QualifiedName
+				if j := strings.LastIndexByte(qn, '.'); j >= 0 {
+					qn = qn[j+1:]
+				}
+				if qn == suffix {
+					return &e
+				}
 			}
 		}
+	}
+	if fn, err := w.store.LookupByQualifiedNameSuffix(ctx, suffix); err == nil && fn != nil {
+		return fn
 	}
 	return nil
 }
@@ -284,28 +338,29 @@ func kindTagFor(kind EntityKind, p map[string]any) string {
 }
 
 // languageForProducer derives the source language from the
-// extractor's registration name (e.g. "events.kafka.go" → "go",
-// "routes.ts.express" → "typescript"). Falls back to "framework"
-// for cross-language entities (Event, ContractTest) and "unknown"
-// when the suffix doesn't match a known language.
+// extractor's registration name. The dotted name carries a language
+// token but its POSITION varies by family — routes name themselves
+// "<family>.<lang>.<variant>" (e.g. "routes.ts.express") while events
+// name themselves "<family>.<transport>.<lang>" (e.g.
+// "events.kafka.go"). Rather than assume a position, scan every
+// segment for a known language token. Falls back to "framework" for
+// cross-language join entities (Event) and "unknown" otherwise.
 func languageForProducer(producer string, kind EntityKind) string {
-	// Event topics + ContractTests are cross-language join keys;
-	// keep them on the synthetic "framework" language so they don't
-	// pollute per-language counts.
+	// Event topics are cross-language join keys; keep them on the
+	// synthetic "framework" language so they don't pollute
+	// per-language counts.
 	if kind == KindEvent {
 		return "framework"
 	}
 	if producer == "" {
 		return "unknown"
 	}
-	// producer format: "extractor:framework:<family>.<lang>.<variant>"
-	idx := strings.LastIndex(producer, ":")
-	if idx >= 0 {
+	// Strip the "extractor:framework:" prefix.
+	if idx := strings.LastIndex(producer, ":"); idx >= 0 {
 		producer = producer[idx+1:]
 	}
-	parts := strings.Split(producer, ".")
-	if len(parts) >= 2 {
-		switch parts[1] {
+	for _, seg := range strings.Split(producer, ".") {
+		switch seg {
 		case "go":
 			return "go"
 		case "ts", "typescript":
@@ -335,6 +390,36 @@ func anchoredQualifiedName(p map[string]any) string {
 			continue
 		}
 		if k, _ := am["kind"].(string); k == "qualified_name" {
+			if v, _ := am["value"].(string); v != "" {
+				return v
+			}
+		}
+	}
+	return ""
+}
+
+// anchoredPath extracts the first path_glob / file anchor's value from
+// a payload's anchored_to list. Used as the Path fallback for
+// framework entities whose anchor is a module-level call (no enclosing
+// function to resolve a qualified_name against) — e.g. a Python
+// `KafkaConsumer("topic")` at import scope. Returns "" when no such
+// anchor exists.
+func anchoredPath(p map[string]any) string {
+	at, ok := p["anchored_to"].(map[string]any)
+	if !ok {
+		return ""
+	}
+	anchors, ok := at["anchors"].([]any)
+	if !ok {
+		return ""
+	}
+	for _, a := range anchors {
+		am, ok := a.(map[string]any)
+		if !ok {
+			continue
+		}
+		switch k, _ := am["kind"].(string); k {
+		case "path_glob", "file":
 			if v, _ := am["value"].(string); v != "" {
 				return v
 			}

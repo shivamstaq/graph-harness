@@ -94,9 +94,13 @@ setup:
       sh -c 'mkdir -p tests/contracts && cat > tests/contracts/order-created.test.ts <<"JESTEOF"
       import { describe, it, expect } from "@jest/globals";
 
-      describe("order.created contract", () => {
+      const TOPIC = "order.created";
+
+      describe("event contract", () => {
         it("includes order_id, user_id, amount", () => {
+          const topic = TOPIC;
           const sample = { order_id: "o1", user_id: "u1", amount: 100 };
+          expect(topic).toBe("order.created");
           expect(sample).toHaveProperty("order_id");
           expect(sample).toHaveProperty("user_id");
           expect(sample).toHaveProperty("amount");
@@ -132,35 +136,53 @@ setup:
       - { type: exit_code, expected: 0 }
 
 steps:
-  - name: validate_diff_emits_three_dependents
+  # Per plan §4 demo: ONE missing_dependent_update finding whose subject is
+  # the touched EventPublisher, listing every stale dependent in
+  # FrameworkContext.Dependents (NOT one finding per dependent). The diff
+  # touches only the OrderCreated struct field — Stage-2 file-scoped
+  # detection marks the EventPublisher in publisher.go touched, then the
+  # shared-QN walk (kafka:order.created) enumerates the cross-language
+  # subscribers + the contract test.
+  - name: validate_diff_emits_one_finding_with_dependents
     command: graph-harness validate-diff --diff payload.diff --json
     assert:
       - { type: exit_code, expected: 0 }
-      # Three dependents: TS consumer, Py audit, Jest contract test.
+      # Exactly one finding, and it is the EventPublisher's.
       - { type: json_path, path: "$.findings[0].kind", op: "==", expected: "missing_dependent_update" }
-      - { type: json_path, path: "$.findings[1].kind", op: "==", expected: "missing_dependent_update" }
-      - { type: json_path, path: "$.findings[2].kind", op: "==", expected: "missing_dependent_update" }
-      # Subject entity_kind is the publisher (EventPublisher); the dependents
-      # are carried on FrameworkContext.Dependents per §4 demo.
       - { type: json_path, path: "$.findings[0].subject.entity_kind", op: "==", expected: "code.framework:EventPublisher" }
-      # Each finding's evidence names the missing dependent file.
+      - { type: json_path, path: "$.findings[0].subject.qualified_name", op: "==", expected: "kafka:order.created" }
+      - { type: count, path: "$.findings", op: "==", expected: 1 }
+      # The cross-language subscribers appear as dependents, each with its
+      # own source file (the path-disambiguation fix — TS and Py both have
+      # a `run` function but resolve to distinct files).
       - { type: contains, value: "services/notifications/consumer.ts" }
       - { type: contains, value: "services/audit/consumer.py" }
-      - { type: contains, value: "tests/contracts/order-created.test.ts" }
 
   - name: framework_context_dependents_populated
     command: graph-harness validate-diff --diff payload.diff --json
     assert:
       - { type: exit_code, expected: 0 }
-      # Optional: the FrameworkContext.Dependents list is populated on the
-      # subject side. Asserted via stdout-substring so the spec stays robust
-      # to JSON path engine differences for nested arrays.
       - { type: contains, value: "framework_context" }
-      - { type: contains, value: "dependents" }
-      - { type: contains, value: "order.created" }
+      - { type: contains, value: "\"touched_kind\":\"EventPublisher\"" }
+      - { type: contains, value: "\"reason\":\"subscribes to event\"" }
+      - { type: contains, value: "kafka:order.created" }
+
+  - name: contract_test_flagged_as_dependent
+    command: graph-harness validate-diff --diff payload.diff --json
+    assert:
+      - { type: exit_code, expected: 0 }
+      # The Jest contract test references the bare "order.created" topic
+      # literal, so the test extractor emits a ContractTest sharing the
+      # kafka:order.created linking key — surfacing it as a dependent of
+      # the event payload change (plan §4 third dependent).
+      - { type: contains, value: "ContractTest" }
+      - { type: contains, value: "tests/contracts/order-created.test.ts" }
 
   - name: validate_diff_idempotent
     command: graph-harness validate-diff --diff payload.diff --json
     assert:
       - { type: exit_code, expected: 0 }
+      # Re-running at the same kernel seq produces the identical finding
+      # (SPEC §8.1 pipeline idempotence).
       - { type: json_path, path: "$.findings[0].kind", op: "==", expected: "missing_dependent_update" }
+      - { type: count, path: "$.findings", op: "==", expected: 1 }

@@ -100,6 +100,7 @@ type DependentRef struct {
 	Kind          string `json:"kind"`
 	ID            string `json:"id"`
 	QualifiedName string `json:"qualified_name"`
+	Path          string `json:"path,omitempty"` // declaring file (the dependent's source location)
 	Reason        string `json:"reason"`
 }
 
@@ -170,6 +171,22 @@ func (p *Pipeline) ValidateDiff(ctx context.Context, unified []byte, validationS
 				touched[ent.QualifiedName] = ent.ID
 			}
 		}
+	}
+	// Stage 2 (framework-aware, P2.T35): a diff that touches a file
+	// declaring a framework producer (Route / EventPublisher /
+	// EventSubscriber / SchemaField / …) marks that producer touched —
+	// even when the diff names no function. This is the
+	// event-payload-mutation case: editing the `OrderCreated` struct in
+	// publisher.go must flag the `order.created` subscribers, but the
+	// added line is a struct field, not a `func`. The producer's Path
+	// was stamped by the framework EntityWriter from its anchored
+	// function's file, so file-equality is the join. Granularity is
+	// file-level here; the reverse-index expansion below adds
+	// function-level precision when the handler body itself is in the
+	// diff. (Dense single-file routers may over-flag at file
+	// granularity; documented as a v1 limitation.)
+	if err := p.addFileScopedFrameworkProducers(ctx, hunks, touched); err != nil {
+		return nil, err
 	}
 
 	// Stages 3, 3b: bounded refresh + pin validation_seq — implicit at the
@@ -637,6 +654,39 @@ type impactedRecord struct {
 	Dependents   []DependentRef // every dependent reachable from the producer
 }
 
+// addFileScopedFrameworkProducers mutates touched in place, adding
+// every framework-producer entity (Kind ∈ frameworkProducerKinds)
+// whose Path matches a file in the diff. The framework EntityWriter
+// stamps each producer's Path from its anchored function's file, so a
+// diff touching that file pulls the producer in even when the changed
+// lines are a struct field rather than a function declaration.
+func (p *Pipeline) addFileScopedFrameworkProducers(ctx context.Context, hunks []Hunk, touched map[string]string) error {
+	if p.Code == nil {
+		return nil
+	}
+	seen := map[string]struct{}{}
+	for _, h := range hunks {
+		if h.Path == "" {
+			continue
+		}
+		if _, dup := seen[h.Path]; dup {
+			continue
+		}
+		seen[h.Path] = struct{}{}
+		ents, err := p.Code.ListEntitiesByPath(ctx, h.Path)
+		if err != nil {
+			return err
+		}
+		for _, e := range ents {
+			if _, isProducer := frameworkProducerKinds[string(e.Kind)]; !isProducer {
+				continue
+			}
+			touched[e.QualifiedName] = e.ID
+		}
+	}
+	return nil
+}
+
 // expandTouchedViaReverseIndex walks the selector reverse index from
 // every diff-touched entity and adds any co-bound entity (typically a
 // framework producer such as EventPublisher / SchemaField / Route) to
@@ -755,6 +805,7 @@ func (p *Pipeline) computeImpactedSet(ctx context.Context, touchedIDs map[string
 					Kind:          string(peer.Kind),
 					ID:            peer.ID,
 					QualifiedName: peer.QualifiedName,
+					Path:          peer.Path,
 					Reason:        reason,
 				})
 				if _, seen := visited[peer.ID]; !seen {
@@ -823,9 +874,17 @@ func missingDependentUpdateFinding(diffSHA string, rec *impactedRecord, stale []
 	}
 	evidence := make([]EvidenceItem, 0, len(stale))
 	for _, d := range stale {
+		// Detail names the stale dependent by kind + linking key, and
+		// appends its declaring file when known so reviewers can jump
+		// straight to the source that needs the companion edit (the
+		// plan §4 demo's "Missing dependent updates:" file list).
+		detail := d.Kind + ":" + d.QualifiedName
+		if d.Path != "" {
+			detail += " (" + d.Path + ")"
+		}
 		evidence = append(evidence, EvidenceItem{
 			Kind:   FindingKindMissingDependentUpdate,
-			Detail: d.Kind + ":" + d.QualifiedName,
+			Detail: detail,
 		})
 	}
 	sev := severityForProducer(rec.ProducerKind, stale)
