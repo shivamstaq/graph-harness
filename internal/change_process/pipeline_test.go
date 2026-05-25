@@ -412,6 +412,40 @@ func TestPipeline_MissingDependentUpdate_EventPublisher(t *testing.T) {
 	}
 }
 
+// TestPipeline_MissingDependentUpdate_CoPublisher exercises the
+// EventPublisher→EventPublisher edge in frameworkProducerKinds: when
+// two services publish the same topic and one's payload changes, the
+// other publisher is flagged so the services keep their payloads in
+// agreement (GAP-002 — the edge was previously untested).
+func TestPipeline_MissingDependentUpdate_CoPublisher(t *testing.T) {
+	p, store, _, _ := newTestPipeline(t)
+	producerID := seedProducerWithTouch(t, store, "PublishOrder",
+		"EventPublisher", "kafka:order.created")
+	// A SECOND publisher of the same topic, in a different service,
+	// not touched by the diff.
+	seedDependent(t, store, "pub:svc-b", "EventPublisher", "kafka:order.created")
+
+	res, err := p.ValidateDiff(context.Background(),
+		[]byte(touchDiff("PublishOrder")), 10)
+	if err != nil {
+		t.Fatalf("ValidateDiff: %v", err)
+	}
+	f := findOne(t, res.Findings, "missing_dependent_update")
+	if f.Subject.EntityID != producerID {
+		t.Errorf("subject.entity_id = %q, want %q", f.Subject.EntityID, producerID)
+	}
+	if f.FrameworkContext == nil || len(f.FrameworkContext.Dependents) != 1 {
+		t.Fatalf("want exactly 1 co-publisher dependent, got %+v", f.FrameworkContext)
+	}
+	dep := f.FrameworkContext.Dependents[0]
+	if dep.Kind != "EventPublisher" || dep.ID != "pub:svc-b" {
+		t.Errorf("dependent = %+v, want the co-publisher pub:svc-b", dep)
+	}
+	if dep.Reason != "co-publishes event" {
+		t.Errorf("dependent reason = %q, want %q", dep.Reason, "co-publishes event")
+	}
+}
+
 func TestPipeline_MissingDependentUpdate_SchemaField(t *testing.T) {
 	p, store, _, _ := newTestPipeline(t)
 	producerID := seedProducerWithTouch(t, store, "UpdateEmail",

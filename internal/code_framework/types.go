@@ -28,6 +28,13 @@ const (
 	KindContractTest      EntityKind = "ContractTest"
 	KindGraphQLOperation  EntityKind = "GraphQLOperation"
 	KindMutation          EntityKind = "Mutation"
+	// Job / QueueConsumer / ConfigKey are part of the code.framework
+	// entity vocabulary (SPEC §2.3) and are declared in the manifest +
+	// type set so selectors and the pipeline can reference them, but
+	// the v1 extractor set ships no producer for them yet — they are
+	// RESERVED for a post-v1 extractor (cron/scheduler, worker-queue,
+	// and config-key extractors). The struct shapes + writer projection
+	// cases exist so adding those extractors is additive.
 	KindJob               EntityKind = "Job"
 	KindQueueConsumer     EntityKind = "QueueConsumer"
 	KindConfigKey         EntityKind = "ConfigKey"

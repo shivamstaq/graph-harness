@@ -247,18 +247,27 @@ func qualifiedNameFor(kind EntityKind, p map[string]any) string {
 		}
 		return transport + ":" + name
 	case KindContractTest:
-		topic := get("topic_name")
-		if topic == "" {
-			return get("name") // best-effort
+		// Event-scoped contract test: link to the Event family by the
+		// transport-prefixed key so stage-5 finds it as a dependent of
+		// the event payload change.
+		if topic := get("topic_name"); topic != "" {
+			if t := get("transport"); t != "" {
+				return t + ":" + topic
+			}
+			return "kafka:" + topic
 		}
-		// ContractTest links by topic; assume kafka transport by
-		// default (the extractor doesn't always carry transport for
-		// contract tests). If both topic and transport_hint are
-		// available, prefer the qualified form.
-		if t := get("transport"); t != "" {
-			return t + ":" + topic
+		// Route-scoped contract test: the route_ref carries a
+		// route_pattern anchor with the route PATH (the test referenced
+		// the path literal). Materialize the ContractTest keyed on that
+		// path so it is queryable. v1 limitation: stage-5 Route linking
+		// keys on the composite "<METHOD> <path>" QN, and the test only
+		// knows the path — method inference for route-contract-test →
+		// Route linkage is deferred post-v1. Topic-scoped linking (the
+		// common case) works fully.
+		if rp := selectorRefAnchorValue(p, "route_ref", "route_pattern"); rp != "" {
+			return rp
 		}
-		return "kafka:" + topic
+		return ""
 	case KindRoute:
 		method := get("method")
 		path := get("path_pattern")
@@ -390,6 +399,33 @@ func anchoredQualifiedName(p map[string]any) string {
 			continue
 		}
 		if k, _ := am["kind"].(string); k == "qualified_name" {
+			if v, _ := am["value"].(string); v != "" {
+				return v
+			}
+		}
+	}
+	return ""
+}
+
+// selectorRefAnchorValue extracts the value of the first anchor of
+// kind anchorKind from a named SelectorRef field (e.g. "route_ref")
+// in a payload. Returns "" when the field or anchor is absent. Used to
+// pull the route path out of a ContractTest's route_ref.
+func selectorRefAnchorValue(p map[string]any, field, anchorKind string) string {
+	ref, ok := p[field].(map[string]any)
+	if !ok {
+		return ""
+	}
+	anchors, ok := ref["anchors"].([]any)
+	if !ok {
+		return ""
+	}
+	for _, a := range anchors {
+		am, ok := a.(map[string]any)
+		if !ok {
+			continue
+		}
+		if k, _ := am["kind"].(string); k == anchorKind {
 			if v, _ := am["value"].(string); v != "" {
 				return v
 			}
