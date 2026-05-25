@@ -66,8 +66,16 @@ steps:
     assert:
       - { type: exit_code, expected: 0 }
       - { type: contains, value: "\"kind\":\"Route\"" }
-      # Raw nested paths surface — `/users` literal appears in the
-      # group-inner registrations.
-      - { type: contains, value: "/users" }
-      - { type: contains, value: "GET" }
-      - { type: contains, value: "POST" }
+      # Exactly the two group-inner registrations surface with their RAW
+      # nested paths — the extractor does NOT prepend the "/api" prefix
+      # (joining is deferred to P2 enrichment, gated separately). Asserting
+      # the full composite "<METHOD> /users" pins this contract: if the
+      # extractor ever silently prefix-joins, the qualified_name becomes
+      # "GET /api/users" and this assertion fails (the joined form is
+      # exercised by the gated -joined companion spec instead).
+      - { type: contains, value: "\"qualified_name\":\"GET /users\"" }
+      - { type: contains, value: "\"qualified_name\":\"POST /users\"" }
+      # And confirm the prefix is NOT yet joined in.
+      - { type: contains, value: "\"kind_tag\":\"GET\"" }
+      - { type: contains, value: "\"kind_tag\":\"POST\"" }
+      - { type: contains, value: "\"language_id\":\"go\"" }

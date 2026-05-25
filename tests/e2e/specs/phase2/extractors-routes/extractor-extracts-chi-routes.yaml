@@ -61,15 +61,24 @@ steps:
     command: graph-harness code list --batch --json --no-lsp
     assert:
       - { type: exit_code, expected: 0 }
-      # Five Route entities — paths in QualifiedName, methods in KindTag.
       - { type: contains, value: "\"kind\":\"Route\"" }
-      - { type: contains, value: "/api/orders" }
-      # Methods surface via kind_tag.
-      - { type: contains, value: "GET" }
-      - { type: contains, value: "POST" }
-      - { type: contains, value: "PUT" }
-      - { type: contains, value: "PATCH" }
-      - { type: contains, value: "DELETE" }
+      # Exactly the five registrations must materialize. Route entities
+      # use a COMPOSITE qualified_name "<METHOD> <path>" — asserting each
+      # full pair pins method+path together (a dropped, extra, or
+      # mis-pathed route fails the spec). The kind_tag carries the method.
+      - { type: contains, value: "\"qualified_name\":\"GET /api/orders/{id}\"" }
+      - { type: contains, value: "\"qualified_name\":\"POST /api/orders\"" }
+      - { type: contains, value: "\"qualified_name\":\"PUT /api/orders/{id}\"" }
+      - { type: contains, value: "\"qualified_name\":\"PATCH /api/orders/{id}\"" }
+      - { type: contains, value: "\"qualified_name\":\"DELETE /api/orders/{id}\"" }
+      # Methods surface via kind_tag, paired with the composite name above.
+      - { type: contains, value: "\"kind_tag\":\"GET\"" }
+      - { type: contains, value: "\"kind_tag\":\"POST\"" }
+      - { type: contains, value: "\"kind_tag\":\"PUT\"" }
+      - { type: contains, value: "\"kind_tag\":\"PATCH\"" }
+      - { type: contains, value: "\"kind_tag\":\"DELETE\"" }
+      # Routes are Go entities — guards against a wrong-language regression.
+      - { type: contains, value: "\"language_id\":\"go\"" }
 
   - name: extractors_list_includes_chi
     command: graph-harness extractors list

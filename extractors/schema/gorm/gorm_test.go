@@ -121,3 +121,21 @@ type Foo struct {
 		t.Errorf("non-model emitted %d events", len(events))
 	}
 }
+
+func TestSnakeCase_AcronymBoundaries(t *testing.T) {
+	cases := map[string]string{
+		"ID":         "id",
+		"UserID":     "user_id",
+		"AuthorID":   "author_id",
+		"CreatedAt":  "created_at",
+		"HTTPServer": "http_server",
+		"Name":       "name",
+		"URL":        "url",
+		"APIKey":     "api_key",
+	}
+	for in, want := range cases {
+		if got := snakeCase(in); got != want {
+			t.Errorf("snakeCase(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

@@ -56,10 +56,18 @@ steps:
     assert:
       - { type: exit_code, expected: 0 }
       - { type: contains, value: "\"kind\":\"EventSubscriber\"" }
-      # Three subscriptions surface — one explicit + two from a topics[] list.
-      - { type: contains, value: "order.created" }
-      - { type: contains, value: "audit.events" }
-      - { type: contains, value: "user.signed_in" }
+      # Three subscriptions surface as TypeScript EventSubscriber rows —
+      # one from the singular `topic:` form and TWO fanned out of the
+      # `topics: [...]` array. The composite "<transport>:<event_name>"
+      # (kafka:<topic>) qualified_name pins transport+topic together, so
+      # losing the array-fan-out or mangling a topic fails the spec.
+      - { type: contains, value: "\"kind\":\"EventSubscriber\",\"language_id\":\"typescript\",\"qualified_name\":\"kafka:order.created\"" }
+      - { type: contains, value: "\"kind\":\"EventSubscriber\",\"language_id\":\"typescript\",\"qualified_name\":\"kafka:audit.events\"" }
+      - { type: contains, value: "\"kind\":\"EventSubscriber\",\"language_id\":\"typescript\",\"qualified_name\":\"kafka:user.signed_in\"" }
+      # Each subscription pairs with a framework-level Event node.
+      - { type: contains, value: "\"kind\":\"Event\",\"language_id\":\"framework\",\"qualified_name\":\"kafka:order.created\"" }
+      - { type: contains, value: "\"kind\":\"Event\",\"language_id\":\"framework\",\"qualified_name\":\"kafka:audit.events\"" }
+      - { type: contains, value: "\"kind\":\"Event\",\"language_id\":\"framework\",\"qualified_name\":\"kafka:user.signed_in\"" }
 
   - name: extractors_list_includes_kafka_ts
     command: graph-harness extractors list

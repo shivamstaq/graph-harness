@@ -70,10 +70,22 @@ steps:
     assert:
       - { type: exit_code, expected: 0 }
       - { type: contains, value: "\"kind\":\"EventPublisher\"" }
-      # Three topics surface as EventPublisher rows.
-      - { type: contains, value: "order.created" }
-      - { type: contains, value: "inventory.updated" }
-      - { type: contains, value: "payment.captured" }
+      # All three topics must surface as Go EventPublisher rows. The
+      # qualified_name uses the COMPOSITE "<transport>:<event_name>" form
+      # (kafka:<topic>) — asserting the full pair pins both transport and
+      # topic, so a dropped publisher, a wrong transport tag, or a mangled
+      # topic name fails the spec. Covers all three producer styles:
+      # segmentio Message.Topic, writer-pinned WriterConfig.Topic, and the
+      # confluent TopicPartition.Topic pointer.
+      - { type: contains, value: "\"kind\":\"EventPublisher\",\"language_id\":\"go\",\"qualified_name\":\"kafka:order.created\"" }
+      - { type: contains, value: "\"kind\":\"EventPublisher\",\"language_id\":\"go\",\"qualified_name\":\"kafka:inventory.updated\"" }
+      - { type: contains, value: "\"kind\":\"EventPublisher\",\"language_id\":\"go\",\"qualified_name\":\"kafka:payment.captured\"" }
+      # Each publisher pairs with a framework-level Event node on the same
+      # transport:topic join key (the cross-language pubsub relation walks
+      # these Event nodes).
+      - { type: contains, value: "\"kind\":\"Event\",\"language_id\":\"framework\",\"qualified_name\":\"kafka:order.created\"" }
+      - { type: contains, value: "\"kind\":\"Event\",\"language_id\":\"framework\",\"qualified_name\":\"kafka:inventory.updated\"" }
+      - { type: contains, value: "\"kind\":\"Event\",\"language_id\":\"framework\",\"qualified_name\":\"kafka:payment.captured\"" }
 
   - name: extractors_list_includes_kafka
     command: graph-harness extractors list

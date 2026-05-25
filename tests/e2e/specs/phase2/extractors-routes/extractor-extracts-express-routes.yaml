@@ -60,11 +60,23 @@ steps:
     assert:
       - { type: exit_code, expected: 0 }
       - { type: contains, value: "\"kind\":\"Route\"" }
-      - { type: contains, value: "/api/users" }
-      - { type: contains, value: "GET" }
-      - { type: contains, value: "POST" }
-      - { type: contains, value: "PUT" }
-      - { type: contains, value: "DELETE" }
+      # All five Express registrations must materialize with the COMPOSITE
+      # "<METHOD> <path>" qualified_name. Express path params use the
+      # `:id` form (vs chi's `{id}`) — asserting the exact composite pins
+      # both the method and the framework-specific path syntax, so a
+      # dropped route or a mangled param notation fails the spec.
+      - { type: contains, value: "\"qualified_name\":\"GET /api/users\"" }
+      - { type: contains, value: "\"qualified_name\":\"GET /api/users/:id\"" }
+      - { type: contains, value: "\"qualified_name\":\"POST /api/users\"" }
+      - { type: contains, value: "\"qualified_name\":\"PUT /api/users/:id\"" }
+      - { type: contains, value: "\"qualified_name\":\"DELETE /api/users/:id\"" }
+      # Methods surface via kind_tag.
+      - { type: contains, value: "\"kind_tag\":\"GET\"" }
+      - { type: contains, value: "\"kind_tag\":\"POST\"" }
+      - { type: contains, value: "\"kind_tag\":\"PUT\"" }
+      - { type: contains, value: "\"kind_tag\":\"DELETE\"" }
+      # Express routes are attributed to TypeScript.
+      - { type: contains, value: "\"language_id\":\"typescript\"" }
 
   - name: extractors_list_includes_express
     command: graph-harness extractors list

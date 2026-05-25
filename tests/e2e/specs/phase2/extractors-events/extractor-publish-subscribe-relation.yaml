@@ -98,11 +98,15 @@ steps:
     command: graph-harness code list --batch --json --no-lsp
     assert:
       - { type: exit_code, expected: 0 }
-      - { type: contains, value: "\"kind\":\"EventPublisher\"" }
-      - { type: contains, value: "\"kind\":\"EventSubscriber\"" }
-      # The shared topic surfaces on all three rows.
-      - { type: contains, value: "order.created" }
-      # All three languages are represented.
-      - { type: contains, value: "\"language_id\":\"go\"" }
-      - { type: contains, value: "\"language_id\":\"typescript\"" }
-      - { type: contains, value: "\"language_id\":\"python\"" }
+      # Exactly one publisher + two subscribers + one framework Event node,
+      # ALL sharing the kafka:order.created join key. Each row is pinned by
+      # the full kind+language+composite-qualified_name triple so the join
+      # key cannot drift per language: the Go publisher, the TS subscriber,
+      # and the Py subscriber must all agree on "kafka:order.created", and
+      # a single framework-level Event node must materialize for them to
+      # join on. Mangling the topic in ANY one language breaks its triple.
+      - { type: contains, value: "\"kind\":\"EventPublisher\",\"language_id\":\"go\",\"qualified_name\":\"kafka:order.created\"" }
+      - { type: contains, value: "\"kind\":\"EventSubscriber\",\"language_id\":\"typescript\",\"qualified_name\":\"kafka:order.created\"" }
+      - { type: contains, value: "\"kind\":\"EventSubscriber\",\"language_id\":\"python\",\"qualified_name\":\"kafka:order.created\"" }
+      # The shared framework Event node is the actual join target.
+      - { type: contains, value: "\"kind\":\"Event\",\"language_id\":\"framework\",\"qualified_name\":\"kafka:order.created\"" }

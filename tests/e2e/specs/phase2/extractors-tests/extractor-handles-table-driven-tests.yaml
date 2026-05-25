@@ -60,10 +60,13 @@ steps:
     assert:
       - { type: exit_code, expected: 0 }
       - { type: contains, value: "\"kind\":\"Test\"" }
-      # Parent test name surfaces.
-      - { type: contains, value: "TestCancelOrder" }
-      # All three literal sub-case names are recovered as their own
-      # Test rows (see findGoTests sub-test attribution comment).
-      - { type: contains, value: "happy" }
-      - { type: contains, value: "already-cancelled" }
-      - { type: contains, value: "not-found" }
+      # The parent Test PLUS one sub-Test per literal t.Run case
+      # materialize as FOUR Test rows. Sub-tests use the COMPOSITE
+      # "<Parent>/<subcase>" qualified_name (mirroring `go test -run`
+      # path syntax), NOT a bare sub-case string — asserting the full
+      # composite pins the parent->subcase attribution, so a dropped
+      # sub-case or a sub-test that loses its parent prefix fails the spec.
+      - { type: contains, value: "\"kind\":\"Test\",\"language_id\":\"go\",\"qualified_name\":\"TestCancelOrder\",\"path\":\"orders/cancel_test.go\",\"kind_tag\":\"go_test\"" }
+      - { type: contains, value: "\"kind\":\"Test\",\"language_id\":\"go\",\"qualified_name\":\"TestCancelOrder/happy\",\"path\":\"orders/cancel_test.go\",\"kind_tag\":\"go_test\"" }
+      - { type: contains, value: "\"kind\":\"Test\",\"language_id\":\"go\",\"qualified_name\":\"TestCancelOrder/already-cancelled\",\"path\":\"orders/cancel_test.go\",\"kind_tag\":\"go_test\"" }
+      - { type: contains, value: "\"kind\":\"Test\",\"language_id\":\"go\",\"qualified_name\":\"TestCancelOrder/not-found\",\"path\":\"orders/cancel_test.go\",\"kind_tag\":\"go_test\"" }

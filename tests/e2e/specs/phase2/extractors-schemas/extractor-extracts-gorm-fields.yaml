@@ -57,14 +57,25 @@ steps:
     command: graph-harness code list --batch --json --no-lsp
     assert:
       - { type: exit_code, expected: 0 }
-      - { type: contains, value: "\"kind\":\"Schema\"" }
-      - { type: contains, value: "\"kind\":\"SchemaField\"" }
-      # User maps via TableName() to "users"; Post defaults to "posts".
-      - { type: contains, value: "users" }
-      - { type: contains, value: "posts" }
-      - { type: contains, value: "email" }
-      - { type: contains, value: "name" }
-      - { type: contains, value: "title" }
+      # Two Schema rows tagged framework=gorm. User maps via its
+      # TableName() override to "users"; Post falls back to the pluralized
+      # default "posts". Pinning qualified_name+kind_tag asserts the
+      # TableName() resolution and pluralization both work.
+      - { type: contains, value: "\"kind\":\"Schema\",\"language_id\":\"unknown\",\"qualified_name\":\"users\",\"path\":\"models/models.go\",\"kind_tag\":\"gorm\"" }
+      - { type: contains, value: "\"kind\":\"Schema\",\"language_id\":\"unknown\",\"qualified_name\":\"posts\",\"path\":\"models/models.go\",\"kind_tag\":\"gorm\"" }
+      # Exactly the seven mapped columns materialize. Field names are
+      # snake_cased with acronym handling (ID -> id, CreatedAt ->
+      # created_at) unless an explicit gorm:"column:..." tag overrides
+      # (email, name, author_id). The Internal column tagged gorm:"-"
+      # is SKIPPED — there is no `internal` SchemaField row. Each
+      # expected field is pinned, so dropping a column or leaking the
+      # gorm:"-" field fails.
+      - { type: contains, value: "\"kind\":\"SchemaField\",\"language_id\":\"unknown\",\"qualified_name\":\"id\"" }
+      - { type: contains, value: "\"kind\":\"SchemaField\",\"language_id\":\"unknown\",\"qualified_name\":\"email\"" }
+      - { type: contains, value: "\"kind\":\"SchemaField\",\"language_id\":\"unknown\",\"qualified_name\":\"name\"" }
+      - { type: contains, value: "\"kind\":\"SchemaField\",\"language_id\":\"unknown\",\"qualified_name\":\"created_at\"" }
+      - { type: contains, value: "\"kind\":\"SchemaField\",\"language_id\":\"unknown\",\"qualified_name\":\"title\"" }
+      - { type: contains, value: "\"kind\":\"SchemaField\",\"language_id\":\"unknown\",\"qualified_name\":\"author_id\"" }
 
   - name: extractors_list_includes_gorm
     command: graph-harness extractors list

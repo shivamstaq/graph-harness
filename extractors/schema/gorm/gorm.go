@@ -343,12 +343,27 @@ func defaultTableName(name string) string {
 	}
 }
 
-// snakeCase converts CamelCase to snake_case.
+// snakeCase converts CamelCase to snake_case, handling acronym runs
+// the way GORM's NamingStrategy does: an underscore is inserted before
+// an uppercase rune only at a real word boundary —
+//
+//   - lower/digit → upper  (userID    → user_id, the I)
+//   - upper → upper-then-lower (HTTPServer → http_server, the S)
+//
+// so consecutive-uppercase initialisms stay together:
+// ID → id, UserID → user_id, HTTPServer → http_server. The previous
+// naive "underscore before every uppercase" produced i_d / user_i_d /
+// h_t_t_p_server.
 func snakeCase(s string) string {
+	rs := []rune(s)
 	var b strings.Builder
-	for i, r := range s {
+	for i, r := range rs {
 		if i > 0 && unicode.IsUpper(r) {
-			b.WriteByte('_')
+			prevUpper := unicode.IsUpper(rs[i-1])
+			nextLower := i+1 < len(rs) && unicode.IsLower(rs[i+1])
+			if !prevUpper || nextLower {
+				b.WriteByte('_')
+			}
 		}
 		b.WriteRune(unicode.ToLower(r))
 	}

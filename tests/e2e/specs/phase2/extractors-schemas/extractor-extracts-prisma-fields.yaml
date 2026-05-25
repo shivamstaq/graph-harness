@@ -59,16 +59,23 @@ steps:
     command: graph-harness code list --batch --json --no-lsp
     assert:
       - { type: exit_code, expected: 0 }
-      # Two Schema rows (one per model). The relation field `posts`
-      # on User is skipped per the extractor's contract.
-      - { type: contains, value: "\"kind\":\"Schema\"" }
-      - { type: contains, value: "\"kind\":\"SchemaField\"" }
-      # Model + field names surface in qualified_name.
-      - { type: contains, value: "User" }
-      - { type: contains, value: "Post" }
-      - { type: contains, value: "email" }
-      - { type: contains, value: "title" }
-      - { type: contains, value: "authorId" }
+      # Two Schema rows, one per model, tagged framework=prisma. Asserting
+      # kind+qualified_name+kind_tag together pins the model names and the
+      # framework attribution.
+      - { type: contains, value: "\"kind\":\"Schema\",\"language_id\":\"unknown\",\"qualified_name\":\"User\",\"path\":\"prisma/schema.prisma\",\"kind_tag\":\"prisma\"" }
+      - { type: contains, value: "\"kind\":\"Schema\",\"language_id\":\"unknown\",\"qualified_name\":\"Post\",\"path\":\"prisma/schema.prisma\",\"kind_tag\":\"prisma\"" }
+      # Exactly the seven SCALAR fields materialize (User: id, email, name,
+      # createdAt; Post: id, title, authorId). The relation field `posts`
+      # (Post[]) on User is correctly SKIPPED — there is no `posts`
+      # SchemaField row. Each field is pinned as a SchemaField with its
+      # exact qualified_name, so a dropped field or a leaked relation field
+      # fails the spec.
+      - { type: contains, value: "\"kind\":\"SchemaField\",\"language_id\":\"unknown\",\"qualified_name\":\"id\"" }
+      - { type: contains, value: "\"kind\":\"SchemaField\",\"language_id\":\"unknown\",\"qualified_name\":\"email\"" }
+      - { type: contains, value: "\"kind\":\"SchemaField\",\"language_id\":\"unknown\",\"qualified_name\":\"name\"" }
+      - { type: contains, value: "\"kind\":\"SchemaField\",\"language_id\":\"unknown\",\"qualified_name\":\"createdAt\"" }
+      - { type: contains, value: "\"kind\":\"SchemaField\",\"language_id\":\"unknown\",\"qualified_name\":\"title\"" }
+      - { type: contains, value: "\"kind\":\"SchemaField\",\"language_id\":\"unknown\",\"qualified_name\":\"authorId\"" }
 
   - name: extractors_list_includes_prisma
     command: graph-harness extractors list

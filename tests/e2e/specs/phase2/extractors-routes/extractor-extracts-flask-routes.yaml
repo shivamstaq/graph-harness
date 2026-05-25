@@ -67,13 +67,27 @@ steps:
     assert:
       - { type: exit_code, expected: 0 }
       - { type: contains, value: "\"kind\":\"Route\"" }
-      - { type: contains, value: "/health" }
-      - { type: contains, value: "/login" }
-      - { type: contains, value: "/orders" }
-      - { type: contains, value: "GET" }
-      - { type: contains, value: "POST" }
-      - { type: contains, value: "PUT" }
-      - { type: contains, value: "PATCH" }
+      # Flask fans methods=[...] out into one Route per method, so the
+      # four @app.route decorators produce SEVEN composite rows. Each is
+      # pinned by its exact "<METHOD> <path>" qualified_name, so a dropped
+      # method (e.g. losing one of GET/PUT/PATCH on /orders/<id>) or a
+      # mangled path fails the spec. `/health` with no methods=[] defaults
+      # to GET. The `<int:order_id>` converter is JSON-escaped in stdout
+      # (`<…>`), matched here via the literal backslash sequence.
+      - { type: contains, value: "\"qualified_name\":\"GET /health\"" }
+      - { type: contains, value: "\"qualified_name\":\"POST /login\"" }
+      - { type: contains, value: "\"qualified_name\":\"GET /orders\"" }
+      - { type: contains, value: "\"qualified_name\":\"POST /orders\"" }
+      - { type: contains, value: "\"qualified_name\":\"GET /orders/\\u003cint:order_id\\u003e\"" }
+      - { type: contains, value: "\"qualified_name\":\"PUT /orders/\\u003cint:order_id\\u003e\"" }
+      - { type: contains, value: "\"qualified_name\":\"PATCH /orders/\\u003cint:order_id\\u003e\"" }
+      # Methods surface via kind_tag.
+      - { type: contains, value: "\"kind_tag\":\"GET\"" }
+      - { type: contains, value: "\"kind_tag\":\"POST\"" }
+      - { type: contains, value: "\"kind_tag\":\"PUT\"" }
+      - { type: contains, value: "\"kind_tag\":\"PATCH\"" }
+      # Flask routes are attributed to Python.
+      - { type: contains, value: "\"language_id\":\"python\"" }
 
   - name: extractors_list_includes_flask
     command: graph-harness extractors list
