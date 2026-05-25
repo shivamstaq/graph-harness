@@ -656,35 +656,60 @@ type impactedRecord struct {
 
 // addFileScopedFrameworkProducers mutates touched in place, adding
 // every framework-producer entity (Kind ∈ frameworkProducerKinds)
-// whose Path matches a file in the diff. The framework EntityWriter
-// stamps each producer's Path from its anchored function's file, so a
-// diff touching that file pulls the producer in even when the changed
-// lines are a struct field rather than a function declaration.
+// declared in a DIRECTORY the diff touches. The framework EntityWriter
+// stamps each producer's Path from its anchored function's file; a diff
+// touching any file in the same directory pulls the producer in.
+//
+// Directory (not exact-file) granularity is deliberate: the canonical
+// event-payload-mutation case edits the payload struct
+// (services/order/event.go) while the EventPublisher anchors on the
+// publish function in a SIBLING file (services/order/publisher.go).
+// Matching at the package/directory level links the two. The
+// reverse-index expansion (expandTouchedViaReverseIndex) still adds
+// exact function-level precision when the handler body itself is in the
+// diff. Granularity is documented as a v1 limitation — a dense
+// single-directory service may over-flag; precision improves when the
+// payload-type → event linkage lands post-v1.
 func (p *Pipeline) addFileScopedFrameworkProducers(ctx context.Context, hunks []Hunk, touched map[string]string) error {
 	if p.Code == nil {
 		return nil
 	}
-	seen := map[string]struct{}{}
+	touchedDirs := map[string]struct{}{}
 	for _, h := range hunks {
 		if h.Path == "" {
 			continue
 		}
-		if _, dup := seen[h.Path]; dup {
+		touchedDirs[pathDir(h.Path)] = struct{}{}
+	}
+	if len(touchedDirs) == 0 {
+		return nil
+	}
+	ents, err := p.Code.ListEntities(ctx, code_core.ListFilter{})
+	if err != nil {
+		return err
+	}
+	for _, e := range ents {
+		if _, isProducer := frameworkProducerKinds[string(e.Kind)]; !isProducer {
 			continue
 		}
-		seen[h.Path] = struct{}{}
-		ents, err := p.Code.ListEntitiesByPath(ctx, h.Path)
-		if err != nil {
-			return err
+		if e.Path == "" {
+			continue
 		}
-		for _, e := range ents {
-			if _, isProducer := frameworkProducerKinds[string(e.Kind)]; !isProducer {
-				continue
-			}
+		if _, hit := touchedDirs[pathDir(e.Path)]; hit {
 			touched[e.QualifiedName] = e.ID
 		}
 	}
 	return nil
+}
+
+// pathDir returns the directory portion of a workspace-relative,
+// slash-separated path ("services/order/event.go" → "services/order").
+// A path with no slash (a root-level file) yields ".".
+func pathDir(p string) string {
+	if i := strings.LastIndexByte(p, '/'); i >= 0 {
+		return p[:i]
+	}
+	return "."
 }
 
 // expandTouchedViaReverseIndex walks the selector reverse index from

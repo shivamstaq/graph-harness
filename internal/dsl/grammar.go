@@ -231,6 +231,12 @@ var ghLexer = lexer.MustSimple([]lexer.SimpleRule{
 	{Name: "Ident", Pattern: `[a-zA-Z_][a-zA-Z0-9_\.]*`},
 	{Name: "String", Pattern: `"(\\"|[^"])*"`},
 	{Name: "Punct", Pattern: `[\{\}\(\)\[\],:=;]`},
+	// Dash tokenizes the Cypher relationship syntax `-[:rel]->` inside
+	// query bodies (e.g. `(a)-[:publishes_event]->(b)`). The Query body
+	// captures opaque tokens (`@( ~"}" )*`) so the parser ACCEPTS the
+	// Cypher shape; full Cypher-to-Datalog lowering + execution lands
+	// in P3 (SPEC §6.17). Placed after Arrow so `->` still wins.
+	{Name: "Dash", Pattern: `-`},
 	{Name: "whitespace", Pattern: `[ \t\r\n]+`},
 })
 

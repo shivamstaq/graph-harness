@@ -12,7 +12,6 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/shivamstaq/graph-harness/internal/code_core"
 	"github.com/shivamstaq/graph-harness/internal/code_framework"
 	"github.com/shivamstaq/graph-harness/internal/daemon"
 	"github.com/shivamstaq/graph-harness/internal/extract"
@@ -633,27 +632,17 @@ func newDaemonServeCmd() *cobra.Command {
 				return fmt.Errorf("dispatcher start: %w", err)
 			}
 			defer func() { _ = disp.Stop(context.Background()) }()
-			// Cold-state catch-up — enumerate File entities and
-			// route synthetic FileChanged events through the
-			// dispatcher. Best-effort; logged but non-fatal.
-			if files, err := res.Code.ListEntities(ctx, code_core.ListFilter{}); err == nil {
-				paths := make([]string, 0, len(files))
-				seen := map[string]struct{}{}
-				for _, e := range files {
-					if e.Kind != code_core.KindFile || e.Path == "" {
-						continue
-					}
-					if _, dup := seen[e.Path]; dup {
-						continue
-					}
-					seen[e.Path] = struct{}{}
-					paths = append(paths, e.Path)
-				}
-				if catchErr := disp.CatchUp(ctx, paths); catchErr != nil {
+			// Cold-state catch-up — enumerate indexed source files +
+			// non-source framework files (schema.prisma, *.sql, …) and
+			// route synthetic FileChanged events through the dispatcher
+			// so framework entities materialize on startup. Best-effort;
+			// logged but non-fatal.
+			if paths, err := frameworkCatchUpPaths(ctx, ws, res.Code); err == nil {
+				if catchErr := catchUpStable(ctx, disp, paths); catchErr != nil {
 					fmt.Fprintf(cmd.ErrOrStderr(), "[extractors] CatchUp: %v\n", catchErr)
 				}
 			} else {
-				fmt.Fprintf(cmd.ErrOrStderr(), "[extractors] ListEntities for catch-up: %v\n", err)
+				fmt.Fprintf(cmd.ErrOrStderr(), "[extractors] catch-up path enumeration: %v\n", err)
 			}
 
 			// idle-timeout watcher

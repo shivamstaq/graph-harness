@@ -69,12 +69,14 @@ steps:
       - { type: contains, value: "CreateUser" }
       - { type: contains, value: "DeleteUser" }
 
-  - name: route_qualified_name_carries_path_for_reverse_lookup
-    # The reverse index (entity → bound_selectors[]) flows via P2.M03;
-    # at minimum the Route row's qualified_name must equal the path
-    # pattern so a `code list --qualified-name "/v1/users/{id}"`
-    # filter finds the Route by path.
-    command: graph-harness code list --batch --qualified-name "/v1/users/{id}" --json --no-lsp
+  - name: route_qualified_name_carries_method_and_path
+    # Route entities use a COMPOSITE qualified name "<METHOD> <path>"
+    # (the change.process pipeline's shared linking key joins a route
+    # to its handler + contract tests). A --qualified-name filter for
+    # the composite form finds the Route; the route_pattern anchor
+    # (internal/semantic_overlay/anchors/route.go) globs the path
+    # portion for path-only selectors.
+    command: graph-harness code list --batch --qualified-name "GET /v1/users/{id}" --json --no-lsp
     assert:
       - { type: exit_code, expected: 0 }
-      - { type: contains, value: "/v1/users/{id}" }
+      - { type: contains, value: "GET /v1/users/{id}" }

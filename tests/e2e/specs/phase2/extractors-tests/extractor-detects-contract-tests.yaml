@@ -21,6 +21,40 @@ setup:
     assert:
       - { type: exit_code, expected: 0 }
 
+  # A ContractTest is only emitted when a test's topic/route literal
+  # matches a KNOWN Event/Route (the test extractor links the test to
+  # an existing framework entity). The fixture therefore ships a Kafka
+  # publisher (order.created) + a chi route (POST /api/payments) so the
+  # two contract tests below have producers to bind to.
+  - name: write_producers
+    command: |
+      sh -c 'mkdir -p internal/events internal/api && cat > internal/events/publisher.go <<"GOEOF"
+      package events
+
+      import "github.com/segmentio/kafka-go"
+
+      func PublishOrderCreated(w *kafka.Writer) error {
+        return w.WriteMessages(nil, kafka.Message{Topic: "order.created"})
+      }
+      GOEOF
+      cat > internal/api/routes.go <<"GOEOF"
+      package api
+
+      import (
+        "net/http"
+
+        "github.com/go-chi/chi/v5"
+      )
+
+      func Register(r chi.Router) {
+        r.Post("/api/payments", CreatePayment)
+      }
+
+      func CreatePayment(w http.ResponseWriter, req *http.Request) {}
+      GOEOF'
+    assert:
+      - { type: exit_code, expected: 0 }
+
   - name: write_go_contract_test_fixture
     command: |
       sh -c 'mkdir -p tests/contracts && cat > tests/contracts/order_created_test.go <<"GOEOF"

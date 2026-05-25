@@ -10,18 +10,21 @@ import (
 
 // Event-family anchor evaluators target code.framework Event,
 // EventPublisher, EventSubscriber, and Topic-bearing Event entities.
-// Pass 1 extractors materialize them into the shared code.core store
-// with:
+// The code_framework EntityWriter materializes them into the shared
+// code.core store with a TRANSPORT-PREFIXED qualified name so the
+// change.process pipeline can link publishers and subscribers by a
+// per-transport shared key:
 //
-//	Event           Kind="Event"          QualifiedName=event_name
-//	EventPublisher  Kind="EventPublisher" QualifiedName=event_name
-//	EventSubscriber Kind="EventSubscriber" QualifiedName=event_name
-//	Topic-bearing   Kind="Event"          QualifiedName=topic_name,
-//	                                      KindTag in {"topic:kafka",
-//	                                                  "topic:nats", ...}
+//	Event           Kind="Event"          QualifiedName="<transport>:<event_name>"
+//	EventPublisher  Kind="EventPublisher" QualifiedName="<transport>:<event_name>"
+//	EventSubscriber Kind="EventSubscriber" QualifiedName="<transport>:<event_name>"
+//	                                      KindTag="topic:<transport>" (Event only)
 //
-// The Pass 0.5 evaluators rely on those slot conventions without
-// querying a separate framework store.
+// The event_name anchor is transport-agnostic, so the evaluator
+// matches against the event-name PORTION of the qualified name (the
+// substring after the first ":") as well as the whole value, so a
+// selector written `anchor event_name "order.created"` binds the
+// "kafka:order.created" rows.
 
 // EventName matches Event-family entities whose name equals the
 // anchor's value (case-sensitive eq). Used to pin a selector to a
@@ -64,7 +67,7 @@ func (EventName) Evaluate(ctx context.Context, a *dsl.Anchor, store Lookup) ([]M
 		if _, ok := eventFamilyKinds[string(e.Kind)]; !ok {
 			continue
 		}
-		if e.QualifiedName != want {
+		if e.QualifiedName != want && eventNamePart(e.QualifiedName) != want {
 			continue
 		}
 		out = append(out, matchFromEntity(e, ConfidenceEventName,
@@ -114,7 +117,7 @@ func (TopicName) Evaluate(ctx context.Context, a *dsl.Anchor, store Lookup) ([]M
 		if !hasTopicPrefix(e.KindTag) {
 			continue
 		}
-		if e.QualifiedName != want {
+		if e.QualifiedName != want && eventNamePart(e.QualifiedName) != want {
 			continue
 		}
 		out = append(out, matchFromEntity(e, ConfidenceTopicName,
@@ -124,6 +127,20 @@ func (TopicName) Evaluate(ctx context.Context, a *dsl.Anchor, store Lookup) ([]M
 		return out[i].EntityID < out[j].EntityID
 	})
 	return out, nil
+}
+
+// eventNamePart returns the event-name portion of a transport-prefixed
+// qualified name ("kafka:order.created" → "order.created"). When the
+// qualified name carries no transport prefix it is returned unchanged,
+// so the evaluator stays correct for both the composite convention and
+// any future bare-name rows.
+func eventNamePart(qn string) string {
+	for i := 0; i < len(qn); i++ {
+		if qn[i] == ':' {
+			return qn[i+1:]
+		}
+	}
+	return qn
 }
 
 // hasTopicPrefix reports whether tag begins with the canonical

@@ -123,9 +123,13 @@ setup:
       sh -c 'mkdir -p tests/contract && cat > tests/contract/order_created.spec.ts <<"JESTEOF"
       import { describe, it, expect } from "@jest/globals";
 
+      const TOPIC = "order.created";
+
       describe("order_created_contract", () => {
-        it("validates the OrderCreated payload shape for order.created", () => {
+        it("validates the OrderCreated payload shape", () => {
+          const topic = TOPIC;
           const sample = { OrderID: "o1", CustomerID: "c1", Amount: 19.95 };
+          expect(topic).toBe("order.created");
           expect(sample.OrderID).toBe("o1");
         });
       });
@@ -137,7 +141,6 @@ setup:
     command: |
       sh -c 'mkdir -p .graph-harness/overlay && cat > .graph-harness/overlay/order_event.gh <<"GHEOF"
       selector OrderCreatedEvent {
-        unique
         anchor event_name "order.created"
       }
 

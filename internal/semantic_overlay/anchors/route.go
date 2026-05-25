@@ -11,17 +11,19 @@ import (
 )
 
 // Route-family anchor evaluators target code.framework Route entities.
-// Pass 1 extractors materialize Route entities into the shared
-// code.core store with:
+// The code_framework EntityWriter materializes Route entities into the
+// shared code.core store with a COMPOSITE qualified name so the
+// change.process pipeline links a route to its handler + contract
+// tests by a single key:
 //
 //	Entity.Kind          = "Route"
-//	Entity.QualifiedName = the route path pattern (e.g. "/v1/orders/:id")
+//	Entity.QualifiedName = "<METHOD> <path>" (e.g. "GET /v1/orders/:id")
 //	Entity.KindTag       = the HTTP method (uppercase, e.g. "GET")
 //
-// The Pass 0.5 evaluators consume that convention without querying a
-// separate framework store; production wiring keeps every code.framework
-// entity in the same Lookup the existing anchors already traverse so
-// the resolver's ladder remains a single linear sweep per selector.
+// route_pattern globs against the PATH PORTION of the qualified name
+// (the substring after the first space) so a selector written
+// `anchor route_pattern "/v1/orders/**"` binds the "GET /v1/orders/:id"
+// row; route_method matches KindTag.
 
 // RoutePattern matches Route entities whose path pattern satisfies a
 // doublestar glob (SPEC §3.1 structural family). A glob over routes is
@@ -58,9 +60,10 @@ func (RoutePattern) Evaluate(ctx context.Context, a *dsl.Anchor, store Lookup) (
 		if string(e.Kind) != "Route" {
 			continue
 		}
-		ok, err := doublestar.PathMatch(pattern, e.QualifiedName)
+		path := routePathPart(e.QualifiedName)
+		ok, err := doublestar.PathMatch(pattern, path)
 		if err != nil {
-			return nil, fmt.Errorf("route_pattern: match %q vs %q: %w", pattern, e.QualifiedName, err)
+			return nil, fmt.Errorf("route_pattern: match %q vs %q: %w", pattern, path, err)
 		}
 		if ok {
 			out = append(out, matchFromEntity(e, ConfidenceRoutePattern,
@@ -71,6 +74,18 @@ func (RoutePattern) Evaluate(ctx context.Context, a *dsl.Anchor, store Lookup) (
 		return out[i].QualifiedName < out[j].QualifiedName
 	})
 	return out, nil
+}
+
+// routePathPart returns the path portion of a composite Route
+// qualified name ("GET /v1/orders/:id" → "/v1/orders/:id"). A bare
+// path with no method prefix is returned unchanged.
+func routePathPart(qn string) string {
+	for i := 0; i < len(qn); i++ {
+		if qn[i] == ' ' {
+			return qn[i+1:]
+		}
+	}
+	return qn
 }
 
 // RouteMethod matches Route entities whose HTTP method equals the

@@ -52,7 +52,7 @@ enabled:
   # under tests/e2e/specs/phase2/ are authored and gated SKIP until
   # then; the bench (which seeds entities directly) is the only
   # green end-to-end exercise of the missing_dependent_update path.
-  p2-framework-extractors: false
+  p2-framework-extractors: true
   # OpenAPI extractor is post-v1 per plan/02-framework-extractors.md §6
   # ("Beyond the v1 extractor set ... — post-v1"). Spec authored ahead
   # under tests/e2e/specs/phase2/extractors-schemas/ — flip to true

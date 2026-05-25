@@ -6,13 +6,17 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
 	_ "modernc.org/sqlite" // SQLite driver
 
 	"github.com/shivamstaq/graph-harness/internal/code_core"
+	"github.com/shivamstaq/graph-harness/internal/code_framework"
 	"github.com/shivamstaq/graph-harness/internal/daemon"
 	"github.com/shivamstaq/graph-harness/internal/extract"
 	"github.com/shivamstaq/graph-harness/internal/facts"
@@ -126,7 +130,160 @@ func indexWorkspaceCodeWithOptions(ctx context.Context, ws *daemon.Workspace, st
 	if log != nil {
 		seq = log.LastSeq()
 	}
-	return orch.IndexAll(ctx, seq)
+	if err := orch.IndexAll(ctx, seq); err != nil {
+		return err
+	}
+	// After code.core indexing, run the framework extractors once so
+	// code.framework entities (Route / EventPublisher / SchemaField /
+	// …) materialize in the SAME in-process index the batch CLI reads.
+	// Without this, `code list --batch` / `validate-diff --batch` would
+	// only ever see code.core rows — the framework Dispatcher otherwise
+	// runs only inside `daemon serve`. Best-effort: a framework
+	// extraction error must not fail the code.core listing.
+	if log != nil {
+		_ = runFrameworkExtractorsOnce(ctx, ws, store, log)
+	}
+	return nil
+}
+
+// runFrameworkExtractorsOnce builds a one-shot code.framework
+// Dispatcher, runs CatchUp over every File entity currently in the
+// store, and tears it down. This is the batch-mode analogue of the
+// long-lived Dispatcher the daemon-serve loop owns — it makes
+// framework entities available to one-shot CLI reads without a
+// running daemon. The Writer projects each emission into a queryable
+// code_core.Entity row; the Dispatcher's compare-before-emit makes
+// re-runs idempotent.
+func runFrameworkExtractorsOnce(ctx context.Context, ws *daemon.Workspace, store *code_core.Store, log *facts.EventLog) error {
+	cfg, _ := code_framework.LoadConfig(ws.Root)
+	disp, err := code_framework.NewDispatcher(code_framework.DispatcherConfig{
+		Workspace: ws.Root,
+		Facts:     facts.NewEventLogFacts(log, "code.framework"),
+		EventLog:  log,
+		Writer:    code_framework.NewEntityWriter(store),
+		Config:    cfg,
+	})
+	if err != nil {
+		return err
+	}
+	if err := disp.Start(ctx); err != nil {
+		return err
+	}
+	defer func() { _ = disp.Stop(context.Background()) }()
+	paths, err := frameworkCatchUpPaths(ctx, ws, store)
+	if err != nil {
+		return err
+	}
+	return catchUpStable(ctx, disp, paths)
+}
+
+// catchUpStable runs the dispatcher CatchUp twice. The first pass
+// materializes producer entities (events, routes, schemas); the second
+// lets cross-referencing extractors (the test extractor's ContractTest
+// linker reads existing Event/Route rows via LoadKnownRows) bind to
+// producers that a later-ordered file declared. Compare-before-emit
+// makes the second pass a no-op for already-materialized entities, so
+// the only new rows are the cross-references. Two passes suffice — the
+// dependency depth is one (tests → producers); there are no
+// test-references-test chains in the v1 extractor set.
+func catchUpStable(ctx context.Context, disp *code_framework.Dispatcher, paths []string) error {
+	if err := disp.CatchUp(ctx, paths); err != nil {
+		return err
+	}
+	return disp.CatchUp(ctx, paths)
+}
+
+// frameworkCatchUpPaths returns the workspace-relative file paths the
+// framework Dispatcher's CatchUp should replay. It unions:
+//
+//   - every code.core File entity (the indexed source files: Go / TS /
+//     Python — these carry the publisher/handler/test functions); and
+//   - non-source framework files the code.core indexer does NOT track
+//     (schema.prisma, *.sql, *.proto, migration scripts, *.graphql) —
+//     without these the schema / migration / graphql / generated
+//     extractors would never receive a FileChanged for the files they
+//     parse.
+//
+// Source-file ordering (code.core entities first) is preserved so the
+// contract-test linker sees the Event/Route rows a sibling source file
+// produced before its own file is processed.
+func frameworkCatchUpPaths(ctx context.Context, ws *daemon.Workspace, store *code_core.Store) ([]string, error) {
+	var paths []string
+	seen := map[string]struct{}{}
+	add := func(rel string) {
+		if rel == "" {
+			return
+		}
+		if _, dup := seen[rel]; dup {
+			return
+		}
+		seen[rel] = struct{}{}
+		paths = append(paths, rel)
+	}
+
+	// 1. Indexed source files (preserve store order).
+	files, err := store.ListEntities(ctx, code_core.ListFilter{})
+	if err != nil {
+		return nil, err
+	}
+	for _, e := range files {
+		if e.Kind == code_core.KindFile {
+			add(e.Path)
+		}
+	}
+
+	// 2. Non-source framework files via a bounded filesystem walk.
+	_ = filepath.WalkDir(ws.Root, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil //nolint:nilerr // skip unreadable entries, never abort the walk
+		}
+		if d.IsDir() {
+			if frameworkWalkSkipDir(d.Name()) {
+				return fs.SkipDir
+			}
+			return nil
+		}
+		if !frameworkNonSourceFile(d.Name()) {
+			return nil
+		}
+		rel, rerr := filepath.Rel(ws.Root, p)
+		if rerr != nil {
+			return nil
+		}
+		add(filepath.ToSlash(rel))
+		return nil
+	})
+	return paths, nil
+}
+
+// frameworkWalkSkipDir lists directory names the framework file walk
+// skips wholesale — VCS metadata, the workspace's own state dir, and
+// dependency/build output trees that never hold first-party framework
+// declarations.
+func frameworkWalkSkipDir(name string) bool {
+	switch name {
+	case ".git", ".graph-harness", ".scip-index",
+		"node_modules", "vendor", "dist", "build", ".next", "target",
+		"__pycache__", ".venv", "venv", ".idea", ".vscode":
+		return true
+	}
+	return false
+}
+
+// frameworkNonSourceFile reports whether name is a non-source file a
+// framework extractor parses directly (the code.core indexer only
+// tracks .go/.ts/.py, so these would otherwise never reach an
+// extractor). Source files are covered by the code.core File-entity
+// pass in frameworkCatchUpPaths.
+func frameworkNonSourceFile(name string) bool {
+	if name == "schema.prisma" {
+		return true
+	}
+	switch ext := strings.ToLower(filepath.Ext(name)); ext {
+	case ".prisma", ".sql", ".proto", ".graphql", ".graphqls":
+		return true
+	}
+	return false
 }
 
 // codeCoreEventEmitter adapts the kernel facts.EventLog to the
